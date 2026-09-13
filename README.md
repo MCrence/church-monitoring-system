@@ -55,23 +55,8 @@ JWT_SECRET=8bc2525f8aa7caf103d4540aafe39edc1418ed768fe10deed74e32e35108d3687ad01
 AES_KEY=e0f468939d74690dc462449bb56412430fa1dfdae08aaddaa66ca988b643d83b
 ```
 
-## 3. Install packages
 
-In the first PowerShell window:
-
-```powershell
-cd server
-npm install
-```
-
-In the second PowerShell window:
-
-```powershell
-cd client
-npm install
-```
-
-## 4. Run the system
+## 3. Run the system
 
 ### PowerShell window 1: Server
 
@@ -89,7 +74,7 @@ npm run dev -- --host 0.0.0.0
 
 Keep both windows running.
 
-## 5. Open the system
+## 4. Open the system
 
 On the computer, open:
 
