@@ -21,6 +21,26 @@ The **client** is the web page that staff use. The **server** processes login,
 participant data, QR scans, events, and attendance. The **database** stores the
 participant, event, and attendance records.
 
+## Download from GitHub
+
+### Option 1: Download ZIP
+
+1. Open the project repository on GitHub.
+2. Click **Code**.
+3. Click **Download ZIP**.
+4. Extract the ZIP file.
+5. Open PowerShell in the extracted project folder.
+
+### Option 2: Clone with Git
+
+```powershell
+git clone https://github.com/YOUR-USERNAME/church-monitoring-system.git
+cd church-monitoring-system
+```
+
+After downloading the project, follow the database setup and run commands
+below.
+
 ## Requirements
 
 - Node.js and npm
@@ -48,11 +68,11 @@ Create or update `server/.env`:
 ```env
 DB_HOST=127.0.0.1
 DB_PORT=3306
-DB_NAME=church_monitoring_db
+DB_NAME=church_monitoring
 DB_USER=root
-DB_PASSWORD=
-JWT_SECRET=8bc2525f8aa7caf103d4540aafe39edc1418ed768fe10deed74e32e35108d3687ad01a3da4931a9fcd16760064ea4b82
-AES_KEY=e0f468939d74690dc462449bb56412430fa1dfdae08aaddaa66ca988b643d83b
+DB_PASSWORD=your-mysql-password
+JWT_SECRET=your-secret-key
+AES_KEY=your-64-character-hex-key
 ```
 
 
