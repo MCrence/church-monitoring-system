@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.log
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+server/.env
+
+# Private HTTPS keys and local certificates
+server/certs/*.key
+server/certs/*.crt
+
+# Generated QR uploads
+server/uploads/
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
