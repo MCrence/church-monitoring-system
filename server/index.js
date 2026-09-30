@@ -398,7 +398,6 @@ cron.schedule('0 2 * * *', () => refreshRiskScores().catch(console.error));
 const port = Number(process.env.PORT || 3000);
 const certPath = process.env.HTTPS_CERT_PATH;
 const keyPath = process.env.HTTPS_KEY_PATH;
-if (process.env.NODE_ENV === 'production' && (!certPath || !keyPath)) throw new Error('HTTPS_CERT_PATH and HTTPS_KEY_PATH are required in production');
 const server = certPath && keyPath && fs.existsSync(certPath) && fs.existsSync(keyPath)
   ? https.createServer({ cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath), minVersion: process.env.HTTPS_MIN_VERSION || 'TLSv1.3' }, app)
   : http.createServer(app);
