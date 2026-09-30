@@ -116,6 +116,7 @@ function Login({ done }) {
   );
 }
 function Header({ user, page, go, logout }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   let links = [
     ["dashboard", "Overview"],
     ["participants", "Participants"],
@@ -132,12 +133,30 @@ function Header({ user, page, go, logout }) {
         <img src="/church-logo.png" alt="" />
         <span>FMC FIELD CARE</span>
       </button>
-      <nav className="nav-pills">
+      <button
+        className="mobile-menu-toggle"
+        type="button"
+        aria-label={menuOpen ? "Close navigation menu" : "Open navigation menu"}
+        aria-expanded={menuOpen}
+        aria-controls="primary-navigation"
+        onClick={() => setMenuOpen((open) => !open)}
+      >
+        <span />
+        <span />
+        <span />
+      </button>
+      <nav
+        id="primary-navigation"
+        className={`nav-pills${menuOpen ? " is-open" : ""}`}
+      >
         {links.map(([k, l]) => (
           <button
             key={k}
             className={page === k ? "active" : ""}
-            onClick={() => go(k)}
+            onClick={() => {
+              go(k);
+              setMenuOpen(false);
+            }}
           >
             {l}
           </button>
