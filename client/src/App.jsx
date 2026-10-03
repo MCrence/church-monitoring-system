@@ -117,6 +117,7 @@ function Login({ done }) {
 }
 function Header({ user, page, go, logout }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const isAdmin = String(user.role).toLowerCase() === "admin";
   let links = [
     ["dashboard", "Overview"],
     ["participants", "Participants"],
@@ -127,9 +128,6 @@ function Header({ user, page, go, logout }) {
     ["reports", "Reports"],
     ["portal", "Child portal"],
   ];
-  if (String(user.role).toLowerCase() === "admin") {
-    links.push(["account", "Account settings"]);
-  }
   return (
     <header className="topbar">
       <button className="brand-button" onClick={() => go("dashboard")}>
@@ -167,7 +165,18 @@ function Header({ user, page, go, logout }) {
       </nav>
       <div className="user-menu">
         <span className="avatar">{user.username?.[0]?.toUpperCase()}</span>
-        <span className="d-none d-md-inline">{user.role}</span>
+        {isAdmin ? (
+          <button
+            className="account-trigger d-none d-md-inline"
+            type="button"
+            aria-label="Open account settings"
+            onClick={() => go("account")}
+          >
+            {user.username}
+          </button>
+        ) : (
+          <span className="d-none d-md-inline">{user.username}</span>
+        )}
         <button className="btn btn-sm btn-outline-secondary" onClick={logout}>
           Sign out
         </button>
