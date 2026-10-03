@@ -73,8 +73,32 @@ DB_USER=root
 DB_PASSWORD=your-mysql-password
 JWT_SECRET=your-secret-key
 AES_KEY=your-64-character-hex-key
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=your-smtp-username
+SMTP_PASSWORD=your-smtp-password
+SMTP_FROM=FMC Field Care <verified-sender@example.com>
 ```
 
+Configure SMTP with credentials from your email provider. For port `465`, set
+`SMTP_SECURE=true`; for port `587`, use `SMTP_SECURE=false`. The `SMTP_FROM`
+address must be permitted by the provider. SMTP settings are required to send
+admin email verification codes; credential changes do not require email
+delivery.
+
+The account settings feature requires unique usernames and email addresses.
+Fresh database imports include these indexes. For an existing database, first
+resolve any duplicate usernames or email addresses, then run:
+
+```sql
+ALTER TABLE users
+  ADD UNIQUE KEY uq_users_username (username),
+  ADD UNIQUE KEY uq_users_email (email);
+```
+
+Email-change codes are sent to the new address, expire after 10 minutes, and
+are limited to five verification attempts.
 
 ## 3. Run the system
 

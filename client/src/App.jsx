@@ -127,6 +127,9 @@ function Header({ user, page, go, logout }) {
     ["reports", "Reports"],
     ["portal", "Child portal"],
   ];
+  if (String(user.role).toLowerCase() === "admin") {
+    links.push(["account", "Account settings"]);
+  }
   return (
     <header className="topbar">
       <button className="brand-button" onClick={() => go("dashboard")}>
@@ -170,6 +173,252 @@ function Header({ user, page, go, logout }) {
         </button>
       </div>
     </header>
+  );
+}
+function AccountSettings({ onUserUpdated }) {
+  const [account, setAccount] = useState(null);
+  const [username, setUsername] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [accountMessage, setAccountMessage] = useState("");
+  const [accountError, setAccountError] = useState("");
+  const [email, setEmail] = useState("");
+  const [emailCurrentPassword, setEmailCurrentPassword] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
+  const [emailMessage, setEmailMessage] = useState("");
+  const [emailError, setEmailError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    apiCall("/account")
+      .then(({ user: profile }) => {
+        setAccount(profile);
+        setUsername(profile.username);
+        setEmail(profile.email);
+      })
+      .catch((error) => setAccountError(error.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const updateCredentials = async (event) => {
+    event.preventDefault();
+    setAccountMessage("");
+    setAccountError("");
+    if (newPassword && newPassword !== confirmPassword) {
+      setAccountError("New password and confirmation do not match.");
+      return;
+    }
+    try {
+      const result = await apiCall("/account", {
+        method: "PUT",
+        body: JSON.stringify({ username, currentPassword, newPassword }),
+      });
+      localStorage.token = result.token;
+      localStorage.user = JSON.stringify(result.user);
+      onUserUpdated(result.user);
+      setAccount(result.user);
+      setUsername(result.user.username);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setAccountMessage("Account credentials updated.");
+    } catch (error) {
+      setAccountError(error.message);
+    }
+  };
+
+  const requestEmailCode = async (event) => {
+    event.preventDefault();
+    setEmailMessage("");
+    setEmailError("");
+    try {
+      const result = await apiCall("/account/email/request", {
+        method: "POST",
+        body: JSON.stringify({ email, currentPassword: emailCurrentPassword }),
+      });
+      setCodeSent(true);
+      setVerificationCode("");
+      setEmailMessage(result.message);
+    } catch (error) {
+      setEmailError(error.message);
+    }
+  };
+
+  const verifyEmailCode = async (event) => {
+    event.preventDefault();
+    setEmailMessage("");
+    setEmailError("");
+    try {
+      const result = await apiCall("/account/email/verify", {
+        method: "POST",
+        body: JSON.stringify({ email, code: verificationCode }),
+      });
+      localStorage.user = JSON.stringify(result.user);
+      onUserUpdated(result.user);
+      setAccount(result.user);
+      setEmail(result.user.email);
+      setEmailCurrentPassword("");
+      setVerificationCode("");
+      setCodeSent(false);
+      setEmailMessage("Email address updated successfully.");
+    } catch (error) {
+      setEmailError(error.message);
+    }
+  };
+
+  return (
+    <>
+      <Title
+        e="ADMIN ACCOUNT"
+        t="Manage your account."
+        d="Update your username, password, and verified email address."
+      />
+      {loading ? (
+        <p role="status">Loading account details...</p>
+      ) : (
+        <div className="row g-4">
+          <section className="col-12 col-lg-6">
+            <div className="surface form-surface account-panel">
+              <h2>Username and password</h2>
+              <form className="vstack gap-3" onSubmit={updateCredentials}>
+                <div>
+                  <label className="form-label" htmlFor="account-username">Username</label>
+                  <input
+                    id="account-username"
+                    className="form-control"
+                    autoComplete="username"
+                    maxLength={100}
+                    required
+                    value={username}
+                    onChange={(event) => setUsername(event.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="form-label" htmlFor="account-current-password">Current password</label>
+                  <input
+                    id="account-current-password"
+                    className="form-control"
+                    type="password"
+                    autoComplete="current-password"
+                    required
+                    value={currentPassword}
+                    onChange={(event) => setCurrentPassword(event.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="form-label" htmlFor="account-new-password">New password (optional)</label>
+                  <input
+                    id="account-new-password"
+                    className="form-control"
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={8}
+                    maxLength={72}
+                    value={newPassword}
+                    onChange={(event) => setNewPassword(event.target.value)}
+                  />
+                  <small className="text-secondary">Leave blank if you are only changing your username.</small>
+                </div>
+                {newPassword && (
+                  <div>
+                    <label className="form-label" htmlFor="account-confirm-password">Confirm new password</label>
+                    <input
+                      id="account-confirm-password"
+                      className="form-control"
+                      type="password"
+                      autoComplete="new-password"
+                      required
+                      value={confirmPassword}
+                      onChange={(event) => setConfirmPassword(event.target.value)}
+                    />
+                  </div>
+                )}
+                {accountError && <div className="alert alert-danger mb-0">{accountError}</div>}
+                {accountMessage && <div className="alert alert-success mb-0">{accountMessage}</div>}
+                <button className="btn btn-dark align-self-start" type="submit">
+                  Save credentials
+                </button>
+              </form>
+            </div>
+          </section>
+          <section className="col-12 col-lg-6">
+            <div className="surface form-surface account-panel">
+              <h2>Change email</h2>
+              <p className="text-secondary">
+                A verification code will be sent to the new address. The email changes only after you enter that code.
+              </p>
+              <form
+                className="vstack gap-3"
+                onSubmit={codeSent ? verifyEmailCode : requestEmailCode}
+              >
+                <div>
+                  <label className="form-label" htmlFor="account-email">New email</label>
+                  <input
+                    id="account-email"
+                    className="form-control"
+                    type="email"
+                    autoComplete="email"
+                    maxLength={150}
+                    required
+                    value={email}
+                    onChange={(event) => {
+                      setEmail(event.target.value);
+                      setCodeSent(false);
+                      setVerificationCode("");
+                    }}
+                  />
+                  {account?.email && <small className="text-secondary">Current email: {account.email}</small>}
+                </div>
+                <div>
+                  <label className="form-label" htmlFor="account-email-current-password">Current password</label>
+                  <input
+                    id="account-email-current-password"
+                    className="form-control"
+                    type="password"
+                    autoComplete="current-password"
+                    required
+                    value={emailCurrentPassword}
+                    onChange={(event) => setEmailCurrentPassword(event.target.value)}
+                  />
+                </div>
+                {codeSent && (
+                  <div>
+                    <label className="form-label" htmlFor="account-email-code">Verification code</label>
+                    <input
+                      id="account-email-code"
+                      className="form-control"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      pattern="[0-9]{6}"
+                      maxLength={6}
+                      required
+                      value={verificationCode}
+                      onChange={(event) => setVerificationCode(event.target.value)}
+                    />
+                  </div>
+                )}
+                {emailError && <div className="alert alert-danger mb-0">{emailError}</div>}
+                {emailMessage && <div className="alert alert-success mb-0">{emailMessage}</div>}
+                {!codeSent ? (
+                  <button className="btn btn-dark align-self-start" type="submit">
+                    Send verification code
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn-dark align-self-start"
+                    type="submit"
+                  >
+                    Verify and update email
+                  </button>
+                )}
+              </form>
+            </div>
+          </section>
+        </div>
+      )}
+    </>
   );
 }
 const Field = ({ label, ...p }) => (
@@ -1262,6 +1511,9 @@ function App() {
     analytics: <Analytics />,
     reports: <Reports />,
   };
+  if (String(user.role).toLowerCase() === "admin") {
+    pages.account = <AccountSettings onUserUpdated={setUser} />;
+  }
   return (
     <div className="app-shell">
       <Header

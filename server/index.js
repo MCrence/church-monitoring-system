@@ -10,6 +10,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
 const QRCode = require('qrcode');
 const cron = require('node-cron');
 const PDFDocument = require('pdfkit');
@@ -50,6 +51,8 @@ const eventsTableReady = pool.query(`
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 `);
 const sessions = new Map();
+const revokedTokens = new Map();
+const emailChallenges = new Map();
 const uploadsDir = path.join(__dirname, 'uploads', 'qr_codes');
 fs.mkdirSync(uploadsDir, { recursive: true });
 
@@ -75,6 +78,11 @@ function authenticate(req, res, next) {
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
     const now = Date.now();
+    const revokedUntil = revokedTokens.get(token);
+    if (revokedUntil) {
+      if (revokedUntil > now) return res.status(401).json({ error: 'Session expired' });
+      revokedTokens.delete(token);
+    }
     const lastActivity = sessions.get(token) || now;
     if (now - lastActivity > 15 * 60 * 1000) {
       sessions.delete(token);
@@ -96,6 +104,18 @@ function checkRole(allowedRoles) {
     }
     next();
   };
+}
+
+function accountView(user) {
+  return { id: user.id, username: user.username, email: user.email, role: user.role };
+}
+
+function issueToken(user) {
+  return jwt.sign(
+    { id: user.id, username: user.username, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: '15m', algorithm: 'HS256' },
+  );
 }
 
 function participantView(row) {
@@ -209,11 +229,198 @@ app.post('/api/auth/login', async (req, res, next) => {
     const [rows] = await pool.execute('SELECT * FROM users WHERE username = ? OR email = ? LIMIT 1', [req.body.username, req.body.username]);
     const user = rows[0];
     if (!user || user.status !== 'active' || !(await bcrypt.compare(req.body.password || '', user.password_hash))) return res.status(401).json({ error: 'Invalid credentials' });
-    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, process.env.JWT_SECRET, { expiresIn: '15m', algorithm: 'HS256' });
+    const token = issueToken(user);
     sessions.set(token, Date.now());
     await pool.execute('UPDATE users SET last_login_at = NOW() WHERE id = ?', [user.id]);
-    res.json({ token, user: { id: user.id, username: user.username, role: user.role } });
+    res.json({ token, user: accountView(user) });
   } catch (error) { next(error); }
+});
+
+app.get('/api/account', authenticate, checkRole(['Admin']), async (req, res, next) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT id, username, email, role FROM users WHERE id = ? AND status = ? LIMIT 1',
+      [req.user.id, 'active'],
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Account not found' });
+    res.json({ user: accountView(rows[0]) });
+  } catch (error) { next(error); }
+});
+
+app.put('/api/account', authenticate, checkRole(['Admin']), async (req, res, next) => {
+  try {
+    const username = String(req.body.username || '').trim();
+    const currentPassword = String(req.body.currentPassword || '');
+    const newPassword = String(req.body.newPassword || '');
+    if (!username || username.length > 100) {
+      return res.status(400).json({ error: 'Username must be between 1 and 100 characters' });
+    }
+    if (newPassword && (Buffer.byteLength(newPassword, 'utf8') < 8 || Buffer.byteLength(newPassword, 'utf8') > 72)) {
+      return res.status(400).json({ error: 'New password must be between 8 and 72 bytes' });
+    }
+    if (!currentPassword) return res.status(400).json({ error: 'Current password is required' });
+
+    const [rows] = await pool.execute(
+      'SELECT id, username, email, role, password_hash FROM users WHERE id = ? AND status = ? LIMIT 1',
+      [req.user.id, 'active'],
+    );
+    const account = rows[0];
+    if (!account) return res.status(404).json({ error: 'Account not found' });
+    if (!(await bcrypt.compare(currentPassword, account.password_hash))) {
+      return res.status(403).json({ error: 'Current password is incorrect' });
+    }
+    if (username !== account.username) {
+      const [existing] = await pool.execute(
+        'SELECT id FROM users WHERE username = ? AND id <> ? LIMIT 1',
+        [username, account.id],
+      );
+      if (existing.length) return res.status(409).json({ error: 'Username is already in use' });
+    }
+    if (username === account.username && !newPassword) {
+      return res.status(400).json({ error: 'Enter a new username or password' });
+    }
+
+    const updates = [];
+    const values = [];
+    if (username !== account.username) {
+      updates.push('username = ?');
+      values.push(username);
+    }
+    if (newPassword) {
+      updates.push('password_hash = ?');
+      values.push(await bcrypt.hash(newPassword, 12));
+    }
+    updates.push('updated_at = NOW()');
+    values.push(account.id);
+    await pool.execute(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, values);
+
+    const updatedUser = { ...account, username };
+    for (const token of sessions.keys()) {
+      if (Number(jwt.decode(token)?.id) === Number(account.id)) {
+        sessions.delete(token);
+        revokedTokens.set(token, Date.now() + 15 * 60_000);
+      }
+    }
+    const token = issueToken(updatedUser);
+    sessions.set(token, Date.now());
+    res.json({ token, user: accountView(updatedUser) });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Username is already in use' });
+    next(error);
+  }
+});
+
+app.post('/api/account/email/request', authenticate, checkRole(['Admin']), async (req, res, next) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const currentPassword = String(req.body.currentPassword || '');
+    if (email.length > 150 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Enter a valid email address' });
+    }
+    if (!currentPassword) return res.status(400).json({ error: 'Current password is required' });
+
+    const [rows] = await pool.execute(
+      'SELECT id, email, password_hash FROM users WHERE id = ? AND status = ? LIMIT 1',
+      [req.user.id, 'active'],
+    );
+    const account = rows[0];
+    if (!account) return res.status(404).json({ error: 'Account not found' });
+    if (!(await bcrypt.compare(currentPassword, account.password_hash))) {
+      return res.status(403).json({ error: 'Current password is incorrect' });
+    }
+    if (email === String(account.email).toLowerCase()) {
+      return res.status(400).json({ error: 'That is already your account email' });
+    }
+    const [existing] = await pool.execute('SELECT id FROM users WHERE email = ? LIMIT 1', [email]);
+    if (existing.length) return res.status(409).json({ error: 'Email address is already in use' });
+
+    const smtpHost = process.env.SMTP_HOST;
+    const smtpPort = Number(process.env.SMTP_PORT);
+    const smtpFrom = process.env.SMTP_FROM;
+    const smtpUser = process.env.SMTP_USER;
+    const smtpPassword = process.env.SMTP_PASSWORD;
+    if (!smtpHost || !Number.isInteger(smtpPort) || !smtpFrom || Boolean(smtpUser) !== Boolean(smtpPassword)) {
+      return res.status(503).json({ error: 'Email verification is not configured. Set the SMTP environment variables and try again.' });
+    }
+
+    const previous = emailChallenges.get(Number(account.id));
+    if (previous && Date.now() - previous.requestedAt < 60_000) {
+      return res.status(429).json({ error: 'Please wait before requesting another verification code' });
+    }
+    const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+    const userId = Number(account.id);
+    const challenge = {
+      email,
+      codeHash: crypto.createHmac('sha256', process.env.JWT_SECRET).update(code).digest('hex'),
+      expiresAt: Date.now() + 10 * 60_000,
+      requestedAt: Date.now(),
+      attempts: 0,
+    };
+    emailChallenges.set(userId, challenge);
+    const transporter = nodemailer.createTransport({
+      host: smtpHost,
+      port: smtpPort,
+      secure: process.env.SMTP_SECURE === 'true' || smtpPort === 465,
+      ...(smtpUser ? { auth: { user: smtpUser, pass: smtpPassword } } : {}),
+    });
+    try {
+      await transporter.sendMail({
+        from: smtpFrom,
+        to: email,
+        subject: 'Verify your FMC Field Care email address',
+        text: `Your email verification code is ${code}. It expires in 10 minutes.`,
+      });
+    } catch (error) {
+      emailChallenges.delete(userId);
+      console.error('Failed to send account email verification code:', error);
+      return res.status(502).json({ error: 'Could not send the verification email. Check the SMTP settings and try again.' });
+    }
+    res.json({ message: 'Verification code sent to the new email address' });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/account/email/verify', authenticate, checkRole(['Admin']), async (req, res, next) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const code = String(req.body.code || '').trim();
+    const userId = Number(req.user.id);
+    const challenge = emailChallenges.get(userId);
+    if (!challenge || challenge.email !== email || challenge.expiresAt <= Date.now()) {
+      emailChallenges.delete(userId);
+      return res.status(400).json({ error: 'Verification code is invalid or expired. Request a new code.' });
+    }
+    if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter the 6-digit verification code' });
+
+    const codeHash = crypto.createHmac('sha256', process.env.JWT_SECRET).update(code).digest('hex');
+    if (!crypto.timingSafeEqual(Buffer.from(codeHash), Buffer.from(challenge.codeHash))) {
+      challenge.attempts += 1;
+      if (challenge.attempts >= 5) emailChallenges.delete(userId);
+      return res.status(400).json({
+        error: challenge.attempts >= 5
+          ? 'Too many incorrect codes. Request a new code.'
+          : 'Verification code is incorrect',
+      });
+    }
+
+    const [existing] = await pool.execute(
+      'SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1',
+      [email, userId],
+    );
+    if (existing.length) {
+      emailChallenges.delete(userId);
+      return res.status(409).json({ error: 'Email address is already in use' });
+    }
+    await pool.execute('UPDATE users SET email = ?, updated_at = NOW() WHERE id = ?', [email, userId]);
+    emailChallenges.delete(userId);
+    const [rows] = await pool.execute(
+      'SELECT id, username, email, role FROM users WHERE id = ? LIMIT 1',
+      [userId],
+    );
+    res.json({ user: accountView(rows[0]) });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email address is already in use' });
+    next(error);
+  }
 });
 
 app.post('/api/participants', authenticate, checkRole(['Admin', 'Church Administrator', 'Program Coordinator']), async (req, res, next) => {

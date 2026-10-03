@@ -1437,7 +1437,9 @@ ALTER TABLE `system_logs`
 -- Indexes for table `users`
 --
 ALTER TABLE `users`
-  ADD PRIMARY KEY (`id`);
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `uq_users_username` (`username`),
+  ADD UNIQUE KEY `uq_users_email` (`email`);
 
 --
 -- AUTO_INCREMENT for dumped tables
