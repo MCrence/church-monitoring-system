@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Html5Qrcode } from "html5-qrcode";
 import { Chart, registerables } from "chart.js";
 import { queueCheckin, syncQueuedCheckins } from "./offlineCheckinQueue";
+import { Analytics as VercelAnalytics } from "@vercel/analytics/react";
 import "./App.css";
 Chart.register(...registerables);
 
@@ -3350,6 +3351,7 @@ function App() {
       <>
         <PublicHome onLogin={completeLogin} />
         {authTransition && <LoadingScreen message={authTransition} />}
+      <VercelAnalytics />
       </>
     );
   }
@@ -3408,6 +3410,7 @@ function App() {
         </div>
       </main>
       {authTransition && <LoadingScreen message={authTransition} />}
+      <VercelAnalytics />
     </div>
   );
 }
