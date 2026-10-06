@@ -1951,7 +1951,7 @@ function Scanner({ portal = false }) {
   const checkinBusy = useRef(false);
 
   useEffect(() => {
-    if (!portal) apiCall("/events").then(setEvents).catch(() => {});
+    if (!portal) apiCall("/checkin/events").then(setEvents).catch(() => {});
   }, [portal]);
   const selectedEvent = events.find((item) => String(item.id) === event);
   const eventName = selectedEvent?.name || "Sunday service";

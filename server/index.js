@@ -586,6 +586,16 @@ app.get('/api/events', authenticate, checkPermission('events:view'), async (req,
   } catch (error) { next(error); }
 });
 
+app.get('/api/checkin/events', authenticate, checkPermission('checkin:record'), async (req, res, next) => {
+  try {
+    await eventsTableReady;
+    const [rows] = await pool.query(
+      'SELECT id, name, starts_at, location FROM events ORDER BY starts_at DESC',
+    );
+    res.json(rows);
+  } catch (error) { next(error); }
+});
+
 app.post('/api/events', authenticate, checkPermission('events:manage'), async (req, res, next) => {
   try {
     await eventPhotosTableReady;
