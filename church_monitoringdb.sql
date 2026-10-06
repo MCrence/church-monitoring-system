@@ -178,6 +178,14 @@ CREATE TABLE `participants` (
   `sponsorship_type` varchar(64) DEFAULT NULL,
   `enrollment_date` date DEFAULT NULL,
   `program_affiliation_encrypted` text DEFAULT NULL,
+  `education_level` varchar(50) DEFAULT NULL,
+  `grade_level` varchar(50) DEFAULT NULL,
+  `program_course_encrypted` text DEFAULT NULL,
+  `first_name_encrypted` text DEFAULT NULL,
+  `middle_name_encrypted` text DEFAULT NULL,
+  `last_name_encrypted` text DEFAULT NULL,
+  `sponsorship_lifecycle` varchar(24) NOT NULL DEFAULT 'active',
+  `monthly_allowance` decimal(10,2) NOT NULL DEFAULT 0.00,
   `letters_sent_encrypted` longtext DEFAULT NULL,
   `letters_received_encrypted` longtext DEFAULT NULL,
   `last_letter_date` date DEFAULT NULL
@@ -1341,6 +1349,7 @@ CREATE TABLE `users` (
   `email` varchar(150) NOT NULL,
   `password_hash` varchar(255) NOT NULL,
   `role` varchar(50) NOT NULL,
+  `access_permissions` text DEFAULT NULL,
   `status` varchar(30) NOT NULL,
   `last_login_at` datetime DEFAULT NULL,
   `created_at` datetime DEFAULT NULL,
@@ -1352,7 +1361,7 @@ CREATE TABLE `users` (
 --
 
 INSERT INTO `users` (`id`, `username`, `email`, `password_hash`, `role`, `status`, `last_login_at`, `created_at`, `updated_at`) VALUES
-(1, 'admin', 'admin@gmail.com', '$2b$12$NeGH3QLnIJnFiDJ3nPGvq.OfEdyS7nJ2GVeAWmTxsBtXrI7XGpy8a', 'Admin', 'active', '2026-09-14 00:52:57', '2026-07-07 14:45:01', '2026-08-25 19:39:46');
+(1, 'admin', 'admin@gmail.com', '$2b$12$NeGH3QLnIJnFiDJ3nPGvq.OfEdyS7nJ2GVeAWmTxsBtXrI7XGpy8a', 'System Administrator', 'active', '2026-09-14 00:52:57', '2026-07-07 14:45:01', '2026-08-25 19:39:46');
 
 --
 -- Indexes for dumped tables
@@ -1371,6 +1380,23 @@ ALTER TABLE `events`
   ADD PRIMARY KEY (`id`),
   ADD UNIQUE KEY `uq_events_name_starts_at` (`name`,`starts_at`),
   ADD KEY `idx_events_starts_at` (`starts_at`);
+
+--
+-- Table structure for table `event_photos`
+--
+
+CREATE TABLE `event_photos` (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `event_id` int(10) UNSIGNED NOT NULL,
+  `file_name` varchar(255) NOT NULL,
+  `mime_type` varchar(30) NOT NULL,
+  `photo_data` longblob NOT NULL,
+  `created_by` int(10) UNSIGNED DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_event_photos_event` (`event_id`,`id`),
+  CONSTRAINT `fk_event_photos_event` FOREIGN KEY (`event_id`) REFERENCES `events` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Indexes for table `growth_updates`
@@ -1474,6 +1500,51 @@ ALTER TABLE `migrations`
 --
 ALTER TABLE `participants`
   MODIFY `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=7;
+
+--
+-- Sponsorship allowance proofs and child letter threads
+--
+CREATE TABLE `sponsorship_disbursements` (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `participant_id` int(11) UNSIGNED NOT NULL,
+  `amount` decimal(10,2) NOT NULL,
+  `disbursed_on` date NOT NULL,
+  `description` varchar(255) DEFAULT NULL,
+  `receipt_mime` varchar(100) DEFAULT NULL,
+  `receipt_data` longblob DEFAULT NULL,
+  `created_by` int(11) UNSIGNED DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_sponsorship_disbursements_participant` (`participant_id`,`disbursed_on`),
+  CONSTRAINT `fk_sponsorship_disbursements_participant`
+    FOREIGN KEY (`participant_id`) REFERENCES `participants` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `sponsorship_letter_threads` (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `participant_id` int(11) UNSIGNED NOT NULL,
+  `subject` varchar(160) NOT NULL,
+  `status` varchar(24) NOT NULL DEFAULT 'open',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_sponsorship_letter_threads_child` (`participant_id`,`updated_at`),
+  CONSTRAINT `fk_sponsorship_letter_threads_participant`
+    FOREIGN KEY (`participant_id`) REFERENCES `participants` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `sponsorship_letter_messages` (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `thread_id` bigint(20) UNSIGNED NOT NULL,
+  `sender_type` varchar(16) NOT NULL,
+  `sender_id` int(11) UNSIGNED DEFAULT NULL,
+  `message` text NOT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_sponsorship_letter_messages_thread` (`thread_id`,`created_at`),
+  CONSTRAINT `fk_sponsorship_letter_messages_thread`
+    FOREIGN KEY (`thread_id`) REFERENCES `sponsorship_letter_threads` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- AUTO_INCREMENT for table `predictive_risk_scores`

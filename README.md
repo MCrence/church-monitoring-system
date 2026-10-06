@@ -15,7 +15,13 @@ schedules, check-in records, and attendance reports.
 5. The server verifies the QR code and records the attendance.
 6. The system prevents the same participant from being checked in twice for
    the same event on the same day.
-7. Staff can view attendance from the event page and dashboard.
+7. Staff can add up to five JPG, PNG, or WebP photos to an event when creating
+   it or from that event's attendance view. Photos are stored with their event.
+8. Staff can view event attendance and its photo gallery in the event details
+   modal.
+
+Participant registration is launched from the Participants directory in a
+modal; there is no separate Register navigation page.
 
 The **client** is the web page that staff use. The **server** processes login,
 participant data, QR scans, events, and attendance. The **database** stores the
@@ -99,6 +105,97 @@ ALTER TABLE users
 
 Email-change codes are sent to the new address, expire after 10 minutes, and
 are limited to five verification attempts.
+
+## Role-based access
+
+The application shows pages and actions based on the signed-in user's role.
+The server also checks permissions; hiding a page in the client is not the
+security boundary.
+
+| Role | Access |
+| --- | --- |
+| System Administrator | All staff modules, staff account registration and permission management, audit history, and personal account settings |
+| Church Administrator | Personal account settings and the modules individually assigned by a System Administrator, including optional sponsored-child care access |
+
+Sponsored Child and Goer are participant types, not staff login roles.
+Participants do not receive staff accounts through participant registration. Only
+a System Administrator can register staff accounts. New staff accounts receive
+the Church Administrator role; the System Administrator selects access to the
+dashboard, participant viewing/management, event viewing/management, check-in,
+analytics, reports, and the participant QR portal. Management permission also
+grants the related view permission. System Administrators can later update
+permissions or deactivate/reactivate a staff account. A staff account cannot
+grant itself more access or manage other accounts.
+
+Existing Church Administrator accounts with no saved permission list retain
+their prior access for compatibility. New permission selections are enforced by
+the server as well as reflected in the navigation.
+
+## Sponsored-child care
+
+The Sponsored care staff module organizes registered Sponsored Children by
+lifecycle: New, Active, Deceased, or Graduated. Newly registered children start
+as New; existing records are preserved as Active unless staff updates them.
+Graduated marks a child who has exited sponsorship. These lifecycle changes do
+not delete the participant or revoke their QR code.
+
+Staff with View sponsored care permission can review lifecycle, monthly
+allowance, past disbursements, receipt proofs, and child letter threads. Staff
+with Manage sponsored care permission can also update lifecycle and allowance,
+record an allowance or gift with a JPG, PNG, or PDF receipt proof (up to 4 MB),
+reply to letters, and update letter status. Receipt proof files are stored in
+the database and are not served from the public uploads directory.
+
+Guardians use the child's active QR code and passcode to view that child's
+allowance and gift history and open receipt proofs. They can create letter
+threads and reply to open threads; staff replies and status updates appear in
+the same thread. Public APIs re-verify the QR/passcode for each request and
+guardians cannot access another child's records. Public proof uploads accept
+only JPG, PNG, or PDF files, limited to 4 MB.
+
+## Public participant portals
+
+The public home page provides separate entry points for staff sign-in, Sponsored
+Child guardian sponsorship-status checks, and Goer profile/attendance access.
+Guardian checks require both an active Sponsored Child QR code and the child's
+passcode; failed attempts for a QR code are temporarily locked after five
+failures. Goers use their own active QR code to view only their name, participant
+ID, and up to 20 recent attendance entries. These public responses do not
+include contact, medical, or sponsor details. Treat participant QR codes as
+private credentials and revoke a code if it is lost or shared.
+
+On server startup, legacy Admin accounts are changed to System Administrator.
+Program Coordinator and Check-in Volunteer accounts are retained but changed
+to inactive Church Administrator accounts; reactivate them only after
+reviewing who should have staff access. Existing login sessions for inactive
+accounts are rejected.
+
+## Sponsored-child qualification
+
+Sponsored-child registration and edits require a date of birth proving the
+participant is 6 through 22 years old, inclusive, and an education level:
+Elementary, Junior High School, Senior High School, or College. A college
+grade is selected from Grades 1–6, Junior High from Grades 7–10, Senior High
+from Grades 11–12, and College from Years 1–6. A college program/course is
+required for College. Goer records are not subject to these age and education rules. Existing participant data is preserved; the new
+qualification is validated when creating or editing a sponsored-child record.
+Education course data and each name part are encrypted in the database; the
+education level and grade/year are stored as non-sensitive classification data.
+Participant registration and editing use required first and last names plus
+an optional middle name. Existing full names remain intact; when editing a
+legacy record, the form initially separates its first word, middle words, and
+last word, so review the split and correct it if the name has multiple words
+in its first or last part.
+
+## Audit history
+
+The server creates an `audit_logs` table automatically when it starts. System
+Administrators
+can open **Audit history** to review account credential/email changes,
+participant creation/updates/deletion, event creation, and recorded check-ins.
+Entries contain the actor, role, action, record reference, timestamp, and only
+field names or event names where applicable; passwords and participant field
+values are not recorded.
 
 ## 3. Run the system
 
