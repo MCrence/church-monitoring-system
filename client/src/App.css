@@ -404,3 +404,19 @@
   .event-photo-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   .event-photo-grid img{height:120px}
 }
+.guardian-letter-form{padding:0;background:transparent}
+.sponsor-letter-paper{overflow:hidden;padding:clamp(16px,3vw,30px);border:8px solid transparent;border-radius:13px;background:linear-gradient(#fff,#fff) padding-box,repeating-linear-gradient(90deg,#7fc9d5 0 16px,#ed9fa8 16px 32px,#f0d878 32px 48px,#9bcf83 48px 64px,#b8a2d4 64px 80px) border-box;box-shadow:0 10px 26px rgba(23,55,91,.08)}
+.sponsor-letter-paper-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:16px;border-bottom:1px solid #d9e3e8}
+.sponsor-letter-recipient,.sponsor-letter-date{display:grid;gap:4px;color:#50677b;font-size:12px}
+.sponsor-letter-recipient strong{color:#153d60;font-size:15px}
+.sponsor-letter-date{text-align:right}
+.sponsor-letter-date span{color:#8293a0;font-size:11px}
+.sponsor-letter-paper-title{padding:18px 0 12px}
+.sponsor-letter-paper-title h3{margin:0;color:#4e9eaa;font:600 clamp(19px,3vw,26px)/1.2 'Space Grotesk'}
+.sponsor-letter-paper-title p{margin:3px 0 0;color:#788b98;font-size:11px}
+.sponsor-letter-subject{margin-bottom:14px}
+.sponsor-letter-subject .form-label,.sponsor-letter-writing .form-label{margin-bottom:5px}
+.sponsor-letter-message.form-control{min-height:260px;padding:0 10px;border-color:#d9e3e8;border-radius:4px;background-color:#fff;background-image:repeating-linear-gradient(to bottom,transparent 0,transparent calc(2rem - 1px),#d9e3e8 calc(2rem - 1px),#d9e3e8 2rem);color:#193a5d;font-size:14px;line-height:2rem;resize:vertical}
+.sponsor-letter-message.form-control:focus{background-image:repeating-linear-gradient(to bottom,transparent 0,transparent calc(2rem - 1px),#b9d1df calc(2rem - 1px),#b9d1df 2rem)}
+.sponsor-letter-send{margin-top:12px}
+@media(max-width:480px){.sponsor-letter-paper{padding:14px 12px;border-width:6px}.sponsor-letter-paper-header{gap:10px}.sponsor-letter-recipient span{overflow-wrap:anywhere}.sponsor-letter-message.form-control{min-height:230px}}

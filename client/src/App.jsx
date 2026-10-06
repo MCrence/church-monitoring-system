@@ -1927,11 +1927,44 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
             </div>
           )}
           <form className="guardian-letter-form" onSubmit={sendLetter}>
-            {(!selectedThread || selectedThread.status === "closed") && (
-              <div><label className="form-label" htmlFor="guardian-letter-subject">Subject</label><input id="guardian-letter-subject" className="form-control" maxLength={160} required value={subject} onChange={(event) => setSubject(event.target.value)} placeholder="What would you like to ask?" /></div>
-            )}
-            <div><label className="form-label" htmlFor="guardian-letter-message">{selectedThread && selectedThread.status !== "closed" ? "Reply" : "Message"}</label><textarea id="guardian-letter-message" className="form-control" rows="4" maxLength={5000} required value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Write your message to the church team" /></div>
-            <button className="btn btn-dark" disabled={sending}>{sending ? "Sending…" : selectedThread && selectedThread.status !== "closed" ? "Send reply" : "Send letter"}</button>
+            <div className="sponsor-letter-paper">
+              <header className="sponsor-letter-paper-header">
+                <div className="sponsor-letter-recipient">
+                  <strong>{child.name}</strong>
+                  <span>Participant ID: {child.participantCode}</span>
+                </div>
+                <div className="sponsor-letter-date">
+                  <span>Date</span>
+                  <time>{new Date().toLocaleDateString()}</time>
+                </div>
+              </header>
+              <div className="sponsor-letter-paper-title">
+                <h3>Mensahe para sa aking sponsor</h3>
+                <p>(A message to my sponsor)</p>
+              </div>
+              {(!selectedThread || selectedThread.status === "closed") && (
+                <div className="sponsor-letter-subject">
+                  <label className="form-label" htmlFor="guardian-letter-subject">Paksa / Subject</label>
+                  <input id="guardian-letter-subject" className="form-control" maxLength={160} required value={subject} onChange={(event) => setSubject(event.target.value)} placeholder="What would you like to share?" />
+                </div>
+              )}
+              <div className="sponsor-letter-writing">
+                <label className="form-label" htmlFor="guardian-letter-message">
+                  {selectedThread && selectedThread.status !== "closed" ? "Reply / Sagot" : "Mensahe / Message"}
+                </label>
+                <textarea
+                  id="guardian-letter-message"
+                  className="form-control sponsor-letter-message"
+                  rows="12"
+                  maxLength={5000}
+                  required
+                  value={message}
+                  onChange={(event) => setMessage(event.target.value)}
+                  placeholder="Isulat ang iyong mensahe dito…"
+                />
+              </div>
+            </div>
+            <button className="btn btn-dark sponsor-letter-send" disabled={sending}>{sending ? "Sending…" : selectedThread && selectedThread.status !== "closed" ? "Send reply" : "Send letter"}</button>
           </form>
         </section>
       )}
