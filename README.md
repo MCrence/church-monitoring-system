@@ -12,13 +12,18 @@ schedules, check-in records, and attendance reports.
 2. The system creates a participant record and a unique QR code.
 3. Staff create an event schedule, such as a Sunday service.
 4. The participant's QR code is scanned at the event.
-5. The server verifies the QR code and records the attendance.
-6. The system prevents the same participant from being checked in twice for
-   the same event on the same day.
+5. Staff choose **Check in** or **Check out** before scanning. The server
+   verifies the QR code and records the selected action for the selected event.
+6. Check-out records a departure time only when an active check-in exists for
+   that participant, event, and day. A second check-in for the same event/day
+   remains a duplicate and is not recorded.
 7. Staff can add up to five JPG, PNG, or WebP photos to an event when creating
    it or from that event's attendance view. Photos are stored with their event.
-8. Staff can view event attendance and its photo gallery in the event details
-   modal.
+8. Staff can view check-in and check-out times with event attendance and its
+   photo gallery in the event details modal.
+
+Offline check-in requests may be queued for later synchronization; check-outs
+are not queued because the server must verify the active attendance record.
 
 Participant registration is launched from the Participants directory in a
 modal; there is no separate Register navigation page.
@@ -77,14 +82,16 @@ DB_PORT=3306
 DB_NAME=church_monitoring
 DB_USER=root
 DB_PASSWORD=your-mysql-password
-JWT_SECRET=your-secret-key
+JWT_SECRET=replace-with-a-random-secret-at-least-32-bytes-long
 AES_KEY=your-64-character-hex-key
+CLIENT_ORIGIN=http://localhost:5173
+TRUST_PROXY_HOPS=0
 # Optional: active key ID and JSON map of key IDs to 64-character hex keys.
 # Keep AES_KEY set while legacy profile fields still use the original key.
 AES_KEY_ID=primary
 AES_KEYRING={"primary":"your-64-character-hex-key"}
-# Optional MySQL TLS. Prefer a trusted CA certificate in production.
-DB_SSL=true
+# Development only; production always requires verified TLS 1.3.
+DB_SSL=false
 DB_SSL_CA=
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
@@ -108,10 +115,38 @@ also read older event-photo and sponsorship-receipt blobs that were stored
 without encryption; new uploads are encrypted when a valid `AES_KEY` is
 configured. Do not treat this as evidence of hardware-backed key storage.
 
-For database connections, `DB_SSL=true` enables TLS with certificate validation,
-and `DB_SSL_CA` may contain the trusted CA certificate. `/api/health` reports
-whether TLS was configured; it does not verify a negotiated TLS session or
-prove the database provider's configuration.
+Production startup requires a 32-byte-or-longer `JWT_SECRET`, a distinct
+`AES_KEY`, and an exact HTTPS `CLIENT_ORIGIN`. Database connections use
+certificate-validated TLS in production and require TLS 1.3; development can
+enable database TLS with `DB_SSL=true` and optionally provide `DB_SSL_CA`.
+`/api/health` reports the TLS protocol negotiated by the database connection;
+confirm it reports `TLSv1.3` in production.
+
+Sign-in attempts and Guardian Portal verifications are rate-limited in a shared
+database table, so the limits apply across server instances. Set
+`TRUST_PROXY_HOPS` to the exact number of trusted reverse proxies in front of
+the server (for example `1` behind a single platform proxy) so client IP-based
+limits are accurate. Only trust forwarded IP headers when direct access to the
+server is blocked and the configured proxy overwrites those headers. Rate-limit
+records are retained for up to one day.
+
+Generate a random JWT secret and a separate AES key; do not reuse values:
+
+```powershell
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```
+
+Set the outputs as deployment secrets, `CLIENT_ORIGIN` to the Vercel site's
+exact HTTPS origin (without a trailing slash), and `TRUST_PROXY_HOPS` to the
+trusted proxy count for the Render service. Existing Render/MySQL deployments
+must support TLS 1.3 or the production backend intentionally fails closed;
+check `/api/health` after deployment.
+
+Production responses use Helmet security headers and HSTS. The Vercel/Render
+edge TLS configuration still needs to be verified independently; the Node app
+cannot prove the protocol negotiated with a user's browser from behind a TLS
+terminating proxy.
 
 Sponsored-child records include dated growth, activity, and private care-note
 updates. The server creates the `sponsored_child_updates` table
@@ -125,15 +160,28 @@ in their legacy plaintext format; this deployment does not rewrite existing
 letter records. Existing installations receive the nullable
 `subject_encrypted` column through a non-destructive schema migration.
 
-The analytics service provides an attendance-gap heuristic (`attendance-baseline-v2`)
-based on attended weeks in the last 90 days and days since the last check-in.
-It is not a trained model and has not been validated against future outcomes.
-Do not use the scores as the sole basis for decisions about a child. Run its
-standard-library tests with:
+The analytics dashboard evaluates whether a logistic model trained on the
+previous 90 days of check-in history predicts no check-in in the following
+30 days. It uses monthly snapshots, a chronological holdout, and a 30-day
+label embargo. Validation requires at least 100 training snapshots (20 positive
+from 20 participants, 20 positive and 20 negative), 30 holdout snapshots from
+20 participants (10 positive and 10 negative), plus better holdout PR-AUC and
+Brier score than the training-prevalence baseline and expected calibration
+error no worse than that baseline. These are conservative system gates, not a
+universal statistical guarantee.
+
+The model is activated only when all sample and metric gates pass. Otherwise,
+scores continue using the clearly labeled `attendance-baseline-v2` heuristic
+and are not validated predictions. A passing retrospective result is still
+not a guarantee of future accuracy; staff must treat scores as review prompts
+and never as the sole basis for decisions about a child. The evaluation reads
+only participant IDs and check-in timestamps inside the server, and stores
+aggregate metrics rather than participant-level training examples. Run server
+tests with:
 
 ```powershell
-cd analytics-service
-python -m unittest
+cd server
+npm test
 ```
 
 The [ISO/IEC 25010 evaluation protocol](./ISO-IEC-25010-EVALUATION.md) lists
@@ -193,8 +241,17 @@ record an allowance or gift with a JPG, PNG, or PDF receipt proof (up to 4 MB),
 reply to letters, and update letter status. Receipt proof files are stored in
 the database and are not served from the public uploads directory.
 
-Guardians use the child's active QR code and passcode to view that child's
-allowance and gift history and open receipt proofs. They can create letter
+Guardians scan the child's active QR code, then enter the child's
+6-digit numeric passcode in the verification dialog to view that child's
+allowance and gift history and open receipt proofs. New Sponsored Child records
+receive a cryptographically generated 6-digit passcode, shown once to the
+authorized staff member who registered the child. Its verification hash and an
+AES-256-GCM encrypted copy are stored. Church and system administrators can
+reveal it from the Participants page; each reveal is audit-logged. Existing
+records that only have a passcode hash cannot be revealed and need a new
+passcode set by an administrator. Administrators can replace a passcode from
+the participant record, leaving it blank to retain the current one. Guardians
+can create letter
 threads and reply to open threads; staff replies and status updates appear in
 the same thread. Public APIs re-verify the QR/passcode for each request and
 guardians cannot access another child's records. Public proof uploads accept

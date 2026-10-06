@@ -145,6 +145,7 @@ CREATE TABLE `participants` (
   `address_encrypted` text DEFAULT NULL,
   `sponsor_id` int(11) UNSIGNED DEFAULT NULL,
   `passcode_hash` varchar(255) DEFAULT NULL,
+  `passcode_encrypted` text DEFAULT NULL,
   `medical_notes_encrypted` text DEFAULT NULL,
   `weight_encrypted` varchar(255) DEFAULT NULL,
   `height_encrypted` varchar(255) DEFAULT NULL,
@@ -218,6 +219,16 @@ CREATE TABLE `predictive_risk_scores` (
   `computed_at` datetime DEFAULT NULL,
   `created_at` datetime DEFAULT NULL,
   `updated_at` datetime DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `attendance_model_validation_runs` (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `evaluated_at` datetime NOT NULL DEFAULT current_timestamp(),
+  `status` varchar(32) NOT NULL,
+  `model_version` varchar(50) NOT NULL,
+  `details_json` longtext NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_attendance_model_validation_evaluated` (`evaluated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
@@ -1562,6 +1573,15 @@ CREATE TABLE `sponsored_child_updates` (
   KEY `idx_sponsored_child_updates_child_date` (`participant_id`,`recorded_on`,`id`),
   CONSTRAINT `fk_sponsored_child_updates_participant`
     FOREIGN KEY (`participant_id`) REFERENCES `participants` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `security_rate_limits` (
+  `bucket` varchar(48) NOT NULL,
+  `client_key` char(64) NOT NULL,
+  `request_count` int(10) UNSIGNED NOT NULL DEFAULT 0,
+  `window_started_at` datetime NOT NULL,
+  PRIMARY KEY (`bucket`,`client_key`),
+  KEY `idx_security_rate_limits_window` (`window_started_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --

@@ -12,7 +12,7 @@ supporting artifacts for each evaluation.
 | Usability | At least 90% task completion across registration, check-in, attendance reporting, and sponsored-child updates; median System Usability Scale score at least 68 from at least 15 representative users. | Moderated task script, completion/time/error observations, anonymized SUS responses, participant count, and analysis. | Not evaluated with users. |
 | Performance efficiency | Under a documented representative dataset and 100 concurrent virtual users, API p95 latency below 2 seconds for ordinary reads and below 5 seconds for reports; error rate below 1%. | Versioned load-test script, dataset dimensions, environment/resource limits, raw results, and endpoint-level p50/p95/p99. | Not measured in a production-like environment. |
 | Reliability | At least 99.5% monthly availability; demonstrate one successful backup restore with RPO no greater than 24 hours and RTO no greater than 8 hours. | Provider uptime/export, incident log, backup configuration, dated restore-drill timings, and integrity checks. | Cloud availability, backups, and restore behavior are not verified here. |
-| Security | No unresolved critical/high findings in dependency, configuration, and application security testing; verify role-denial cases and sensitive-data access boundaries. Verify TLS 1.3 at the public endpoint and database TLS negotiation; verify key custody and rotation operationally. | Dated scan reports, authorization tests, TLS handshake evidence for both connections, key-management configuration, rotation/restore drill, and remediation records. | Application AES-256-GCM helpers have focused tests and optional DB TLS is configurable. No deployment handshake, external security test, hardware-backed key storage, or compliance assessment has been demonstrated. |
+| Security | No unresolved critical/high findings in dependency, configuration, and application security testing; verify role-denial cases and sensitive-data access boundaries. Verify TLS 1.3 at the public endpoint and database TLS negotiation; verify key custody and rotation operationally. | Dated scan reports, authorization tests, TLS handshake evidence for both connections, key-management configuration, rotation/restore drill, and remediation records. | Implemented application AES-256-GCM protection, production secret/origin checks, database TLS 1.3 enforcement, negotiated DB TLS reporting, Helmet/HSTS, and shared DB-backed login/guardian rate limits. Production handshake evidence, authorization/security test results, managed hardware-backed key custody, key-rotation drill, external assessment, and compliance evidence remain outstanding. |
 | Maintainability | Client lint has no errors; server and analytics tests pass; new business-logic modules have at least 80% branch coverage or documented justification for uncovered paths; no known dependency vulnerabilities without a tracked remediation. | CI logs, coverage report, dependency scan, code-review record, and defect/change lead-time data. | Build and focused tests pass; existing client lint warnings remain, and system-wide coverage/dependency scans have not been produced. |
 
 ## Evaluation procedure
@@ -31,10 +31,21 @@ supporting artifacts for each evaluation.
 
 ## Predictive-analytics limitation
 
-The attendance score is a transparent rule-based indicator, not a trained or
-validated predictor. Before describing it as predictive, define an appropriate
-outcome with child-protection oversight, collect a lawful representative
-dataset, assess consent and bias risks, establish a temporal holdout, compare
-against a baseline, and report calibration and error metrics. Until then, use
-the score only as a review prompt and never as the sole basis for decisions
-about a child.
+The application now builds a 30-day inactivity outcome from historical
+check-ins, creates 30-day-spaced snapshots with a chronological holdout and
+label embargo, and compares a logistic model with a prevalence baseline using
+PR-AUC, Brier score, and expected calibration error. It only labels scores as
+trained-model predictions when the documented sample-size gates are met, PR-AUC
+and Brier score improve, and calibration error is no worse than baseline.
+Otherwise, it keeps the attendance heuristic and records why validation did
+not pass. Synthetic tests verify the pipeline mechanics, not prediction quality
+on real participants.
+
+A read-only aggregate run against the database configured in the development
+environment found only 15 check-ins across 3 participants and a 9-day date
+span. That produced no eligible history/30-day-outcome snapshots, so there is
+not enough evidence to train or validate a model against that database. After
+deployment, an authorized analytics user must run the evaluation against the
+intended database and review its aggregate report. Any passing retrospective
+result remains limited to the measured cohort and period; use scores only as
+review prompts, never as the sole basis for decisions about a child.

@@ -671,7 +671,7 @@ function Dashboard({ go }) {
           ],
           ["Check-ins this week", d.counts.totalCheckins ?? "—", "Last 7 days"],
           ["Goers checked-in (week)", d.counts.goerCheckins ?? "—", "Last 7 days"],
-          ["Needs attention", d.atRisk.length, "Medium and high risk"],
+          ["Attendance review", d.atRisk.length, "Elevated attendance scores"],
         ].map((x) => (
           <div className="col-12 col-sm-6 col-lg-2" key={x[0]}>
             <div className="stat-card">
@@ -713,7 +713,8 @@ function Dashboard({ go }) {
           </div>
         </section>
         <section className="col-12 col-lg-5">
-          <h2>At risk</h2>
+          <h2>Attendance follow-up prompts</h2>
+          <p className="text-secondary small">Review attendance context with staff. Scores do not determine a child’s circumstances.</p>
           <div className="risk-list">
             {d.atRisk.map((r) => (
               <div className="risk-row" key={`${r.id}-${r.computed_at}`}>
@@ -721,7 +722,7 @@ function Dashboard({ go }) {
                   <strong>
                     {r.participant_code || `Participant #${r.id}`}
                   </strong>
-                  <small>{r.computed_at}</small>
+                  <small>{r.model_version} · {r.computed_at}</small>
                 </div>
                 <Badge level={r.risk_level} />
                 <strong className="risk-score">
@@ -764,7 +765,6 @@ function Register({ onClose, onCreated }) {
     sponsorshipType: "",
     enrollmentDate: "",
     programAffiliation: "",
-    passcode: "",
   };
   const [f, setF] = useState(blank);
   const [result, setR] = useState(null);
@@ -814,6 +814,13 @@ function Register({ onClose, onCreated }) {
             <span className="eyebrow">DIGITAL ID READY</span>
             <h3>{result.participantCode}</h3>
             <img src={result.qrCodeImage} alt="Generated participant QR code" />
+            {result.passcode && (
+              <div className="participant-generated-passcode" role="status">
+                <span className="eyebrow">GUARDIAN PORTAL PASSCODE</span>
+                <strong>{result.passcode}</strong>
+                <p>Share this passcode securely with the child’s guardian. It is shown only during registration.</p>
+              </div>
+            )}
             <div className="d-flex flex-wrap justify-content-center gap-2">
               <button type="button" className="btn btn-outline-dark" onClick={() => window.print()}>Print card</button>
               <button type="button" className="btn btn-dark" onClick={onClose}>Done</button>
@@ -950,13 +957,6 @@ function Register({ onClose, onCreated }) {
                     value={f.programAffiliation}
                     onChange={update("programAffiliation")}
                   />
-                  <Field
-                    label="Portal passcode"
-                    type="password"
-                    value={f.passcode}
-                    onChange={update("passcode")}
-                    required
-                  />
                 </>
               )}
             </div>
@@ -971,7 +971,7 @@ function Register({ onClose, onCreated }) {
     </div>
   ), document.body);
 }
-function Participants({ canManage }) {
+function Participants({ canManage, user }) {
   const [list, setList] = useState([]);
   const [selected, setSelected] = useState(null);
   const [form, setForm] = useState(null);
@@ -979,6 +979,11 @@ function Participants({ canManage }) {
   const [query, setQuery] = useState("");
   const [message, setMessage] = useState("");
   const [showRegistration, setShowRegistration] = useState(false);
+  const [visiblePasscode, setVisiblePasscode] = useState(null);
+  const [passcodeMessage, setPasscodeMessage] = useState("");
+  const [loadingPasscode, setLoadingPasscode] = useState(false);
+  const canViewPasscode = ["church administrator", "system administrator"]
+    .includes(String(user?.role || "").toLowerCase());
   const refreshParticipants = useCallback(async () => {
     const data = await apiCall("/participants");
     setList(Array.isArray(data) ? data.filter((participant) => participant.status !== "deleted") : []);
@@ -994,6 +999,8 @@ function Participants({ canManage }) {
     try {
       const data = await apiCall(`/participants/${id}`);
       setSelected(id);
+      setVisiblePasscode(null);
+      setPasscodeMessage("");
       setForm({
         ...data.participant,
         participantType: data.participant.participant_type,
@@ -1004,6 +1011,21 @@ function Participants({ canManage }) {
       setMessage("");
     } catch (error) {
       setMessage(error.message);
+    }
+  };
+  const revealPasscode = async () => {
+    setLoadingPasscode(true);
+    setPasscodeMessage("");
+    try {
+      const data = await apiCall(`/participants/${selected}/passcode`);
+      setVisiblePasscode(data.passcode);
+      if (!data.passcode) {
+        setPasscodeMessage("No encrypted passcode is saved for this participant. Edit the profile to set a new one.");
+      }
+    } catch (error) {
+      setPasscodeMessage(error.message);
+    } finally {
+      setLoadingPasscode(false);
     }
   };
   const save = async (event) => {
@@ -1139,6 +1161,36 @@ function Participants({ canManage }) {
               </div>
               {form.qr_code_image ? <img className="participant-qr-image" src={`/${form.qr_code_image}`} alt={`QR code for ${form.participant_code}`} /> : <p className="text-secondary">No active QR code found.</p>}
               {form.qr_code_image && <button type="button" className="btn btn-dark" onClick={() => window.print()}>Print QR card</button>}
+              {canViewPasscode && form.participantType === "sponsored_child" && (
+                <div className="participant-passcode-panel">
+                  <div>
+                    <span className="eyebrow">GUARDIAN PORTAL</span>
+                    <h3>Child passcode</h3>
+                  </div>
+                  {visiblePasscode ? (
+                    <div className="participant-passcode-value" role="status">
+                      <strong>{visiblePasscode}</strong>
+                      <button
+                        type="button"
+                        className="btn btn-outline-secondary btn-sm"
+                        onClick={() => setVisiblePasscode(null)}
+                      >
+                        Hide
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-outline-dark"
+                      onClick={revealPasscode}
+                      disabled={loadingPasscode}
+                    >
+                      {loadingPasscode ? "Loading passcode…" : "View passcode"}
+                    </button>
+                  )}
+                  {passcodeMessage && <p className="text-secondary mb-0" role="status">{passcodeMessage}</p>}
+                </div>
+              )}
               {!canManage && (
                 <div className="profile-grid">
                   {[
@@ -1314,11 +1366,18 @@ function Participants({ canManage }) {
                       onChange={update("programAffiliation")}
                     />
                     <Field
-                      label="Portal passcode"
+                      label="New portal passcode (optional)"
                       type="password"
                       value={form.passcode || ""}
-                      onChange={update("passcode")}
-                      placeholder="Leave blank to keep existing"
+                      onChange={(event) => setForm({
+                        ...form,
+                        passcode: event.target.value.replace(/\D/g, "").slice(0, 6),
+                      })}
+                      inputMode="numeric"
+                      pattern="[0-9]{6}"
+                      maxLength={6}
+                      minLength={6}
+                      placeholder="Leave blank to keep existing; otherwise enter 6 digits"
                     />
                   </>
                 )}
@@ -1358,7 +1417,7 @@ function Participants({ canManage }) {
     </>
   );
 }
-function Camera({ id, onScan }) {
+function Camera({ id, onScan, errorMessage = "Camera unavailable. Grant permission or paste the QR payload below." }) {
   const ref = useRef(null);
   const onScanRef = useRef(onScan);
   const [error, setError] = useState("");
@@ -1386,9 +1445,7 @@ function Camera({ id, onScan }) {
         }
       } catch {
         if (active)
-          setError(
-            "Camera unavailable. Grant permission or paste the QR payload below.",
-          );
+          setError(errorMessage);
       }
     })();
     return () => {
@@ -1401,7 +1458,7 @@ function Camera({ id, onScan }) {
           .catch(() => {});
       }
     };
-  }, [id]);
+  }, [errorMessage, id]);
   return (
     <>
       <div id={id} className="qr-reader" />
@@ -1497,8 +1554,40 @@ function PublicLookup({ mode, onBack }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const submit = async (event) => {
+  const [passcodeOpen, setPasscodeOpen] = useState(false);
+  const lastScannedPayload = useRef("");
+  const lastScannedAt = useRef(0);
+  const onQrScanned = (value) => {
+    if (
+      isSponsor &&
+      value === lastScannedPayload.current &&
+      Date.now() - lastScannedAt.current < 2500
+    ) return;
+    lastScannedPayload.current = value;
+    lastScannedAt.current = Date.now();
+    setPayload(value);
+    setPasscode("");
+    setError("");
+    if (isSponsor) setPasscodeOpen(true);
+  };
+  useEffect(() => {
+    if (!passcodeOpen) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape" && !loading) {
+        setPasscodeOpen(false);
+        setPasscode("");
+        setError("");
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [passcodeOpen, loading]);
+  const verify = async (event) => {
     event.preventDefault();
+    if (isSponsor && !/^\d{6}$/.test(passcode)) {
+      setError("Enter the 6-digit child passcode.");
+      return;
+    }
     setLoading(true);
     setError("");
     setResult(null);
@@ -1511,13 +1600,24 @@ function PublicLookup({ mode, onBack }) {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "Unable to verify this QR code.");
       setResult(data);
+      setPasscodeOpen(false);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
       setLoading(false);
     }
   };
+  const submit = (event) => {
+    event.preventDefault();
+    if (isSponsor) {
+      setError("");
+      setPasscodeOpen(true);
+      return;
+    }
+    void verify(event);
+  };
   return (
+    <>
     <main className="public-home public-lookup">
       <button type="button" className="public-lookup-back-button" onClick={onBack}>
         <span aria-hidden="true">←</span>
@@ -1527,40 +1627,42 @@ function PublicLookup({ mode, onBack }) {
         <span className="eyebrow">{isSponsor ? "GUARDIAN PORTAL" : "GOER PORTAL"}</span>
         <h1>{isSponsor ? "Sponsorship status." : "Your attendance."}</h1>
         <p>{isSponsor
-          ? "Scan or enter the Sponsored Child’s QR code, then verify with the passcode."
+          ? "Scan the Sponsored Child’s QR code. You’ll be asked for the passcode after scanning."
           : "Scan or enter your own active Goer QR code to view your profile and recent attendance."}</p>
       </section>
       {!result ? (
         <form className="surface public-lookup-form" onSubmit={submit}>
-          <label className="form-label" htmlFor={`public-qr-${mode}`}>Participant QR code</label>
-          <Camera id={`public-${mode}-qr`} onScan={setPayload} />
-          <input
-            id={`public-qr-${mode}`}
-            className="form-control mb-3"
-            value={payload}
-            onChange={(event) => setPayload(event.target.value)}
-            placeholder="Scan the QR code or paste its payload"
-            autoComplete="off"
-            required
-          />
-          {isSponsor && (
-            <>
-              <label className="form-label" htmlFor="guardian-passcode">Child’s passcode</label>
-              <input
-                id="guardian-passcode"
-                className="form-control mb-3"
-                type="password"
-                value={passcode}
-                onChange={(event) => setPasscode(event.target.value)}
-                autoComplete="current-password"
-                required
-              />
-            </>
+          {isSponsor ? (
+            <p className="form-label mb-2">Scan the child’s QR code with your camera</p>
+          ) : (
+            <label className="form-label" htmlFor={`public-qr-${mode}`}>Participant QR code</label>
+          )}
+          {(!isSponsor || !passcodeOpen) && (
+            <Camera
+              id={`public-${mode}-qr`}
+              onScan={onQrScanned}
+              {...(isSponsor ? {
+                errorMessage: "Camera unavailable. Grant camera permission to scan the child’s QR code.",
+              } : {})}
+            />
+          )}
+          {!isSponsor && (
+            <input
+              id={`public-qr-${mode}`}
+              className="form-control mb-3"
+              value={payload}
+              onChange={(event) => setPayload(event.target.value)}
+              placeholder="Scan the QR code or paste its payload"
+              autoComplete="off"
+              required
+            />
           )}
           {error && <div className="alert alert-danger" role="alert">{error}</div>}
-          <button className="btn btn-dark w-100" disabled={loading}>
-            {loading ? "Verifying…" : isSponsor ? "Check sponsorship status" : "View my profile"}
-          </button>
+          {!isSponsor && (
+            <button className="btn btn-dark w-100" disabled={loading}>
+              {loading ? "Verifying…" : "View my profile"}
+            </button>
+          )}
         </form>
       ) : (
         <section className="surface public-result" aria-live="polite">
@@ -1593,10 +1695,80 @@ function PublicLookup({ mode, onBack }) {
               ) : <p className="text-secondary mb-0">No attendance records are available yet.</p>}
             </>
           )}
-          <button className="btn btn-outline-dark mt-4" onClick={() => { setResult(null); setPasscode(""); setPayload(""); }}>Look up another</button>
+          <button className="btn btn-outline-dark mt-4" onClick={() => { setResult(null); setPasscode(""); setPayload(""); setPasscodeOpen(false); lastScannedPayload.current = ""; lastScannedAt.current = 0; }}>Look up another</button>
         </section>
       )}
     </main>
+    {isSponsor && passcodeOpen && createPortal(
+      <div
+        className="guardian-passcode-backdrop"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setPasscodeOpen(false);
+            setPasscode("");
+            setError("");
+          }
+        }}
+      >
+        <section
+          className="guardian-passcode-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="guardian-passcode-title"
+        >
+          <button
+            type="button"
+            className="btn-close guardian-passcode-close"
+            aria-label="Close passcode dialog"
+            disabled={loading}
+            onClick={() => {
+              setPasscodeOpen(false);
+              setPasscode("");
+              setError("");
+            }}
+          />
+          <span className="eyebrow">GUARDIAN VERIFICATION</span>
+          <h2 id="guardian-passcode-title">Enter child passcode</h2>
+          <p className="text-secondary">Enter the 6-digit passcode linked to this QR code.</p>
+          <form onSubmit={verify}>
+            <label className="form-label" htmlFor="guardian-passcode">6-digit passcode</label>
+            <input
+              id="guardian-passcode"
+              className="form-control mb-3"
+              type="password"
+              inputMode="numeric"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              value={passcode}
+              onChange={(event) => setPasscode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+              autoComplete="one-time-code"
+              autoFocus
+              required
+            />
+            {error && <div className="alert alert-danger" role="alert">{error}</div>}
+            <div className="d-flex justify-content-end gap-2">
+              <button
+                type="button"
+                className="btn btn-outline-secondary"
+                onClick={() => {
+                  setPasscodeOpen(false);
+                  setPasscode("");
+                  setError("");
+                }}
+                disabled={loading}
+              >
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-dark" disabled={loading || passcode.length !== 6}>
+                {loading ? "Verifying…" : "Verify passcode"}
+              </button>
+            </div>
+          </form>
+        </section>
+      </div>,
+      document.body,
+    )}
+    </>
   );
 }
 function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
@@ -1773,6 +1945,7 @@ function Scanner({ portal = false }) {
   const [requiresPasscode, setRequiresPasscode] = useState(false);
   const [profile, setProfile] = useState(null);
   const [event, setEvent] = useState("custom");
+  const [attendanceAction, setAttendanceAction] = useState("check_in");
   const [events, setEvents] = useState([]);
   const portalBusy = useRef(false);
   const checkinBusy = useRef(false);
@@ -1796,6 +1969,56 @@ function Scanner({ portal = false }) {
     });
     setProfile({ ...portalData.participant, attendance: portalData.attendance });
   };
+  const postAttendance = async (value) => {
+    const headers = { "Content-Type": "application/json", ...(localStorage.token ? { Authorization: `Bearer ${localStorage.token}` } : {}) };
+    const resp = await fetch(api + "/checkin", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ qrPayload: value, eventName, location: eventLocation, action: attendanceAction }),
+    });
+    const result = await resp.json().catch(() => ({}));
+    if (resp.status === 401) {
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
+      window.dispatchEvent(new Event("auth-expired"));
+    }
+    if (!resp.ok) {
+      const error = new Error(result.error || "Could not record attendance.");
+      error.status = resp.status;
+      throw error;
+    }
+    if (result.status === "checked_out") showToast("Check-out recorded.", "success");
+    else if (result.status === "duplicate") showToast("Already checked in today for this event.", "warning");
+    else showToast("Check-in recorded.", "success");
+  };
+  const handleAttendance = async (value) => {
+    try {
+      await postAttendance(value);
+    } catch (error) {
+      if (attendanceAction === "check_in" && (!error.status || error.status >= 500)) {
+        try {
+          const queued = await queueCheckin({
+            qrPayload: value,
+            eventName,
+            location: eventLocation,
+            action: "check_in",
+          });
+          showToast(
+            queued ? "Offline: check-in queued for sync." : "Check-in already queued for today.",
+            queued ? "info" : "warning",
+          );
+        } catch {
+          showToast(error.message || "Could not record attendance.", "danger");
+        }
+        return;
+      }
+      if (attendanceAction === "check_out" && !error.status) {
+        showToast("Could not confirm check-out. Check the event attendance record before retrying.", "warning", 5000);
+        return;
+      }
+      showToast(error.message || "Could not record attendance.", "danger", 4000);
+    }
+  };
   const scan = async (v) => {
     // Always update payload input so it can be pasted/seen
     setPayload(v);
@@ -1816,34 +2039,11 @@ function Scanner({ portal = false }) {
       return;
     }
 
-    // Station mode: automatically record attendance on scan
+    // Station mode: the selected action determines whether this scan checks in or out.
     if (checkinBusy.current) return;
     checkinBusy.current = true;
     try {
-      const headers = { "Content-Type": "application/json", ...(localStorage.token ? { Authorization: `Bearer ${localStorage.token}` } : {}) };
-      const resp = await fetch(api + "/checkin", { method: "POST", headers, body: JSON.stringify({ qrPayload: v, eventName, location: eventLocation }) });
-      const result = await resp.json().catch(() => ({}));
-      if (resp.status === 401) {
-        localStorage.removeItem("token");
-        localStorage.removeItem("user");
-        window.dispatchEvent(new Event("auth-expired"));
-      }
-      if (resp.ok) {
-        if (result && result.status === 'duplicate') showToast('Already checked-in today for this event.', 'warning');
-        else showToast("Attendance recorded.", "success");
-      } else {
-        // treat non-ok as failure to send (will fall through to queueing)
-        throw new Error(result.error || 'Request failed');
-      }
-    } catch (x) {
-      // If offline or server unreachable, queue and inform user (avoid duplicates)
-      try {
-        const queued = await queueCheckin({ qrPayload: v, eventName, location: eventLocation });
-        if (queued) showToast("Offline: attendance queued for sync.", "info");
-        else showToast("Attendance already queued for today.", "warning");
-      } catch (qerr) {
-        showToast(x.message || "Failed to record attendance.", "danger");
-      }
+      await handleAttendance(v);
     } finally {
       // allow next scan after short cooldown to avoid duplicate scans
       setTimeout(() => {
@@ -1856,41 +2056,21 @@ function Scanner({ portal = false }) {
       if (portal) {
         await openPortal(payload, pass);
       } else {
-        const headers = { "Content-Type": "application/json", ...(localStorage.token ? { Authorization: `Bearer ${localStorage.token}` } : {}) };
-        const resp = await fetch(api + "/checkin", { method: "POST", headers, body: JSON.stringify({ qrPayload: payload, eventName, location: eventLocation }) });
-        const result = await resp.json().catch(() => ({}));
-        if (resp.status === 401) {
-          localStorage.removeItem("token");
-          localStorage.removeItem("user");
-          window.dispatchEvent(new Event("auth-expired"));
-        }
-        if (resp.ok) {
-          if (result && result.status === 'duplicate') showToast('Already checked-in today for this event.', 'warning');
-          else showToast("Check-in recorded successfully.", "success");
-        } else {
-          throw new Error(result.error || 'Request failed');
-        }
+        await handleAttendance(payload);
       }
     } catch (x) {
-      if (!portal) {
-        try {
-          const queued = await queueCheckin({ qrPayload: payload, eventName, location: eventLocation });
-          if (queued) showToast("Offline: check-in queued for sync.", "info");
-          else showToast("Attendance already queued for today.", "warning");
-        } catch (qerr) {
-          showToast(x.message || "Offline: failed to queue check-in.", "danger");
-        }
-      } else {
-        setRequiresPasscode(x.message === "Sponsored Child passcode required");
-        showToast(x.message, x.message === "Sponsored Child passcode required" ? "warning" : "danger");
-      }
+      setRequiresPasscode(x.message === "Sponsored Child passcode required");
+      showToast(x.message, x.message === "Sponsored Child passcode required" ? "warning" : "danger");
     }
   };
   useEffect(() => {
     if (!portal) {
       let sync = () =>
         syncQueuedCheckins((x) =>
-          apiCall("/checkin", { method: "POST", body: JSON.stringify(x) }),
+          apiCall("/checkin", {
+            method: "POST",
+            body: JSON.stringify({ ...x, action: "check_in" }),
+          }),
         );
       window.addEventListener("online", sync);
       return () => window.removeEventListener("online", sync);
@@ -1944,7 +2124,7 @@ function Scanner({ portal = false }) {
             </div>
           </div>}
           <h3 className="mt-4">Recent attendance</h3>
-          <div className="table-responsive"><table className="table"><tbody>{(profile.attendance || []).map((row, index) => <tr key={index}><td>{row.event_name}</td><td>{row.checked_in_at ? new Date(row.checked_in_at).toLocaleString() : "—"}</td><td>{row.status}</td></tr>)}</tbody></table></div>
+          <div className="table-responsive"><table className="table"><thead><tr><th>Event</th><th>Checked in</th><th>Checked out</th></tr></thead><tbody>{(profile.attendance || []).map((row, index) => <tr key={index}><td>{row.event_name}</td><td>{row.checked_in_at ? new Date(row.checked_in_at).toLocaleString() : "—"}</td><td>{row.checked_out_at ? new Date(row.checked_out_at).toLocaleString() : "—"}</td></tr>)}</tbody></table></div>
         </div>
         {toast && (
           <div style={{position: 'fixed', right: 20, bottom: 20, zIndex: 2000, padding: '10px 14px', borderRadius: 8, color: '#fff', backgroundColor: toast.type === 'success' ? '#28a745' : toast.type === 'warning' ? '#ff9f1c' : toast.type === 'danger' ? '#dc3545' : '#0d6efd', boxShadow: '0 4px 12px rgba(0,0,0,0.15)'}}>
@@ -1995,6 +2175,21 @@ function Scanner({ portal = false }) {
                     Event location: <strong>{selectedEvent.location}</strong>
                   </p>
                 )}
+                <div className="col-12">
+                  <label className="form-label" htmlFor="attendance-action">Attendance action</label>
+                  <select
+                    id="attendance-action"
+                    className="form-select"
+                    value={attendanceAction}
+                    onChange={(event) => setAttendanceAction(event.target.value)}
+                  >
+                    <option value="check_in">Check in</option>
+                    <option value="check_out">Check out</option>
+                  </select>
+                  <small className="text-secondary">
+                    Choose the action before scanning. Check-out requires an active check-in for this event today.
+                  </small>
+                </div>
               </>
             )}
             <button
@@ -2002,7 +2197,7 @@ function Scanner({ portal = false }) {
               disabled={!payload}
               onClick={send}
             >
-              {portal ? "Verify and open profile" : "Record check-in"} →
+              {portal ? "Verify and open profile" : attendanceAction === "check_out" ? "Record check-out" : "Record check-in"} →
             </button>
             {/* Toast handled separately */}
           </div>
@@ -2210,11 +2405,11 @@ function Events({ canManage }) {
             <div className="event-modal-loading" role="status">Loading attendance and event photos…</div>
           ) : (
             <>
-              <div className="event-attendance-heading"><h3>Attendance</h3><span>{attendance.length} checked in</span></div>
+              <div className="event-attendance-heading"><h3>Attendance</h3><span>{attendance.length} records</span></div>
               {attendance.length ? (
                 <div className="table-responsive event-attendance-table">
                   <table className="table">
-                    <thead><tr><th>Participant name</th><th>Code</th><th>Type</th><th>Location</th><th>Checked in</th></tr></thead>
+                    <thead><tr><th>Participant name</th><th>Code</th><th>Type</th><th>Location</th><th>Checked in</th><th>Checked out</th></tr></thead>
                     <tbody>{attendance.map((row) => (
                       <tr key={row.id}>
                         <td>{row.participant_name || "Name unavailable"}</td>
@@ -2222,6 +2417,7 @@ function Events({ canManage }) {
                         <td>{row.participant_type}</td>
                         <td>{row.location || "—"}</td>
                         <td>{new Date(row.checked_in_at).toLocaleString()}</td>
+                        <td>{row.checked_out_at ? new Date(row.checked_out_at).toLocaleString() : "—"}</td>
                       </tr>
                     ))}</tbody>
                   </table>
@@ -2280,12 +2476,39 @@ function Events({ canManage }) {
 function Analytics() {
   const [rows, setRows] = useState([]);
   const [filter, setFilter] = useState("all");
+  const [validation, setValidation] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
   const canvas = useRef(null);
   useEffect(() => {
-    apiCall("/risk-scores")
-      .then(setRows)
-      .catch(() => {});
+    let mounted = true;
+    Promise.all([
+      apiCall("/risk-scores"),
+      apiCall("/risk-scores/validation"),
+    ])
+      .then(([riskScores, validationReport]) => {
+        if (!mounted) return;
+        setRows(riskScores);
+        setValidation(validationReport);
+      })
+      .catch((loadError) => {
+        if (mounted) setError(loadError.message);
+      });
+    return () => { mounted = false; };
   }, []);
+  const refreshModel = async () => {
+    setRefreshing(true);
+    setError("");
+    try {
+      const report = await apiCall("/risk-scores/refresh", { method: "POST" });
+      setValidation(report.validation);
+      setRows(await apiCall("/risk-scores"));
+    } catch (refreshError) {
+      setError(refreshError.message);
+    } finally {
+      setRefreshing(false);
+    }
+  };
   let data = rows.filter((r) => filter === "all" || r.risk_level === filter);
   useEffect(() => {
     if (!canvas.current) return;
@@ -2311,10 +2534,53 @@ function Analytics() {
   return (
     <>
       <Title
-        e="ATTENDANCE RISK INDICATOR"
-        t="Spot attendance gaps."
-        d="A transparent, rule-based indicator summarizes recent check-in coverage and recency. It has not been validated as a predictor of future outcomes."
+        e="ATTENDANCE ANALYTICS"
+        t="Review attendance patterns."
+        d="The system tests whether attendance history predicts a 30-day inactivity outcome. Predictions remain labeled unvalidated unless the chronological holdout passes the published data and metric gates."
       />
+      <section className={`alert ${validation?.status === "validated" ? "alert-success" : "alert-warning"}`} role="status">
+        <div className="d-flex flex-wrap justify-content-between align-items-start gap-3">
+          <div>
+            <strong>
+              {validation?.status === "validated"
+                ? "Temporal evaluation passed"
+                : validation?.status === "insufficient_or_failed"
+                  ? "Predictions are not validated"
+                  : "No evaluation has been recorded"}
+            </strong>
+            <p className="mb-1 mt-2">{validation?.target || "Outcome: no attendance check-in in the 30 days after a score date."}</p>
+            {validation?.evaluatedAt && (
+              <small>Last evaluated {new Date(validation.evaluatedAt).toLocaleString()}</small>
+            )}
+          </div>
+          <button className="btn btn-dark" type="button" disabled={refreshing} onClick={refreshModel}>
+            {refreshing ? "Evaluating history…" : "Evaluate and refresh scores"}
+          </button>
+        </div>
+        {error && <p className="mb-0 mt-3" role="alert">{error}</p>}
+        {validation?.metrics && validation?.baseline && (
+          <div className="mt-3">
+            <strong>Held-out results</strong>
+            <p className="mb-1">
+              Training: {validation.counts.trainingExamples} snapshots from {validation.counts.trainingParticipants} participants · test: {validation.counts.testExamples} snapshots from {validation.counts.testParticipants} participants
+              ({validation.counts.testPositive} inactive, {validation.counts.testNegative} attended).
+            </p>
+            <p className="mb-1">
+              PR-AUC {validation.metrics.prAuc} vs prevalence baseline {validation.baseline.prevalence} ·
+              Brier {validation.metrics.brierScore} vs baseline {validation.baseline.brierScore} ·
+              calibration error {validation.metrics.expectedCalibrationError} vs baseline {validation.baseline.expectedCalibrationError}.
+            </p>
+            <small>
+              {validation.evaluationMethod}. A passing retrospective evaluation is not a guarantee of future accuracy; review results with staff and never use scores as the sole basis for decisions about a child.
+            </small>
+          </div>
+        )}
+        {validation?.reasons?.length > 0 && (
+          <ul className="mb-0 mt-3">
+            {validation.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+          </ul>
+        )}
+      </section>
       <div className="filter-bar btn-group">
         {["all", "high", "medium", "low"].map((x) => (
           <button
@@ -3355,7 +3621,7 @@ function App() {
   }
   let pages = {
     dashboard: <Dashboard go={navigateToPage} />,
-    participants: <Participants canManage={canAccessPermission("participants:manage", user)} />,
+    participants: <Participants canManage={canAccessPermission("participants:manage", user)} user={user} />,
     events: <Events canManage={canAccessPermission("events:manage", user)} />,
     scanner: <Scanner />,
     portal: <Scanner portal />,

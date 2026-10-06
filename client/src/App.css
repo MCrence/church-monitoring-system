@@ -223,6 +223,12 @@
 .guardian-thread-conversation h3{margin:0 0 14px;font:600 18px 'Space Grotesk'}
 .guardian-letter-form{display:grid;gap:12px;padding:16px;border-radius:10px;background:#f6f9fc}
 .guardian-letter-form .btn{justify-self:start}
+.guardian-passcode-backdrop{position:fixed;z-index:1600;inset:0;display:grid;place-items:center;padding:20px;background:rgba(4,19,43,.68);backdrop-filter:blur(4px)}
+.guardian-passcode-modal{position:relative;width:min(100%,430px);padding:30px;border:1px solid rgba(255,255,255,.7);border-radius:17px;background:#fff;box-shadow:0 25px 80px rgba(0,0,0,.28)}
+.guardian-passcode-modal h2{margin:7px 0 8px;font:600 24px 'Space Grotesk'}
+.guardian-passcode-modal>p{margin-bottom:22px}
+.guardian-passcode-close{position:absolute;top:18px;right:18px}
+@media(max-width:480px){.guardian-passcode-modal{padding:25px 21px}}
 @media(max-width:900px){.sponsorship-workspace{grid-template-columns:minmax(220px,.8fr) minmax(0,1.4fr)}.sponsorship-settings-form{grid-template-columns:1fr 1fr}.sponsorship-settings-form>.btn{grid-column:1/-1}.sponsorship-letter-layout{grid-template-columns:1fr}}
 @media(max-width:640px){.sponsorship-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.sponsorship-workspace{grid-template-columns:1fr}.sponsorship-child-list{position:static}.sponsorship-child-list{max-height:400px;overflow:auto}.sponsorship-detail-heading{align-items:flex-start}.sponsorship-settings-form,.sponsorship-gift-form{grid-template-columns:1fr}.sponsorship-gift-description{grid-column:auto}.sponsorship-gift-form>.btn{width:100%}.guardian-allowance-amount strong{font-size:17px}}
 .app-shell{display:grid;grid-template-columns:258px minmax(0,1fr);align-items:start}
@@ -265,6 +271,13 @@
 .participant-registration-success{display:flex;flex-direction:column;align-items:center;gap:10px;padding:14px 0 6px;text-align:center}
 .participant-registration-success h3{margin:0;font:600 22px 'Space Grotesk'}
 .participant-registration-success img{width:min(280px,70vw);max-height:300px;object-fit:contain}
+.participant-generated-passcode{display:grid;gap:5px;width:min(100%,380px);padding:15px;border:1px solid #cfe1ef;border-radius:12px;background:#f2f8fc}
+.participant-generated-passcode strong{color:#0c416c;font:700 30px 'Space Grotesk';letter-spacing:5px}
+.participant-generated-passcode p{margin:0;color:#526a81;font-size:12px}
+.participant-passcode-panel{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-top:18px;padding:15px;border:1px solid #cfe1ef;border-radius:12px;background:#f2f8fc}
+.participant-passcode-panel h3{margin:4px 0 0;color:#17395e;font:600 16px 'Space Grotesk'}
+.participant-passcode-value{display:flex;align-items:center;gap:12px}
+.participant-passcode-value strong{color:#0c416c;font:700 24px 'Space Grotesk';letter-spacing:4px}
 @media(max-width:640px){.participant-register-action{margin:-10px 0 18px}.participant-modal-backdrop{align-items:center;padding:16px}.participant-modal{max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);padding:20px 17px;border-radius:16px}.participant-modal-header h2{font-size:22px}}
 
 /* Shared workspace visual refresh */

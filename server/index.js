@@ -18,23 +18,48 @@ const { Parser } = require('json2csv');
 const mysql = require('mysql2/promise');
 const { encrypt, decrypt, decryptBytes, encryptBytes } = require('./utils/encryption');
 const { decryptLetter, encryptLetter } = require('./utils/letter-encryption');
+const { getAttendanceTransition } = require('./utils/attendance-transition');
+const { createParticipantPasscode, isValidParticipantPasscode } = require('./utils/participant-passcode');
+const { createPersistentRateLimiter } = require('./utils/persistent-rate-limit');
+const { getProductionSecurityErrors } = require('./utils/security-config');
+const {
+  BASELINE_VERSION,
+  MODEL_VERSION,
+  getCurrentAttendanceFeatures,
+  predictInactivityProbability,
+  scoreAttendanceBaseline,
+  validateAttendanceModel,
+} = require('./utils/attendance-prediction');
 
 const required = ['JWT_SECRET', 'AES_KEY'];
 for (const name of required) {
   if (!process.env[name]) throw new Error(`${name} is required`);
 }
+const productionSecurityErrors = getProductionSecurityErrors(process.env);
+if (productionSecurityErrors.length) {
+  throw new Error(`Invalid production security configuration: ${productionSecurityErrors.join('; ')}`);
+}
+const isProduction = process.env.NODE_ENV === 'production';
+const trustProxyHops = process.env.TRUST_PROXY_HOPS === undefined
+  ? 0
+  : Number(process.env.TRUST_PROXY_HOPS);
+if (!Number.isSafeInteger(trustProxyHops) || trustProxyHops < 0) {
+  throw new Error('TRUST_PROXY_HOPS must be a non-negative integer');
+}
 
 const app = express();
+app.set('trust proxy', trustProxyHops);
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   port: Number(process.env.DB_PORT || 3306),
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  ...(process.env.DB_SSL === 'true' || process.env.DB_SSL_CA
+  ...(isProduction || process.env.DB_SSL === 'true' || process.env.DB_SSL_CA
     ? {
         ssl: {
           rejectUnauthorized: true,
+          minVersion: isProduction ? 'TLSv1.3' : 'TLSv1.2',
           ...(process.env.DB_SSL_CA ? { ca: process.env.DB_SSL_CA } : {}),
         },
       }
@@ -82,7 +107,7 @@ const participantProfileColumnsReady = (async () => {
        AND COLUMN_NAME IN (
          'education_level', 'grade_level', 'program_course_encrypted',
          'first_name_encrypted', 'middle_name_encrypted', 'last_name_encrypted',
-         'sponsorship_lifecycle', 'monthly_allowance'
+         'sponsorship_lifecycle', 'monthly_allowance', 'passcode_encrypted'
        )`,
   );
   const existing = new Set(columns.map((column) => column.COLUMN_NAME));
@@ -95,6 +120,7 @@ const participantProfileColumnsReady = (async () => {
     ['last_name_encrypted', 'TEXT DEFAULT NULL'],
     ['sponsorship_lifecycle', "VARCHAR(24) NOT NULL DEFAULT 'active'"],
     ['monthly_allowance', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00'],
+    ['passcode_encrypted', 'TEXT DEFAULT NULL'],
   ];
   for (const [column, definition] of additions) {
     if (!existing.has(column)) {
@@ -189,6 +215,17 @@ const sponsoredChildUpdatesReady = eventsTableReady.then(() => pool.query(`
       ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 `));
+const attendanceModelValidationReady = pool.query(`
+  CREATE TABLE IF NOT EXISTS attendance_model_validation_runs (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    evaluated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(32) NOT NULL,
+    model_version VARCHAR(50) NOT NULL,
+    details_json LONGTEXT NOT NULL,
+    PRIMARY KEY (id),
+    INDEX idx_attendance_model_validation_evaluated (evaluated_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+`);
 const staffPermissionsReady = (async () => {
   const [columns] = await pool.execute(
     `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -242,13 +279,25 @@ const sponsorLookupAttemptsReady = pool.query(`
     INDEX idx_public_sponsor_attempts_locked_until (locked_until)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 `);
+const securityRateLimitsReady = pool.query(`
+  CREATE TABLE IF NOT EXISTS security_rate_limits (
+    bucket VARCHAR(48) NOT NULL,
+    client_key CHAR(64) NOT NULL,
+    request_count INT UNSIGNED NOT NULL DEFAULT 0,
+    window_started_at DATETIME NOT NULL,
+    PRIMARY KEY (bucket, client_key),
+    INDEX idx_security_rate_limits_window (window_started_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+`);
 const sessions = new Map();
 const revokedTokens = new Map();
 const emailChallenges = new Map();
 const uploadsDir = path.join(__dirname, 'uploads', 'qr_codes');
 fs.mkdirSync(uploadsDir, { recursive: true });
 
-app.use(helmet());
+app.use(helmet(isProduction
+  ? { hsts: { maxAge: 31_536_000, includeSubDomains: true, preload: false } }
+  : {}));
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
 app.use((req, res, next) => {
   const hasReceiptUpload = req.method === 'POST' &&
@@ -483,6 +532,8 @@ async function writeAuditLog(user, action, entityType, entityId = null, details 
 
 function participantView(row) {
   const result = { ...row };
+  delete result.passcode_hash;
+  delete result.passcode_encrypted;
   const safeDecrypt = (value) => {
     if (!value) return null;
     try {
@@ -514,12 +565,41 @@ function participantView(row) {
 }
 
 app.get('/api/health', async (req, res) => {
-  await pool.query('SELECT 1');
+  const connection = await pool.getConnection();
+  let databaseTlsProtocol = null;
+  try {
+    await connection.query('SELECT 1');
+    const stream = connection.connection?.stream;
+    if (stream?.encrypted && typeof stream.getProtocol === 'function') {
+      databaseTlsProtocol = stream.getProtocol();
+    }
+  } finally {
+    connection.release();
+  }
   res.json({
     status: 'ok',
     database: 'connected',
-    databaseTls: Boolean(pool.config.connectionConfig.ssl),
+    databaseTlsProtocol,
   });
+});
+
+const loginRateLimit = createPersistentRateLimiter({
+  pool,
+  tableReady: securityRateLimitsReady,
+  secret: process.env.JWT_SECRET,
+  bucket: 'staff-login',
+  maxRequests: 10,
+  windowSeconds: 15 * 60,
+  message: 'Too many sign-in attempts. Try again in 15 minutes.',
+});
+const guardianRateLimit = createPersistentRateLimiter({
+  pool,
+  tableReady: securityRateLimitsReady,
+  secret: process.env.JWT_SECRET,
+  bucket: 'guardian-verification',
+  maxRequests: 12,
+  windowSeconds: 15 * 60,
+  message: 'Too many verification attempts. Try again in 15 minutes.',
 });
 
 app.get('/api/audit-logs', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
@@ -544,7 +624,7 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
       "SELECT COUNT(*) AS totalCheckins, COALESCE(SUM(p.participant_type = 'goer'),0) AS goerCheckins, COALESCE(SUM(p.participant_type = 'sponsored_child'),0) AS sponsoredCheckins FROM check_in_logs c JOIN participants p ON p.id = c.participant_id WHERE c.checked_in_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND c.status = 'checked_in'"
     );
     const [recentCheckins] = await pool.query("SELECT c.participant_id, p.participant_type, c.event_name, c.location, c.checked_in_at, c.status FROM check_in_logs c JOIN participants p ON p.id = c.participant_id ORDER BY c.checked_in_at DESC LIMIT 8");
-    const [atRisk] = await pool.query("SELECT p.id, p.participant_code, r.risk_score, r.risk_level, r.computed_at FROM predictive_risk_scores r JOIN participants p ON p.id = r.participant_id JOIN (SELECT participant_id, MAX(computed_at) AS latest FROM predictive_risk_scores GROUP BY participant_id) latest ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at WHERE r.risk_level IN ('high', 'medium') ORDER BY r.risk_score DESC LIMIT 8");
+    const [atRisk] = await pool.query("SELECT p.id, p.participant_code, r.risk_score, r.risk_level, r.model_version, r.computed_at FROM predictive_risk_scores r JOIN participants p ON p.id = r.participant_id JOIN (SELECT participant_id, MAX(computed_at) AS latest FROM predictive_risk_scores GROUP BY participant_id) latest ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at WHERE r.risk_level IN ('high', 'medium') ORDER BY r.risk_score DESC LIMIT 8");
     res.json({ counts: { ...counts, totalCheckins: checkins.totalCheckins, goerCheckins: checkins.goerCheckins, sponsoredCheckins: checkins.sponsoredCheckins }, recentCheckins, atRisk });
   } catch (error) { next(error); }
 });
@@ -730,7 +810,32 @@ app.get('/api/participants/:id', authenticate, checkPermission('participants:vie
   } catch (error) { next(error); }
 });
 
-app.post('/api/auth/login', async (req, res, next) => {
+app.get(
+  '/api/participants/:id/passcode',
+  authenticate,
+  checkRole(['Church Administrator', 'System Administrator']),
+  async (req, res, next) => {
+    try {
+      await participantProfileColumnsReady;
+      const [[participant]] = await pool.execute(
+        `SELECT participant_type, passcode_encrypted
+         FROM participants WHERE id = ? LIMIT 1`,
+        [req.params.id],
+      );
+      if (!participant) return res.status(404).json({ error: 'Participant not found' });
+      if (participant.participant_type !== 'sponsored_child') {
+        return res.status(400).json({ error: 'Passcodes are only available for sponsored children' });
+      }
+      const passcode = participant.passcode_encrypted
+        ? decrypt(participant.passcode_encrypted)
+        : null;
+      await writeAuditLog(req.user, 'participant.passcode.viewed', 'participant', req.params.id);
+      res.json({ passcode });
+    } catch (error) { next(error); }
+  },
+);
+
+app.post('/api/auth/login', loginRateLimit, async (req, res, next) => {
   try {
     await legacyRolesReady;
     await staffPermissionsReady;
@@ -1065,10 +1170,13 @@ app.post('/api/participants', authenticate, checkPermission('participants:manage
       .map((part) => String(part || '').trim())
       .filter(Boolean)
       .join(' ');
+    const passcode = req.body.participantType === 'sponsored_child'
+      ? createParticipantPasscode()
+      : null;
     const participantCode = `FMC-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
     const [result] = await connection.execute(
-      'INSERT INTO participants (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted, last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted, passcode_hash, medical_conditions_encrypted, weight_encrypted, height_encrypted, emergency_contact_name_encrypted, emergency_contact_phone_encrypted, sponsor_name_encrypted, sponsor_contact_encrypted, sponsorship_type, enrollment_date, program_affiliation_encrypted, education_level, grade_level, program_course_encrypted, status, participant_code, sponsorship_lifecycle, monthly_allowance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NOW(), NOW())',
-      [req.body.participantType || 'goer', encrypt(fullName), encrypt(String(req.body.firstName).trim()), encrypt(String(req.body.middleName || '').trim() || null), encrypt(String(req.body.lastName).trim()), encrypt(req.body.dateOfBirth), gender || null, encrypt(req.body.phone), encrypt(req.body.address), req.body.passcode ? await bcrypt.hash(req.body.passcode, 12) : null, encrypt(req.body.medicalConditions), encrypt(req.body.weight), encrypt(req.body.height), encrypt(req.body.emergencyContactName), encrypt(req.body.emergencyContactPhone), encrypt(req.body.sponsorName), encrypt(req.body.sponsorContact), req.body.sponsorshipType || null, req.body.enrollmentDate || null, encrypt(req.body.programAffiliation), req.body.participantType === 'sponsored_child' ? req.body.educationLevel : null, req.body.participantType === 'sponsored_child' ? req.body.gradeLevel : null, req.body.participantType === 'sponsored_child' ? encrypt(req.body.programCourse) : null, 'active', participantCode, req.body.participantType === 'sponsored_child' ? 'new' : 'active'],
+      'INSERT INTO participants (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted, last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted, passcode_hash, passcode_encrypted, medical_conditions_encrypted, weight_encrypted, height_encrypted, emergency_contact_name_encrypted, emergency_contact_phone_encrypted, sponsor_name_encrypted, sponsor_contact_encrypted, sponsorship_type, enrollment_date, program_affiliation_encrypted, education_level, grade_level, program_course_encrypted, status, participant_code, sponsorship_lifecycle, monthly_allowance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NOW(), NOW())',
+      [req.body.participantType || 'goer', encrypt(fullName), encrypt(String(req.body.firstName).trim()), encrypt(String(req.body.middleName || '').trim() || null), encrypt(String(req.body.lastName).trim()), encrypt(req.body.dateOfBirth), gender || null, encrypt(req.body.phone), encrypt(req.body.address), passcode ? await bcrypt.hash(passcode, 12) : null, passcode ? encrypt(passcode) : null, encrypt(req.body.medicalConditions), encrypt(req.body.weight), encrypt(req.body.height), encrypt(req.body.emergencyContactName), encrypt(req.body.emergencyContactPhone), encrypt(req.body.sponsorName), encrypt(req.body.sponsorContact), req.body.sponsorshipType || null, req.body.enrollmentDate || null, encrypt(req.body.programAffiliation), req.body.participantType === 'sponsored_child' ? req.body.educationLevel : null, req.body.participantType === 'sponsored_child' ? req.body.gradeLevel : null, req.body.participantType === 'sponsored_child' ? encrypt(req.body.programCourse) : null, 'active', participantCode, req.body.participantType === 'sponsored_child' ? 'new' : 'active'],
     );
     const uid = crypto.randomUUID();
     const qrPayload = encrypt(uid);
@@ -1077,7 +1185,13 @@ app.post('/api/participants', authenticate, checkPermission('participants:manage
     await connection.execute('INSERT INTO qr_codes (participant_id, qr_uid, qr_code_image, status, assigned_at, created_by, created_at) VALUES (?, ?, ?, ?, NOW(), ?, NOW())', [result.insertId, qrPayload, `uploads/qr_codes/${filename}`, 'active', req.user.id]);
     await connection.commit();
     await writeAuditLog(req.user, 'participant.created', 'participant', result.insertId);
-    res.status(201).json({ id: result.insertId, participantCode, qrPayload, qrCodeImage: `/uploads/qr_codes/${filename}` });
+    res.status(201).json({
+      id: result.insertId,
+      participantCode,
+      qrPayload,
+      qrCodeImage: `/uploads/qr_codes/${filename}`,
+      ...(passcode ? { passcode } : {}),
+    });
   } catch (error) { await connection.rollback(); next(error); } finally { connection.release(); }
 });
 
@@ -1101,6 +1215,13 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
     if (nameError) return res.status(400).json({ error: nameError });
     const eligibilityError = sponsoredChildEligibilityError(req.body);
     if (eligibilityError) return res.status(400).json({ error: eligibilityError });
+    if (
+      Object.prototype.hasOwnProperty.call(req.body, 'passcode') &&
+      req.body.passcode !== '' &&
+      !isValidParticipantPasscode(req.body.passcode)
+    ) {
+      return res.status(400).json({ error: 'Participant passcode must be exactly 6 digits' });
+    }
     const firstName = String(req.body.firstName).trim();
     const middleName = String(req.body.middleName || '').trim();
     const lastName = String(req.body.lastName).trim();
@@ -1130,9 +1251,9 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
       program_course_encrypted: req.body.participantType === 'sponsored_child' ? encrypt(req.body.programCourse) : null,
       status: req.body.status || 'active',
     };
-    // If the client provided a passcode key, update the stored hash (allow clearing with empty string)
-    if (Object.prototype.hasOwnProperty.call(req.body, 'passcode')) {
-      fields.passcode_hash = req.body.passcode ? await bcrypt.hash(req.body.passcode, 12) : null;
+    if (isValidParticipantPasscode(req.body.passcode)) {
+      fields.passcode_hash = await bcrypt.hash(req.body.passcode, 12);
+      fields.passcode_encrypted = encrypt(req.body.passcode);
     }
 
     const updates = Object.keys(fields).map((field) => `${field} = ?`).join(', ');
@@ -1160,38 +1281,102 @@ app.delete('/api/participants/:id', authenticate, checkPermission('participants:
 });
 
 app.post('/api/checkin', authenticate, checkPermission('checkin:record'), async (req, res, next) => {
+  let connection;
   try {
     const payload = String(req.body.qrPayload || '');
-    // verify payload decrypts (will throw if invalid) — handle gracefully and return 400
     try {
       decrypt(payload);
-    } catch (err) {
+    } catch {
       return res.status(400).json({ error: 'Invalid QR payload' });
     }
-    const [rows] = await pool.execute('SELECT * FROM qr_codes WHERE qr_uid = ? AND status = \'active\' LIMIT 1', [payload]);
-    if (!rows[0]) return res.status(404).json({ error: 'Invalid or revoked QR code' });
-    const qr = rows[0];
-
-    // Deduplication: ignore check-ins for the same participant and event on the same date
-    const eventName = req.body.eventName || 'General event';
-    const location = req.body.location || null;
-
-    const [[recent]] = await pool.execute(
-      'SELECT COUNT(*) AS cnt FROM check_in_logs WHERE participant_id = ? AND event_name = ? AND DATE(checked_in_at) = CURDATE() AND status = ?',
-      [qr.participant_id, eventName, 'checked_in'],
-    );
-
-    if (Number(recent.cnt) > 0) {
-      // Update qr_code scan metadata but do not insert duplicate attendance
-      await pool.execute('UPDATE qr_codes SET last_scanned_at = NOW(), scan_count = scan_count + 1 WHERE id = ?', [qr.id]);
-      return res.json({ status: 'duplicate', ignored: true, participantId: qr.participant_id, timestamp: new Date().toISOString() });
+    const action = req.body.action || 'check_in';
+    if (!['check_in', 'check_out'].includes(action)) {
+      return res.status(400).json({ error: 'Select check-in or check-out' });
     }
-
-    await pool.execute('INSERT INTO check_in_logs (participant_id, qr_code_id, event_name, checked_in_at, location, status, created_at) VALUES (?, ?, ?, NOW(), ?, ?, NOW())', [qr.participant_id, qr.id, eventName, location, 'checked_in']);
-    await pool.execute('UPDATE qr_codes SET last_scanned_at = NOW(), scan_count = scan_count + 1 WHERE id = ?', [qr.id]);
-    await writeAuditLog(req.user, 'checkin.recorded', 'participant', qr.participant_id, { eventName });
-    res.json({ status: 'checked_in', participantId: qr.participant_id, timestamp: new Date().toISOString() });
-  } catch (error) { next(error); }
+    const eventName = String(req.body.eventName || 'General event');
+    const location = req.body.location || null;
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [qrRows] = await connection.execute(
+      `SELECT id, participant_id FROM qr_codes
+       WHERE qr_uid = ? AND status = 'active'
+       LIMIT 1 FOR UPDATE`,
+      [payload],
+    );
+    if (!qrRows[0]) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Invalid or revoked QR code' });
+    }
+    const qr = qrRows[0];
+    await connection.execute('SELECT id FROM participants WHERE id = ? FOR UPDATE', [qr.participant_id]);
+    const [attendanceRows] = await connection.execute(
+      `SELECT id, checked_out_at
+       FROM check_in_logs
+       WHERE participant_id = ? AND event_name = ? AND DATE(checked_in_at) = CURDATE()
+         AND status = 'checked_in'
+       ORDER BY checked_in_at DESC, id DESC
+       LIMIT 1 FOR UPDATE`,
+      [qr.participant_id, eventName],
+    );
+    const transition = getAttendanceTransition(action, attendanceRows[0] || null);
+    if (transition === 'no_active_checkin') {
+      await connection.rollback();
+      return res.status(409).json({ error: 'No active check-in found for this event today' });
+    }
+    if (transition === 'duplicate') {
+      await connection.execute(
+        'UPDATE qr_codes SET last_scanned_at = NOW(), scan_count = scan_count + 1 WHERE id = ?',
+        [qr.id],
+      );
+      await connection.commit();
+      return res.json({
+        status: 'duplicate',
+        ignored: true,
+        participantId: qr.participant_id,
+        timestamp: new Date().toISOString(),
+      });
+    }
+    let attendanceId;
+    if (transition === 'check_out') {
+      attendanceId = attendanceRows[0].id;
+      const [result] = await connection.execute(
+        'UPDATE check_in_logs SET checked_out_at = NOW() WHERE id = ? AND checked_out_at IS NULL',
+        [attendanceId],
+      );
+      if (result.affectedRows !== 1) throw new Error('Attendance check-out could not be recorded');
+    } else {
+      const [result] = await connection.execute(
+        `INSERT INTO check_in_logs
+           (participant_id, qr_code_id, event_name, checked_in_at, location, status, created_at)
+         VALUES (?, ?, ?, NOW(), ?, 'checked_in', NOW())`,
+        [qr.participant_id, qr.id, eventName, location],
+      );
+      attendanceId = result.insertId;
+    }
+    await connection.execute(
+      'UPDATE qr_codes SET last_scanned_at = NOW(), scan_count = scan_count + 1 WHERE id = ?',
+      [qr.id],
+    );
+    await connection.commit();
+    await writeAuditLog(
+      req.user,
+      transition === 'check_out' ? 'checkout.recorded' : 'checkin.recorded',
+      'participant',
+      qr.participant_id,
+      { eventName, attendanceId },
+    );
+    res.json({
+      status: transition === 'check_out' ? 'checked_out' : 'checked_in',
+      participantId: qr.participant_id,
+      attendanceId,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
 });
 
 app.post('/api/portal/profile', authenticate, checkPermission('portal:view'), async (req, res, next) => {
@@ -1276,6 +1461,9 @@ function parseEventPhotos(value) {
 }
 
 async function verifyPublicSponsoredChild(qrPayload, passcode) {
+  if (!isValidParticipantPasscode(passcode)) {
+    return { error: 'Passcode must be exactly 6 digits', status: 400 };
+  }
   await participantProfileColumnsReady;
   const lookupKey = crypto.createHmac('sha256', process.env.JWT_SECRET).update(qrPayload).digest('hex');
   await sponsorLookupAttemptsReady;
@@ -1656,7 +1844,7 @@ app.put('/api/sponsorship/letters/:id/status', authenticate, checkPermission('sp
   } catch (error) { next(error); }
 });
 
-app.post('/api/public/sponsor-status', async (req, res, next) => {
+app.post('/api/public/sponsor-status', guardianRateLimit, async (req, res, next) => {
   try {
     const qrPayload = String(req.body.qrPayload || '');
     const passcode = String(req.body.passcode || '');
@@ -1833,7 +2021,7 @@ app.get('/api/reports/attendance', authenticate, checkPermission('reports:view')
   try {
     const rows = await reportRows(req.query.range === 'monthly' ? 'monthly' : 'weekly');
     if (req.query.format === 'csv') return res.type('text/csv').send(new Parser().parse(rows));
-    if (req.query.format === 'pdf') { const doc = new PDFDocument(); res.type('application/pdf'); doc.pipe(res); doc.fontSize(18).text('Attendance Report'); rows.forEach((row) => doc.fontSize(10).text(`${row.checked_in_at || ''} | participant ${row.participant_id} | ${row.event_name} | ${row.status}`)); return doc.end(); }
+    if (req.query.format === 'pdf') { const doc = new PDFDocument(); res.type('application/pdf'); doc.pipe(res); doc.fontSize(18).text('Attendance Report'); rows.forEach((row) => doc.fontSize(10).text(`${row.checked_in_at || ''} | ${row.checked_out_at || 'Not checked out'} | participant ${row.participant_id} | ${row.event_name} | ${row.status}`)); return doc.end(); }
     res.json({ range: req.query.range === 'monthly' ? 'monthly' : 'weekly', records: rows });
   } catch (error) { next(error); }
 });
@@ -1889,48 +2077,92 @@ app.get(
 
 app.get('/api/risk-scores', authenticate, checkPermission('analytics:view'), async (req, res, next) => { try { const [rows] = await pool.query('SELECT * FROM predictive_risk_scores ORDER BY computed_at DESC'); res.json(rows); } catch (error) { next(error); } });
 
+app.get('/api/risk-scores/validation', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    await attendanceModelValidationReady;
+    const [rows] = await pool.query(
+      `SELECT status, model_version, details_json
+       FROM attendance_model_validation_runs
+       ORDER BY id DESC
+       LIMIT 1`,
+    );
+    if (!rows[0]) return res.json({ status: 'not_evaluated' });
+    res.json(JSON.parse(rows[0].details_json));
+  } catch (error) { next(error); }
+});
+
 app.post('/api/risk-scores/refresh', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
   try {
-    res.json({ refreshed: await refreshRiskScores() });
+    res.json(await refreshRiskScores());
   } catch (error) { next(error); }
 });
 
 app.use((error, req, res, next) => { console.error(error); res.status(500).json({ error: 'Internal server error' }); });
 
 async function refreshRiskScores() {
-  const [participants] = await pool.query(`
-    SELECT p.id,
-           COUNT(DISTINCT YEARWEEK(c.checked_in_at, 3)) AS attendance_weeks,
-           MAX(c.checked_in_at) AS latest
-    FROM participants p
-    LEFT JOIN check_in_logs c
-      ON c.participant_id = p.id
-      AND c.status = 'checked_in'
-      AND c.checked_in_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
-    WHERE p.status = 'active'
-    GROUP BY p.id
+  await attendanceModelValidationReady;
+  const [history] = await pool.query(`
+    SELECT participant_id, UNIX_TIMESTAMP(checked_in_at) * 1000 AS checked_in_at_ms
+    FROM check_in_logs
+    WHERE status = 'checked_in' AND checked_in_at IS NOT NULL
+    ORDER BY checked_in_at ASC
   `);
+  const attendanceHistory = history.map((row) => ({
+    participantId: row.participant_id,
+    checkedInAt: Number(row.checked_in_at_ms),
+  }));
+  const evaluatedAt = Date.now();
+  const validation = validateAttendanceModel(attendanceHistory, evaluatedAt);
+  const { coefficients, ...validationReport } = validation;
+  await pool.execute(
+    `INSERT INTO attendance_model_validation_runs (status, model_version, details_json)
+     VALUES (?, ?, ?)`,
+    [validationReport.status, validationReport.modelVersion, JSON.stringify(validationReport)],
+  );
+  const [participants] = await pool.query(
+    "SELECT id FROM participants WHERE status = 'active'",
+  );
+  const currentFeatures = getCurrentAttendanceFeatures(
+    attendanceHistory,
+    participants.map((participant) => participant.id),
+    evaluatedAt,
+  );
   for (const participant of participants) {
-    const recencyDays = participant.latest
-      ? Math.max(0, (Date.now() - new Date(participant.latest).getTime()) / 86400000)
-      : 90;
-    const attendanceCoverage = Math.min(Number(participant.attendance_weeks) / 13, 1);
-    const inactivity = Math.min(recencyDays / 45, 1);
-    const score = Math.round((50 * (1 - attendanceCoverage) + 50 * inactivity) * 100) / 100;
+    const features = currentFeatures.get(String(participant.id));
+    const trainedProbability = coefficients
+      ? predictInactivityProbability(features, coefficients)
+      : null;
+    const score = trainedProbability === null
+      ? scoreAttendanceBaseline(features[0] * 13, features[1] * 45)
+      : Math.round(trainedProbability * 10000) / 100;
     await pool.execute(
       'INSERT INTO predictive_risk_scores (participant_id, risk_score, risk_level, model_version, computed_at, created_at) VALUES (?, ?, ?, ?, NOW(), NOW())',
-      [participant.id, score, score >= 70 ? 'high' : score >= 40 ? 'medium' : 'low', 'attendance-baseline-v2'],
+      [
+        participant.id,
+        score,
+        score >= 70 ? 'high' : score >= 40 ? 'medium' : 'low',
+        trainedProbability === null ? BASELINE_VERSION : MODEL_VERSION,
+      ],
     );
   }
-  return participants.length;
+  return { refreshed: participants.length, validation: validationReport };
 }
 cron.schedule('0 2 * * *', () => refreshRiskScores().catch(console.error));
+cron.schedule('23 * * * *', () => {
+  pool.execute(
+    'DELETE FROM security_rate_limits WHERE window_started_at < DATE_SUB(NOW(), INTERVAL 1 DAY)',
+  ).catch((error) => console.error('Failed to clean expired security rate-limit records:', error));
+});
 
 const port = Number(process.env.PORT || 3000);
 const certPath = process.env.HTTPS_CERT_PATH;
 const keyPath = process.env.HTTPS_KEY_PATH;
 const server = certPath && keyPath && fs.existsSync(certPath) && fs.existsSync(keyPath)
-  ? https.createServer({ cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath), minVersion: process.env.HTTPS_MIN_VERSION || 'TLSv1.3' }, app)
+  ? https.createServer({
+      cert: fs.readFileSync(certPath),
+      key: fs.readFileSync(keyPath),
+      minVersion: isProduction ? 'TLSv1.3' : process.env.HTTPS_MIN_VERSION || 'TLSv1.2',
+    }, app)
   : http.createServer(app);
 server.listen(port, () => console.log(`${server instanceof https.Server ? 'HTTPS' : 'HTTP'} server listening on port ${port}`));
 
