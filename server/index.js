@@ -16,7 +16,8 @@ const cron = require('node-cron');
 const PDFDocument = require('pdfkit');
 const { Parser } = require('json2csv');
 const mysql = require('mysql2/promise');
-const { encrypt, decrypt } = require('./utils/encryption');
+const { encrypt, decrypt, decryptBytes, encryptBytes } = require('./utils/encryption');
+const { decryptLetter, encryptLetter } = require('./utils/letter-encryption');
 
 const required = ['JWT_SECRET', 'AES_KEY'];
 for (const name of required) {
@@ -30,6 +31,14 @@ const pool = mysql.createPool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+  ...(process.env.DB_SSL === 'true' || process.env.DB_SSL_CA
+    ? {
+        ssl: {
+          rejectUnauthorized: true,
+          ...(process.env.DB_SSL_CA ? { ca: process.env.DB_SSL_CA } : {}),
+        },
+      }
+    : {}),
   waitForConnections: true,
   connectionLimit: 10,
 });
@@ -121,6 +130,7 @@ const sponsorshipTablesReady = Promise.all([
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
       participant_id INT UNSIGNED NOT NULL,
       subject VARCHAR(160) NOT NULL,
+      subject_encrypted TEXT DEFAULT NULL,
       status VARCHAR(24) NOT NULL DEFAULT 'open',
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -146,7 +156,39 @@ const sponsorshipTablesReady = Promise.all([
         ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `),
-]);
+]).then(async () => {
+  const [columns] = await pool.execute(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sponsorship_letter_threads'
+       AND COLUMN_NAME = 'subject_encrypted'`,
+  );
+  if (!columns.length) {
+    try {
+      await pool.query('ALTER TABLE sponsorship_letter_threads ADD COLUMN subject_encrypted TEXT DEFAULT NULL');
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+    }
+  }
+});
+const sponsoredChildUpdatesReady = eventsTableReady.then(() => pool.query(`
+  CREATE TABLE IF NOT EXISTS sponsored_child_updates (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    participant_id INT UNSIGNED NOT NULL,
+    update_type VARCHAR(20) NOT NULL,
+    recorded_on DATE NOT NULL,
+    activity_encrypted TEXT DEFAULT NULL,
+    height_encrypted TEXT DEFAULT NULL,
+    weight_encrypted TEXT DEFAULT NULL,
+    note_encrypted TEXT DEFAULT NULL,
+    created_by INT UNSIGNED DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    INDEX idx_sponsored_child_updates_child_date (participant_id, recorded_on, id),
+    CONSTRAINT fk_sponsored_child_updates_participant
+      FOREIGN KEY (participant_id) REFERENCES participants (id)
+      ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+`));
 const staffPermissionsReady = (async () => {
   const [columns] = await pool.execute(
     `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -325,7 +367,8 @@ function hasPermission(user, permission) {
   if (permissions.includes(permission)) return true;
   return (
     (permission === 'participants:view' && permissions.includes('participants:manage')) ||
-    (permission === 'events:view' && permissions.includes('events:manage'))
+    (permission === 'events:view' && permissions.includes('events:manage')) ||
+    (permission === 'sponsorship:view' && permissions.includes('sponsorship:manage'))
   );
 }
 
@@ -472,7 +515,11 @@ function participantView(row) {
 
 app.get('/api/health', async (req, res) => {
   await pool.query('SELECT 1');
-  res.json({ status: 'ok', database: process.env.DB_NAME, tls: process.env.HTTPS_MIN_VERSION || 'TLSv1.3' });
+  res.json({
+    status: 'ok',
+    database: 'connected',
+    databaseTls: Boolean(pool.config.connectionConfig.ssl),
+  });
 });
 
 app.get('/api/audit-logs', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
@@ -544,7 +591,7 @@ app.post('/api/events', authenticate, checkPermission('events:manage'), async (r
       for (const photo of parsedPhotos.photos) {
         await connection.execute(
           'INSERT INTO event_photos (event_id, file_name, mime_type, photo_data, created_by) VALUES (?, ?, ?, ?, ?)',
-          [result.insertId, photo.fileName, photo.mime, photo.data, req.user.id],
+          [result.insertId, photo.fileName, photo.mime, encryptBytes(photo.data), req.user.id],
         );
       }
       await connection.commit();
@@ -577,14 +624,17 @@ app.get('/api/events/:id/photos', authenticate, checkPermission('events:view'), 
       'SELECT id, file_name, mime_type, photo_data, OCTET_LENGTH(photo_data) AS byte_size, created_at FROM event_photos WHERE event_id = ? ORDER BY id',
       [req.params.id],
     );
-    res.json(photos.map((photo) => ({
-      id: photo.id,
-      fileName: photo.file_name,
-      mimeType: photo.mime_type,
-      data: Buffer.from(photo.photo_data).toString('base64'),
-      byteSize: Number(photo.byte_size),
-      createdAt: photo.created_at,
-    })));
+    res.json(photos.map((photo) => {
+      const data = decryptBytes(photo.photo_data);
+      return {
+        id: photo.id,
+        fileName: photo.file_name,
+        mimeType: photo.mime_type,
+        data: data.toString('base64'),
+        byteSize: data.length,
+        createdAt: photo.created_at,
+      };
+    }));
   } catch (error) { next(error); }
 });
 
@@ -617,7 +667,7 @@ app.post('/api/events/:id/photos', authenticate, checkPermission('events:manage'
       for (const photo of parsedPhotos.photos) {
         await connection.execute(
           'INSERT INTO event_photos (event_id, file_name, mime_type, photo_data, created_by) VALUES (?, ?, ?, ?, ?)',
-          [req.params.id, photo.fileName, photo.mime, photo.data, req.user.id],
+          [req.params.id, photo.fileName, photo.mime, encryptBytes(photo.data), req.user.id],
         );
       }
       await connection.commit();
@@ -1278,7 +1328,7 @@ async function verifyPublicSponsoredChild(qrPayload, passcode) {
 async function getSponsorshipThreads(participantId) {
   await sponsorshipTablesReady;
   const [threads] = await pool.execute(
-    `SELECT id, participant_id, subject, status, created_at, updated_at
+    `SELECT id, participant_id, subject, subject_encrypted, status, created_at, updated_at
      FROM sponsorship_letter_threads
      WHERE participant_id = ?
      ORDER BY updated_at DESC
@@ -1294,9 +1344,12 @@ async function getSponsorshipThreads(participantId) {
      ORDER BY created_at ASC, id ASC`,
     ids,
   );
-  return threads.map((thread) => ({
+  return threads.map(({ subject_encrypted: encryptedSubject, ...thread }) => ({
     ...thread,
-    messages: messages.filter((message) => Number(message.thread_id) === Number(thread.id)),
+    subject: encryptedSubject ? decryptLetter(encryptedSubject) : thread.subject,
+    messages: messages
+      .filter((message) => Number(message.thread_id) === Number(thread.id))
+      .map((message) => ({ ...message, message: decryptLetter(message.message) })),
   }));
 }
 
@@ -1320,6 +1373,111 @@ app.get('/api/sponsorship/children', authenticate, checkPermission('sponsorship:
     }));
     children.sort((left, right) => left.name.localeCompare(right.name));
     res.json(children);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/sponsorship/children/:id/updates', authenticate, checkPermission('sponsorship:view'), async (req, res, next) => {
+  try {
+    await sponsoredChildUpdatesReady;
+    const [[child]] = await pool.execute(
+      `SELECT id FROM participants
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+       LIMIT 1`,
+      [req.params.id],
+    );
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    const [rows] = await pool.execute(
+      `SELECT id, update_type, recorded_on, activity_encrypted, height_encrypted,
+              weight_encrypted, note_encrypted, created_at
+       FROM sponsored_child_updates
+       WHERE participant_id = ?
+       ORDER BY recorded_on DESC, id DESC
+       LIMIT 100`,
+      [child.id],
+    );
+    res.json(rows.map((row) => ({
+      id: row.id,
+      type: row.update_type,
+      recordedOn: row.recorded_on instanceof Date
+        ? row.recorded_on.toISOString().slice(0, 10)
+        : String(row.recorded_on).slice(0, 10),
+      activity: decrypt(row.activity_encrypted),
+      heightCm: decrypt(row.height_encrypted),
+      weightKg: decrypt(row.weight_encrypted),
+      note: decrypt(row.note_encrypted),
+      createdAt: row.created_at,
+    })));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/sponsorship/children/:id/updates', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  try {
+    await sponsoredChildUpdatesReady;
+    const type = String(req.body.type || '');
+    const recordedOn = String(req.body.recordedOn || '');
+    const activity = String(req.body.activity || '').trim();
+    const note = String(req.body.note || '').trim();
+    if (!['growth', 'activity', 'note'].includes(type)) {
+      return res.status(400).json({ error: 'Select a valid child update type' });
+    }
+    if (!validDate(recordedOn) || recordedOn > new Date().toISOString().slice(0, 10)) {
+      return res.status(400).json({ error: 'Enter a valid update date that is not in the future' });
+    }
+    if (activity.length > 120) return res.status(400).json({ error: 'Activity name must be 120 characters or fewer' });
+    if (note.length > 2000) return res.status(400).json({ error: 'Update notes must be 2,000 characters or fewer' });
+    let height = null;
+    let weight = null;
+    if (type === 'growth') {
+      height = req.body.heightCm === '' || req.body.heightCm === null || req.body.heightCm === undefined
+        ? null
+        : Number(req.body.heightCm);
+      weight = req.body.weightKg === '' || req.body.weightKg === null || req.body.weightKg === undefined
+        ? null
+        : Number(req.body.weightKg);
+      if (height === null && weight === null) {
+        return res.status(400).json({ error: 'Enter a height, weight, or both for a growth update' });
+      }
+      if (height !== null && (!Number.isFinite(height) || height < 30 || height > 260)) {
+        return res.status(400).json({ error: 'Height must be between 30 and 260 cm' });
+      }
+      if (weight !== null && (!Number.isFinite(weight) || weight < 1 || weight > 300)) {
+        return res.status(400).json({ error: 'Weight must be between 1 and 300 kg' });
+      }
+    }
+    if (type === 'activity' && !activity) {
+      return res.status(400).json({ error: 'Enter an activity name' });
+    }
+    if (type === 'note' && !note) {
+      return res.status(400).json({ error: 'Enter a note for this update' });
+    }
+    const [[child]] = await pool.execute(
+      `SELECT id FROM participants
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+       LIMIT 1`,
+      [req.params.id],
+    );
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    const [result] = await pool.execute(
+      `INSERT INTO sponsored_child_updates
+         (participant_id, update_type, recorded_on, activity_encrypted, height_encrypted,
+          weight_encrypted, note_encrypted, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        child.id,
+        type,
+        recordedOn,
+        encrypt(activity || null),
+        encrypt(height === null ? null : height.toFixed(1)),
+        encrypt(weight === null ? null : weight.toFixed(1)),
+        encrypt(note || null),
+        req.user.id,
+      ],
+    );
+    await writeAuditLog(req.user, 'sponsorship.child.update.created', 'participant', child.id, {
+      updateType: type,
+      recordedOn,
+    });
+    res.status(201).json({ id: result.insertId, type, recordedOn });
   } catch (error) { next(error); }
 });
 
@@ -1394,7 +1552,7 @@ app.post('/api/sponsorship/children/:id/disbursements', authenticate, checkPermi
       `INSERT INTO sponsorship_disbursements
          (participant_id, amount, disbursed_on, description, receipt_mime, receipt_data, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [child.id, amount.toFixed(2), disbursedOn, description || null, receipt.mime, receipt.data, req.user.id],
+      [child.id, amount.toFixed(2), disbursedOn, description || null, receipt.mime, encryptBytes(receipt.data), req.user.id],
     );
     await writeAuditLog(req.user, 'sponsorship.disbursement.created', 'participant', child.id, {
       amount: amount.toFixed(2),
@@ -1413,7 +1571,7 @@ app.post('/api/sponsorship/disbursements/:id/receipt', authenticate, checkPermis
       [req.params.id],
     );
     if (!rows[0] || !rows[0].receipt_data) return res.status(404).json({ error: 'Receipt proof not found' });
-    res.json({ mimeType: rows[0].receipt_mime, data: Buffer.from(rows[0].receipt_data).toString('base64') });
+    res.json({ mimeType: rows[0].receipt_mime, data: decryptBytes(rows[0].receipt_data).toString('base64') });
   } catch (error) { next(error); }
 });
 
@@ -1421,7 +1579,7 @@ app.get('/api/sponsorship/letters', authenticate, checkPermission('sponsorship:v
   try {
     await sponsorshipTablesReady;
     const [rows] = await pool.query(
-      `SELECT t.id, t.participant_id, t.subject, t.status, t.created_at, t.updated_at,
+      `SELECT t.id, t.participant_id, t.subject, t.subject_encrypted, t.status, t.created_at, t.updated_at,
               p.full_name_encrypted, p.participant_code
        FROM sponsorship_letter_threads t
        JOIN participants p ON p.id = t.participant_id
@@ -1444,11 +1602,13 @@ app.get('/api/sponsorship/letters', authenticate, checkPermission('sponsorship:v
       participantId: thread.participant_id,
       childName: decrypt(thread.full_name_encrypted) || 'Unnamed child',
       participantCode: thread.participant_code,
-      subject: thread.subject,
+      subject: thread.subject_encrypted ? decryptLetter(thread.subject_encrypted) : thread.subject,
       status: thread.status,
       createdAt: thread.created_at,
       updatedAt: thread.updated_at,
-      messages: messages.filter((message) => Number(message.thread_id) === Number(thread.id)),
+      messages: messages
+        .filter((message) => Number(message.thread_id) === Number(thread.id))
+        .map((message) => ({ ...message, message: decryptLetter(message.message) })),
     }));
     res.json(threads);
   } catch (error) { next(error); }
@@ -1464,7 +1624,7 @@ app.post('/api/sponsorship/letters/:id/reply', authenticate, checkPermission('sp
     await pool.execute(
       `INSERT INTO sponsorship_letter_messages (thread_id, sender_type, sender_id, message)
        VALUES (?, 'staff', ?, ?)`,
-      [thread.id, req.user.id, message],
+      [thread.id, req.user.id, encryptLetter(message)],
     );
     await pool.execute(
       `UPDATE sponsorship_letter_threads SET status = 'replied', updated_at = NOW() WHERE id = ?`,
@@ -1578,16 +1738,17 @@ app.post('/api/public/sponsor-letters', async (req, res, next) => {
       if (!thread) return res.status(404).json({ error: 'Open letter thread not found' });
     } else {
       const [created] = await pool.execute(
-        `INSERT INTO sponsorship_letter_threads (participant_id, subject, status)
-         VALUES (?, ?, 'open')`,
-        [verification.child.id, subject],
+        `INSERT INTO sponsorship_letter_threads
+           (participant_id, subject, subject_encrypted, status)
+         VALUES (?, 'Encrypted subject', ?, 'open')`,
+        [verification.child.id, encryptLetter(subject)],
       );
       resolvedThreadId = created.insertId;
     }
     await pool.execute(
       `INSERT INTO sponsorship_letter_messages (thread_id, sender_type, message)
        VALUES (?, 'guardian', ?)`,
-      [resolvedThreadId, message],
+      [resolvedThreadId, encryptLetter(message)],
     );
     await pool.execute(
       `UPDATE sponsorship_letter_threads SET updated_at = NOW() WHERE id = ?`,
@@ -1614,7 +1775,7 @@ app.post('/api/public/sponsor-receipt', async (req, res, next) => {
       [disbursementId, verification.child.id],
     );
     if (!rows[0] || !rows[0].receipt_data) return res.status(404).json({ error: 'Receipt proof not found' });
-    res.json({ mimeType: rows[0].receipt_mime, data: Buffer.from(rows[0].receipt_data).toString('base64') });
+    res.json({ mimeType: rows[0].receipt_mime, data: decryptBytes(rows[0].receipt_data).toString('base64') });
   } catch (error) { next(error); }
 });
 
@@ -1677,45 +1838,91 @@ app.get('/api/reports/attendance', authenticate, checkPermission('reports:view')
   } catch (error) { next(error); }
 });
 
+app.get(
+  '/api/reports/sponsored-child-updates',
+  authenticate,
+  checkPermission('reports:view'),
+  checkPermission('sponsorship:view'),
+  async (req, res, next) => {
+    try {
+      const participantId = Number(req.query.participantId);
+      if (!Number.isSafeInteger(participantId) || participantId < 1) {
+        return res.status(400).json({ error: 'Select a sponsored child for the report' });
+      }
+      await sponsoredChildUpdatesReady;
+      const [[child]] = await pool.execute(
+        `SELECT id, full_name_encrypted, participant_code
+         FROM participants
+         WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+         LIMIT 1`,
+        [participantId],
+      );
+      if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+      const [updates] = await pool.execute(
+        `SELECT update_type, recorded_on, activity_encrypted, height_encrypted,
+                weight_encrypted, note_encrypted
+         FROM sponsored_child_updates
+         WHERE participant_id = ?
+         ORDER BY recorded_on DESC, id DESC`,
+        [child.id],
+      );
+      const rows = updates.map((update) => ({
+        participantCode: child.participant_code,
+        childName: decrypt(child.full_name_encrypted) || 'Unnamed child',
+        recordedOn: update.recorded_on instanceof Date
+          ? update.recorded_on.toISOString().slice(0, 10)
+          : String(update.recorded_on).slice(0, 10),
+        type: update.update_type,
+        activity: decrypt(update.activity_encrypted),
+        heightCm: decrypt(update.height_encrypted),
+        weightKg: decrypt(update.weight_encrypted),
+        note: decrypt(update.note_encrypted),
+      }));
+      const filenameCode = String(child.participant_code || participantId).replace(/[^\w-]/g, '_');
+      res.type('text/csv').attachment(`sponsored-child-updates-${filenameCode}.csv`)
+        .send(new Parser({
+          fields: ['participantCode', 'childName', 'recordedOn', 'type', 'activity', 'heightCm', 'weightKg', 'note'],
+        }).parse(rows));
+    } catch (error) { next(error); }
+  },
+);
+
 app.get('/api/risk-scores', authenticate, checkPermission('analytics:view'), async (req, res, next) => { try { const [rows] = await pool.query('SELECT * FROM predictive_risk_scores ORDER BY computed_at DESC'); res.json(rows); } catch (error) { next(error); } });
 
 app.post('/api/risk-scores/refresh', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
   try {
-    const [participants] = await pool.query('SELECT id FROM participants WHERE status = \'active\'');
-    const serviceUrl = process.env.ANALYTICS_SERVICE_URL || 'http://127.0.0.1:8000';
-    for (const participant of participants) {
-      const [[stats]] = await pool.execute(
-        'SELECT COUNT(*) AS total, MAX(checked_in_at) AS latest FROM check_in_logs WHERE participant_id = ? AND status = \'checked_in\'',
-        [participant.id],
-      );
-      const frequency = Number(stats.total);
-      const recencyDays = stats.latest ? Math.max(0, (Date.now() - new Date(stats.latest).getTime()) / 86400000) : 30;
-      const predictionResponse = await fetch(`${serviceUrl}/predict`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ frequency, regularity: Math.min(1, frequency / 10), recency_days: recencyDays }),
-      });
-      if (!predictionResponse.ok) throw new Error(`Analytics service returned ${predictionResponse.status}`);
-      const prediction = await predictionResponse.json();
-      const score = Number(prediction.risk_score);
-      await pool.execute(
-        'INSERT INTO predictive_risk_scores (participant_id, risk_score, risk_level, model_version, computed_at, created_at) VALUES (?, ?, ?, ?, NOW(), NOW())',
-        [participant.id, score, score >= 70 ? 'high' : score >= 40 ? 'medium' : 'low', prediction.model_version || 'unknown'],
-      );
-    }
-    res.json({ refreshed: participants.length });
+    res.json({ refreshed: await refreshRiskScores() });
   } catch (error) { next(error); }
 });
 
 app.use((error, req, res, next) => { console.error(error); res.status(500).json({ error: 'Internal server error' }); });
 
 async function refreshRiskScores() {
-  const [participants] = await pool.query('SELECT id FROM participants WHERE status = \'active\'');
+  const [participants] = await pool.query(`
+    SELECT p.id,
+           COUNT(DISTINCT YEARWEEK(c.checked_in_at, 3)) AS attendance_weeks,
+           MAX(c.checked_in_at) AS latest
+    FROM participants p
+    LEFT JOIN check_in_logs c
+      ON c.participant_id = p.id
+      AND c.status = 'checked_in'
+      AND c.checked_in_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+    WHERE p.status = 'active'
+    GROUP BY p.id
+  `);
   for (const participant of participants) {
-    const [[stats]] = await pool.execute('SELECT COUNT(*) AS total, MAX(checked_in_at) AS latest FROM check_in_logs WHERE participant_id = ? AND status = \'checked_in\'', [participant.id]);
-    const score = Math.max(0, Math.min(100, 100 - Number(stats.total) * 10));
-    await pool.execute('INSERT INTO predictive_risk_scores (participant_id, risk_score, risk_level, model_version, computed_at, created_at) VALUES (?, ?, ?, ?, NOW(), NOW())', [participant.id, score, score >= 70 ? 'high' : score >= 40 ? 'medium' : 'low', 'baseline-v1']);
+    const recencyDays = participant.latest
+      ? Math.max(0, (Date.now() - new Date(participant.latest).getTime()) / 86400000)
+      : 90;
+    const attendanceCoverage = Math.min(Number(participant.attendance_weeks) / 13, 1);
+    const inactivity = Math.min(recencyDays / 45, 1);
+    const score = Math.round((50 * (1 - attendanceCoverage) + 50 * inactivity) * 100) / 100;
+    await pool.execute(
+      'INSERT INTO predictive_risk_scores (participant_id, risk_score, risk_level, model_version, computed_at, created_at) VALUES (?, ?, ?, ?, NOW(), NOW())',
+      [participant.id, score, score >= 70 ? 'high' : score >= 40 ? 'medium' : 'low', 'attendance-baseline-v2'],
+    );
   }
+  return participants.length;
 }
 cron.schedule('0 2 * * *', () => refreshRiskScores().catch(console.error));
 

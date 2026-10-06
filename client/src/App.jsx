@@ -34,10 +34,10 @@ const STAFF_PERMISSION_OPTIONS = [
   { key: "events:manage", label: "Manage events", description: "View, create, and update events." },
   { key: "checkin:record", label: "Check-in", description: "Record attendance at the check-in station." },
   { key: "analytics:view", label: "Analytics", description: "View and refresh participant analytics." },
-  { key: "reports:view", label: "Reports", description: "View and export attendance reports." },
+  { key: "reports:view", label: "Reports", description: "View and export attendance reports and sponsored-child monitoring data when authorized." },
   { key: "portal:view", label: "Participant QR portal", description: "Look up participant details using a QR code and passcode." },
   { key: "sponsorship:view", label: "View sponsored care", description: "View child lifecycle, allowance history, and letter threads." },
-  { key: "sponsorship:manage", label: "Manage sponsored care", description: "Update child lifecycle and allowances, record gifts, attach receipt proof, and reply to letters." },
+  { key: "sponsorship:manage", label: "Manage sponsored care", description: "Record growth, activity, and care updates; update lifecycle and allowances; attach receipt proof; and reply to letters." },
 ];
 const DEFAULT_STAFF_PERMISSION_KEYS = STAFF_PERMISSION_OPTIONS
   .map(({ key }) => key)
@@ -681,16 +681,6 @@ function Dashboard({ go }) {
             </div>
           </div>
         ))}
-        <div className="col-12 col-lg-4">
-          <button
-            className="action-tile dashboard-action-tile h-100 w-100"
-            onClick={() => go("participants")}
-          >
-            <span className="tile-icon">＋</span>
-            <strong>Register participant</strong>
-            <small>Issue a new digital ID</small>
-          </button>
-        </div>
       </div>
       <div className="row g-4">
         <section className="col-12 col-lg-7">
@@ -1782,8 +1772,7 @@ function Scanner({ portal = false }) {
   const [pass, setPass] = useState("");
   const [requiresPasscode, setRequiresPasscode] = useState(false);
   const [profile, setProfile] = useState(null);
-  const [event, setEvent] = useState("Sunday service");
-  const [location, setLocation] = useState("Main hall");
+  const [event, setEvent] = useState("custom");
   const [events, setEvents] = useState([]);
   const portalBusy = useRef(false);
   const checkinBusy = useRef(false);
@@ -1791,6 +1780,9 @@ function Scanner({ portal = false }) {
   useEffect(() => {
     if (!portal) apiCall("/events").then(setEvents).catch(() => {});
   }, [portal]);
+  const selectedEvent = events.find((item) => String(item.id) === event);
+  const eventName = selectedEvent?.name || "Sunday service";
+  const eventLocation = selectedEvent?.location || null;
 
   const showToast = (text, type = "info", ms = 2500) => {
     setToast({ text, type });
@@ -1829,7 +1821,7 @@ function Scanner({ portal = false }) {
     checkinBusy.current = true;
     try {
       const headers = { "Content-Type": "application/json", ...(localStorage.token ? { Authorization: `Bearer ${localStorage.token}` } : {}) };
-      const resp = await fetch(api + "/checkin", { method: "POST", headers, body: JSON.stringify({ qrPayload: v, eventName: event, location }) });
+      const resp = await fetch(api + "/checkin", { method: "POST", headers, body: JSON.stringify({ qrPayload: v, eventName, location: eventLocation }) });
       const result = await resp.json().catch(() => ({}));
       if (resp.status === 401) {
         localStorage.removeItem("token");
@@ -1846,7 +1838,7 @@ function Scanner({ portal = false }) {
     } catch (x) {
       // If offline or server unreachable, queue and inform user (avoid duplicates)
       try {
-        const queued = await queueCheckin({ qrPayload: v, eventName: event, location });
+        const queued = await queueCheckin({ qrPayload: v, eventName, location: eventLocation });
         if (queued) showToast("Offline: attendance queued for sync.", "info");
         else showToast("Attendance already queued for today.", "warning");
       } catch (qerr) {
@@ -1865,7 +1857,7 @@ function Scanner({ portal = false }) {
         await openPortal(payload, pass);
       } else {
         const headers = { "Content-Type": "application/json", ...(localStorage.token ? { Authorization: `Bearer ${localStorage.token}` } : {}) };
-        const resp = await fetch(api + "/checkin", { method: "POST", headers, body: JSON.stringify({ qrPayload: payload, eventName: event, location }) });
+        const resp = await fetch(api + "/checkin", { method: "POST", headers, body: JSON.stringify({ qrPayload: payload, eventName, location: eventLocation }) });
         const result = await resp.json().catch(() => ({}));
         if (resp.status === 401) {
           localStorage.removeItem("token");
@@ -1882,7 +1874,7 @@ function Scanner({ portal = false }) {
     } catch (x) {
       if (!portal) {
         try {
-          const queued = await queueCheckin({ qrPayload: payload, eventName: event, location });
+          const queued = await queueCheckin({ qrPayload: payload, eventName, location: eventLocation });
           if (queued) showToast("Offline: check-in queued for sync.", "info");
           else showToast("Attendance already queued for today.", "warning");
         } catch (qerr) {
@@ -1993,20 +1985,16 @@ function Scanner({ portal = false }) {
               <>
                 <div className="col-12">
                   <label className="form-label">Event</label>
-                  <select className="form-select" value={event} onChange={(e) => {
-                    const selectedEvent = events.find((item) => item.name === e.target.value);
-                    setEvent(e.target.value);
-                    if (selectedEvent?.location) setLocation(selectedEvent.location);
-                  }}>
-                    <option value="Sunday service">Sunday service (custom)</option>
-                    {events.map((item) => <option key={item.id} value={item.name}>{item.name} · {new Date(item.starts_at).toLocaleString()}</option>)}
+                  <select className="form-select" value={event} onChange={(e) => setEvent(e.target.value)}>
+                    <option value="custom">Sunday service (custom)</option>
+                    {events.map((item) => <option key={item.id} value={String(item.id)}>{item.name} · {new Date(item.starts_at).toLocaleString()}</option>)}
                   </select>
                 </div>
-                <Field
-                  label="Location"
-                  value={location}
-                  onChange={(e) => setLocation(e.target.value)}
-                />
+                {selectedEvent?.location && (
+                  <p className="text-secondary small mt-3 mb-0">
+                    Event location: <strong>{selectedEvent.location}</strong>
+                  </p>
+                )}
               </>
             )}
             <button
@@ -2323,9 +2311,9 @@ function Analytics() {
   return (
     <>
       <Title
-        e="PREDICTIVE ANALYTICS"
-        t="See the next need."
-        d="Risk scores combine recency and participation patterns."
+        e="ATTENDANCE RISK INDICATOR"
+        t="Spot attendance gaps."
+        d="A transparent, rule-based indicator summarizes recent check-in coverage and recency. It has not been validated as a predictor of future outcomes."
       />
       <div className="filter-bar btn-group">
         {["all", "high", "medium", "low"].map((x) => (
@@ -2346,7 +2334,7 @@ function Analytics() {
         </div>
         <div className="col-12 col-lg-5">
           <div className="surface table-surface">
-            <h2>Risk register</h2>
+            <h2>Attendance indicator register</h2>
             {data.map((r, i) => (
               <div className="risk-row" key={i}>
                 <div>
@@ -2365,8 +2353,19 @@ function Analytics() {
     </>
   );
 }
-function Reports() {
+function Reports({ user }) {
+  const canExportChildUpdates = canAccessPermission("sponsorship:view", user);
   const [range, setRange] = useState("weekly");
+  const [children, setChildren] = useState([]);
+  const [selectedChildId, setSelectedChildId] = useState("");
+  const [childExportError, setChildExportError] = useState("");
+  const [childExportBusy, setChildExportBusy] = useState(false);
+  useEffect(() => {
+    if (!canExportChildUpdates) return;
+    apiCall("/sponsorship/children")
+      .then(setChildren)
+      .catch((loadError) => setChildExportError(loadError.message));
+  }, [canExportChildUpdates]);
   const download = async (format) => {
     let r = await fetch(
       `${api}/reports/attendance?range=${range}&format=${format}`,
@@ -2379,12 +2378,36 @@ function Reports() {
     a.click();
     URL.revokeObjectURL(u);
   };
+  const downloadChildUpdates = async () => {
+    setChildExportError("");
+    setChildExportBusy(true);
+    try {
+      const response = await fetch(
+        `${api}/reports/sponsored-child-updates?participantId=${encodeURIComponent(selectedChildId)}`,
+        { headers: { Authorization: `Bearer ${localStorage.token}` } },
+      );
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Could not export sponsored-child updates.");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `sponsored-child-updates-${selectedChildId}.csv`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (exportError) {
+      setChildExportError(exportError.message);
+    } finally {
+      setChildExportBusy(false);
+    }
+  };
   return (
     <>
       <Title
         e="REPORTING"
         t="Turn activity into clarity."
-        d="Export attendance records for your weekly or monthly review."
+        d="Export attendance records and, with sponsored-care access, child growth and activity history."
       />
       <div className="surface report-panel">
         <label className="form-label">Reporting range</label>
@@ -2406,6 +2429,32 @@ function Reports() {
           Download CSV ↓
         </button>
       </div>
+      {canExportChildUpdates && (
+        <div className="surface report-panel mt-4">
+          <h2>Sponsored-child monitoring</h2>
+          <p>Export dated growth, activity, and care-note records for one child.</p>
+          {childExportError && <div className="alert alert-danger" role="alert">{childExportError}</div>}
+          <label className="form-label" htmlFor="child-updates-report">Sponsored child</label>
+          <select
+            id="child-updates-report"
+            className="form-select mb-3"
+            value={selectedChildId}
+            onChange={(event) => setSelectedChildId(event.target.value)}
+          >
+            <option value="">Select a child</option>
+            {children.map((child) => (
+              <option key={child.id} value={child.id}>{child.name} ({child.participantCode})</option>
+            ))}
+          </select>
+          <button
+            className="btn btn-outline-dark"
+            disabled={!selectedChildId || childExportBusy}
+            onClick={downloadChildUpdates}
+          >
+            {childExportBusy ? "Preparing CSV…" : "Download child updates CSV ↓"}
+          </button>
+        </div>
+      )}
     </>
   );
 }
@@ -2522,12 +2571,21 @@ function SponsoredCare({ user }) {
   const [letters, setLetters] = useState([]);
   const [selectedChildId, setSelectedChildId] = useState(null);
   const [disbursements, setDisbursements] = useState([]);
+  const [childUpdates, setChildUpdates] = useState([]);
   const [staffProof, setStaffProof] = useState(null);
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("active");
   const [monthlyAllowance, setMonthlyAllowance] = useState("0");
   const [gift, setGift] = useState({ amount: "", disbursedOn: new Date().toISOString().slice(0, 10), description: "", receiptData: "" });
+  const [childUpdate, setChildUpdate] = useState({
+    type: "growth",
+    recordedOn: new Date().toISOString().slice(0, 10),
+    activity: "",
+    heightCm: "",
+    weightKg: "",
+    note: "",
+  });
   const [receiptName, setReceiptName] = useState("");
   const [reply, setReply] = useState("");
   const [selectedThreadId, setSelectedThreadId] = useState(null);
@@ -2557,13 +2615,43 @@ function SponsoredCare({ user }) {
     setStatus(child.lifecycle);
     setMonthlyAllowance(String(child.monthlyAllowance));
     setDisbursements([]);
+    setChildUpdates([]);
     setStaffProof(null);
     setSelectedThreadId(null);
     setError("");
     try {
-      setDisbursements(await apiCall(`/sponsorship/children/${child.id}/disbursements`));
+      const [records, updates] = await Promise.all([
+        apiCall(`/sponsorship/children/${child.id}/disbursements`),
+        apiCall(`/sponsorship/children/${child.id}/updates`),
+      ]);
+      setDisbursements(records);
+      setChildUpdates(updates);
     } catch (loadError) {
       setError(loadError.message);
+    }
+  };
+
+  const addChildUpdate = async (event) => {
+    event.preventDefault();
+    setError("");
+    setMessage("");
+    try {
+      await apiCall(`/sponsorship/children/${selectedChildId}/updates`, {
+        method: "POST",
+        body: JSON.stringify(childUpdate),
+      });
+      setChildUpdate({
+        type: "growth",
+        recordedOn: new Date().toISOString().slice(0, 10),
+        activity: "",
+        heightCm: "",
+        weightKg: "",
+        note: "",
+      });
+      setChildUpdates(await apiCall(`/sponsorship/children/${selectedChildId}/updates`));
+      setMessage("Sponsored child update recorded.");
+    } catch (saveError) {
+      setError(saveError.message);
     }
   };
 
@@ -2694,6 +2782,127 @@ function SponsoredCare({ user }) {
                 <span className={`lifecycle-pill ${selectedChild.lifecycle}`}>{selectedChild.lifecycle}</span>
               </div>
               <section className="sponsorship-detail-section">
+                <div className="sponsorship-list-heading">
+                  <div>
+                    <h3>Growth and activity history</h3>
+                    <span>Private notes and physical measurements are encrypted at rest.</span>
+                  </div>
+                  <span>{childUpdates.length} updates</span>
+                </div>
+                {canManage && (
+                  <form className="child-update-form" onSubmit={addChildUpdate}>
+                    <div className="row g-3">
+                      <div className="col-12 col-md-4">
+                        <label className="form-label" htmlFor="child-update-type">Update type</label>
+                        <select
+                          id="child-update-type"
+                          className="form-select"
+                          value={childUpdate.type}
+                          onChange={(event) => setChildUpdate({ ...childUpdate, type: event.target.value })}
+                        >
+                          <option value="growth">Growth measurement</option>
+                          <option value="activity">Activity attended</option>
+                          <option value="note">Care note</option>
+                        </select>
+                      </div>
+                      <div className="col-12 col-md-4">
+                        <label className="form-label" htmlFor="child-update-date">Date</label>
+                        <input
+                          id="child-update-date"
+                          className="form-control"
+                          type="date"
+                          max={new Date().toISOString().slice(0, 10)}
+                          required
+                          value={childUpdate.recordedOn}
+                          onChange={(event) => setChildUpdate({ ...childUpdate, recordedOn: event.target.value })}
+                        />
+                      </div>
+                      {childUpdate.type === "growth" && (
+                        <>
+                          <div className="col-12 col-md-4">
+                            <label className="form-label" htmlFor="child-update-height">Height (cm)</label>
+                            <input
+                              id="child-update-height"
+                              className="form-control"
+                              type="number"
+                              min="30"
+                              max="260"
+                              step="0.1"
+                              value={childUpdate.heightCm}
+                              onChange={(event) => setChildUpdate({ ...childUpdate, heightCm: event.target.value })}
+                            />
+                          </div>
+                          <div className="col-12 col-md-4">
+                            <label className="form-label" htmlFor="child-update-weight">Weight (kg)</label>
+                            <input
+                              id="child-update-weight"
+                              className="form-control"
+                              type="number"
+                              min="1"
+                              max="300"
+                              step="0.1"
+                              value={childUpdate.weightKg}
+                              onChange={(event) => setChildUpdate({ ...childUpdate, weightKg: event.target.value })}
+                            />
+                          </div>
+                        </>
+                      )}
+                      {childUpdate.type === "activity" && (
+                        <div className="col-12 col-md-8">
+                          <label className="form-label" htmlFor="child-update-activity">Activity</label>
+                          <input
+                            id="child-update-activity"
+                            className="form-control"
+                            maxLength={120}
+                            required
+                            value={childUpdate.activity}
+                            onChange={(event) => setChildUpdate({ ...childUpdate, activity: event.target.value })}
+                            placeholder="Activity or program attended"
+                          />
+                        </div>
+                      )}
+                      <div className="col-12">
+                        <label className="form-label" htmlFor="child-update-note">
+                          {childUpdate.type === "note" ? "Care note" : "Additional notes (optional)"}
+                        </label>
+                        <textarea
+                          id="child-update-note"
+                          className="form-control"
+                          rows="2"
+                          maxLength={2000}
+                          required={childUpdate.type === "note"}
+                          value={childUpdate.note}
+                          onChange={(event) => setChildUpdate({ ...childUpdate, note: event.target.value })}
+                        />
+                      </div>
+                      <div className="col-12">
+                        <button className="btn btn-dark" type="submit">Record update</button>
+                      </div>
+                    </div>
+                  </form>
+                )}
+                {childUpdates.length ? (
+                  <div className="child-update-history">
+                    {childUpdates.map((update) => (
+                      <article className="child-update-row" key={update.id}>
+                        <div>
+                          <strong>{update.type === "growth" ? "Growth measurement" : update.type === "activity" ? update.activity : "Care note"}</strong>
+                          <small>{new Date(`${update.recordedOn}T00:00:00`).toLocaleDateString()}</small>
+                        </div>
+                        {update.type === "growth" && (
+                          <span>
+                            {update.heightCm ? `${update.heightCm} cm` : ""}
+                            {update.heightCm && update.weightKg ? " · " : ""}
+                            {update.weightKg ? `${update.weightKg} kg` : ""}
+                          </span>
+                        )}
+                        {update.note && <p>{update.note}</p>}
+                      </article>
+                    ))}
+                  </div>
+                ) : <p className="text-secondary mt-3 mb-0">No growth, activity, or care updates recorded.</p>}
+              </section>
+              <section className="sponsorship-detail-section">
                 <h3>Sponsorship and allowance</h3>
                 {canManage ? (
                   <form className="sponsorship-settings-form" onSubmit={saveChild}>
@@ -2821,6 +3030,17 @@ function StaffAccounts() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [permissionEditor, setPermissionEditor] = useState(null);
+  const [permissionDraft, setPermissionDraft] = useState([]);
+
+  useEffect(() => {
+    if (!permissionEditor) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape" && !saving) setPermissionEditor(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [permissionEditor, saving]);
 
   useEffect(() => {
     let mounted = true;
@@ -2869,12 +3089,12 @@ function StaffAccounts() {
     }
   };
 
-  const savePermissions = async (account) => {
+  const savePermissions = async (account, selectedPermissions) => {
     setSaving(true);
     setError("");
     setMessage("");
     try {
-      const permissions = permissionsById[account.id] || [];
+      const permissions = selectedPermissions || permissionsById[account.id] || [];
       await apiCall(`/staff/${account.id}/permissions`, {
         method: "PUT",
         body: JSON.stringify({ permissions }),
@@ -2883,12 +3103,26 @@ function StaffAccounts() {
         item.id === account.id ? { ...item, permissions } : item,
       ));
       setMessage(`Permissions saved for ${account.username}.`);
+      setPermissionEditor(null);
     } catch (saveError) {
       setError(saveError.message);
     } finally {
       setSaving(false);
     }
   };
+
+  const openNewPermissionEditor = () => {
+    setPermissionDraft(newPermissions);
+    setPermissionEditor({ type: "new" });
+  };
+  const openStaffPermissionEditor = (account) => {
+    setPermissionDraft(permissionsById[account.id] || []);
+    setPermissionEditor({ type: "staff", account });
+  };
+
+  const selectedPermissionLabels = (permissions) => STAFF_PERMISSION_OPTIONS
+    .filter(({ key }) => permissions.includes(key))
+    .map(({ label }) => label);
 
   const toggleStatus = async (account) => {
     setSaving(true);
@@ -2939,10 +3173,15 @@ function StaffAccounts() {
               <small className="text-secondary">At least 8 characters; give it to the staff member securely.</small>
             </div>
           </div>
-          <fieldset>
-            <legend className="form-label">Staff permissions</legend>
-            <PermissionCheckboxes idPrefix="new-staff" selected={newPermissions} onChange={setNewPermissions} />
-          </fieldset>
+          <div className="staff-create-permissions">
+            <div>
+              <strong>Account access</strong>
+              <small>{newPermissions.length} permission{newPermissions.length === 1 ? "" : "s"} selected</small>
+            </div>
+            <button className="btn btn-outline-primary" type="button" onClick={openNewPermissionEditor}>
+              Choose permissions
+            </button>
+          </div>
           <button className="btn btn-dark align-self-start" type="submit" disabled={saving}>
             {saving ? "Saving…" : "Create staff account"}
           </button>
@@ -2961,16 +3200,20 @@ function StaffAccounts() {
                   </div>
                   <span className={`staff-account-status ${account.status}`}>{account.status}</span>
                 </div>
-                <fieldset>
-                  <legend className="form-label">Permissions</legend>
-                  <PermissionCheckboxes
-                    idPrefix={`staff-${account.id}`}
-                    selected={permissionsById[account.id] || []}
-                    onChange={(permissions) => setPermissionsById((previous) => ({ ...previous, [account.id]: permissions }))}
-                  />
-                </fieldset>
+                <div className="staff-account-permissions">
+                  <div>
+                    <strong>{(permissionsById[account.id] || []).length} permissions assigned</strong>
+                    <span>{selectedPermissionLabels(permissionsById[account.id] || []).join(" · ") || "No page access assigned"}</span>
+                  </div>
+                  <button
+                    className="btn btn-outline-primary btn-sm"
+                    type="button"
+                    onClick={() => openStaffPermissionEditor(account)}
+                  >
+                    Edit permissions
+                  </button>
+                </div>
                 <div className="staff-account-actions">
-                  <button className="btn btn-dark btn-sm" disabled={saving} onClick={() => savePermissions(account)}>Save permissions</button>
                   <button className={`btn btn-sm ${account.status === "active" ? "btn-outline-danger" : "btn-outline-success"}`} disabled={saving} onClick={() => toggleStatus(account)}>
                     {account.status === "active" ? "Deactivate account" : "Activate account"}
                   </button>
@@ -2980,6 +3223,77 @@ function StaffAccounts() {
           </div>
         ) : <p className="text-secondary">No Church Administrator accounts are registered.</p>}
       </section>
+      {permissionEditor && createPortal(
+        <div
+          className="staff-permission-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !saving) setPermissionEditor(null);
+          }}
+        >
+          <section
+            className="staff-permission-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="staff-permission-modal-title"
+          >
+            <header className="staff-permission-modal-header">
+              <div>
+                <span className="eyebrow">STAFF ACCESS</span>
+                <h2 id="staff-permission-modal-title">
+                  {permissionEditor.type === "new"
+                    ? "Choose staff permissions"
+                    : `Permissions for ${permissionEditor.account.username}`}
+                </h2>
+                <p>Select the pages and actions this Church Administrator can access.</p>
+              </div>
+              <button
+                type="button"
+                className="btn-close"
+                aria-label="Close permission editor"
+                disabled={saving}
+                onClick={() => setPermissionEditor(null)}
+              />
+            </header>
+            <PermissionCheckboxes
+              idPrefix={permissionEditor.type === "new" ? "new-staff-modal" : `staff-${permissionEditor.account.id}-modal`}
+              selected={permissionDraft}
+              onChange={setPermissionDraft}
+            />
+            <footer className="staff-permission-modal-footer">
+              <button
+                type="button"
+                className="btn btn-outline-secondary"
+                disabled={saving}
+                onClick={() => setPermissionEditor(null)}
+              >
+                Cancel
+              </button>
+              {permissionEditor.type === "staff" ? (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={saving}
+                  onClick={() => savePermissions(permissionEditor.account, permissionDraft)}
+                >
+                  {saving ? "Saving…" : "Save permissions"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setNewPermissions(permissionDraft);
+                    setPermissionEditor(null);
+                  }}
+                >
+                  Apply permissions
+                </button>
+              )}
+            </footer>
+          </section>
+        </div>,
+        document.body,
+      )}
     </>
   );
 }
@@ -3047,7 +3361,7 @@ function App() {
     portal: <Scanner portal />,
     sponsorship: <SponsoredCare user={user} />,
     analytics: <Analytics />,
-    reports: <Reports />,
+    reports: <Reports user={user} />,
   };
   if (STAFF_ROLES.includes(String(user.role).toLowerCase())) {
     pages.account = <AccountSettings onUserUpdated={setUser} />;

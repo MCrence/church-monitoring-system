@@ -1,24 +1,33 @@
-import os
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel, Field
+
+from risk_scoring import score_attendance_risk
 
 app = FastAPI(title="Church Monitoring Analytics")
 
 
 class PredictionRequest(BaseModel):
-    frequency: float = Field(ge=0)
-    regularity: float = Field(ge=0, le=1)
-    recency_days: float = Field(ge=0)
+    attendance_weeks: float = Field(ge=0, allow_inf_nan=False)
+    recency_days: float = Field(ge=0, allow_inf_nan=False)
 
 
 @app.post("/predict")
 def predict(request: PredictionRequest):
-    """Return a deterministic baseline until a trained LightGBM model is supplied."""
-    score = max(0.0, min(100.0, request.recency_days * 2 - request.frequency * 5 + (1 - request.regularity) * 40))
-    return {"risk_score": round(score, 2), "model_version": "baseline-v1"}
+    """Return a transparent attendance indicator, not a validated prediction."""
+    score = score_attendance_risk(request.attendance_weeks, request.recency_days)
+    return {
+        "risk_score": score,
+        "model_version": "attendance-baseline-v2",
+        "model_type": "rule_based_heuristic",
+        "validated": False,
+    }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": os.getenv("MODEL_PATH", "baseline")}
+    return {
+        "status": "ok",
+        "model": "attendance-baseline-v2",
+        "model_type": "rule_based_heuristic",
+        "validated": False,
+    }

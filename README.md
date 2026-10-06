@@ -79,6 +79,13 @@ DB_USER=root
 DB_PASSWORD=your-mysql-password
 JWT_SECRET=your-secret-key
 AES_KEY=your-64-character-hex-key
+# Optional: active key ID and JSON map of key IDs to 64-character hex keys.
+# Keep AES_KEY set while legacy profile fields still use the original key.
+AES_KEY_ID=primary
+AES_KEYRING={"primary":"your-64-character-hex-key"}
+# Optional MySQL TLS. Prefer a trusted CA certificate in production.
+DB_SSL=true
+DB_SSL_CA=
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
 SMTP_SECURE=false
@@ -92,6 +99,46 @@ Configure SMTP with credentials from your email provider. For port `465`, set
 address must be permitted by the provider. SMTP settings are required to send
 admin email verification codes; credential changes do not require email
 delivery.
+
+Sensitive profile fields continue to decrypt using `AES_KEY`. New encrypted
+values use the active key in `AES_KEYRING`, selected by `AES_KEY_ID`; retain old
+keys in the keyring until all data encrypted with them has been migrated. Use
+unique random 32-byte keys and keep them outside source control. The server can
+also read older event-photo and sponsorship-receipt blobs that were stored
+without encryption; new uploads are encrypted when a valid `AES_KEY` is
+configured. Do not treat this as evidence of hardware-backed key storage.
+
+For database connections, `DB_SSL=true` enables TLS with certificate validation,
+and `DB_SSL_CA` may contain the trusted CA certificate. `/api/health` reports
+whether TLS was configured; it does not verify a negotiated TLS session or
+prove the database provider's configuration.
+
+Sponsored-child records include dated growth, activity, and private care-note
+updates. The server creates the `sponsored_child_updates` table
+non-destructively with `CREATE TABLE IF NOT EXISTS`; existing installations
+retain their current records. The SQL export also includes the table for fresh
+imports.
+
+New sponsor-letter subjects and message bodies are encrypted before they are
+written to the database. Existing letter subjects and messages remain readable
+in their legacy plaintext format; this deployment does not rewrite existing
+letter records. Existing installations receive the nullable
+`subject_encrypted` column through a non-destructive schema migration.
+
+The analytics service provides an attendance-gap heuristic (`attendance-baseline-v2`)
+based on attended weeks in the last 90 days and days since the last check-in.
+It is not a trained model and has not been validated against future outcomes.
+Do not use the scores as the sole basis for decisions about a child. Run its
+standard-library tests with:
+
+```powershell
+cd analytics-service
+python -m unittest
+```
+
+The [ISO/IEC 25010 evaluation protocol](./ISO-IEC-25010-EVALUATION.md) lists
+measurable criteria and distinguishes local test results from usability,
+production-cloud, and security evidence that still must be collected.
 
 The account settings feature requires unique usernames and email addresses.
 Fresh database imports include these indexes. For an existing database, first

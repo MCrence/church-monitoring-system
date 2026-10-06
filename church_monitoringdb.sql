@@ -1524,6 +1524,7 @@ CREATE TABLE `sponsorship_letter_threads` (
   `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
   `participant_id` int(11) UNSIGNED NOT NULL,
   `subject` varchar(160) NOT NULL,
+  `subject_encrypted` text DEFAULT NULL,
   `status` varchar(24) NOT NULL DEFAULT 'open',
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1544,6 +1545,23 @@ CREATE TABLE `sponsorship_letter_messages` (
   KEY `idx_sponsorship_letter_messages_thread` (`thread_id`,`created_at`),
   CONSTRAINT `fk_sponsorship_letter_messages_thread`
     FOREIGN KEY (`thread_id`) REFERENCES `sponsorship_letter_threads` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `sponsored_child_updates` (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `participant_id` int(11) UNSIGNED NOT NULL,
+  `update_type` varchar(20) NOT NULL,
+  `recorded_on` date NOT NULL,
+  `activity_encrypted` text DEFAULT NULL,
+  `height_encrypted` text DEFAULT NULL,
+  `weight_encrypted` text DEFAULT NULL,
+  `note_encrypted` text DEFAULT NULL,
+  `created_by` int(11) UNSIGNED DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_sponsored_child_updates_child_date` (`participant_id`,`recorded_on`,`id`),
+  CONSTRAINT `fk_sponsored_child_updates_participant`
+    FOREIGN KEY (`participant_id`) REFERENCES `participants` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
