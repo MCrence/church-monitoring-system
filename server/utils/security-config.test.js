@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { getProductionSecurityErrors } = require('./security-config');
+const { canonicalClientOrigin, getProductionSecurityErrors } = require('./security-config');
 
 test('does not impose deployment-only requirements outside production', () => {
   assert.deepEqual(getProductionSecurityErrors({ NODE_ENV: 'development' }), []);
@@ -16,6 +16,15 @@ test('accepts production settings with independent strong secret and exact HTTPS
   }), []);
 });
 
+test('canonicalizes a single trailing slash without allowing paths or origin decorations', () => {
+  assert.equal(canonicalClientOrigin('https://church.example/'), 'https://church.example');
+  assert.equal(canonicalClientOrigin('https://church.example/path'), null);
+  assert.equal(canonicalClientOrigin('https://church.example/?query=1'), null);
+  assert.equal(canonicalClientOrigin('https://church.example/#fragment'), null);
+  assert.equal(canonicalClientOrigin('https://user@church.example'), null);
+  assert.equal(canonicalClientOrigin('http://church.example/'), null);
+});
+
 test('rejects weak, reused, or malformed production security settings', () => {
   assert.deepEqual(getProductionSecurityErrors({
     NODE_ENV: 'production',
@@ -25,6 +34,6 @@ test('rejects weak, reused, or malformed production security settings', () => {
   }), [
     'JWT_SECRET must contain at least 32 bytes in production',
     'JWT_SECRET and AES_KEY must be different secrets',
-    'CLIENT_ORIGIN must be an exact HTTPS origin without a path or wildcard',
+    'CLIENT_ORIGIN must be set to the HTTPS origin of the production client',
   ]);
 });

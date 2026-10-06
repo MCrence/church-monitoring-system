@@ -21,7 +21,7 @@ const { decryptLetter, encryptLetter } = require('./utils/letter-encryption');
 const { getAttendanceTransition } = require('./utils/attendance-transition');
 const { createParticipantPasscode, isValidParticipantPasscode } = require('./utils/participant-passcode');
 const { createPersistentRateLimiter } = require('./utils/persistent-rate-limit');
-const { getProductionSecurityErrors } = require('./utils/security-config');
+const { canonicalClientOrigin, getProductionSecurityErrors } = require('./utils/security-config');
 const {
   BASELINE_VERSION,
   MODEL_VERSION,
@@ -49,6 +49,9 @@ if (!Number.isSafeInteger(trustProxyHops) || trustProxyHops < 0) {
 
 const app = express();
 app.set('trust proxy', trustProxyHops);
+const clientOrigin = process.env.CLIENT_ORIGIN
+  ? canonicalClientOrigin(process.env.CLIENT_ORIGIN) || process.env.CLIENT_ORIGIN
+  : 'http://localhost:5173';
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   port: Number(process.env.DB_PORT || 3306),
@@ -298,7 +301,7 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 app.use(helmet(isProduction
   ? { hsts: { maxAge: 31_536_000, includeSubDomains: true, preload: false } }
   : {}));
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
+app.use(cors({ origin: clientOrigin }));
 app.use((req, res, next) => {
   const hasReceiptUpload = req.method === 'POST' &&
     /^\/api\/sponsorship\/children\/\d+\/disbursements$/.test(req.path);

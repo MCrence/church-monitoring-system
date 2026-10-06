@@ -116,7 +116,8 @@ without encryption; new uploads are encrypted when a valid `AES_KEY` is
 configured. Do not treat this as evidence of hardware-backed key storage.
 
 Production startup requires a 32-byte-or-longer `JWT_SECRET`, a distinct
-`AES_KEY`, and an exact HTTPS `CLIENT_ORIGIN`. Database connections use
+`AES_KEY`, and a production HTTPS `CLIENT_ORIGIN` (a single trailing slash is
+normalized). Database connections use
 certificate-validated TLS in production and require TLS 1.3; development can
 enable database TLS with `DB_SSL=true` and optionally provide `DB_SSL_CA`.
 `/api/health` reports the TLS protocol negotiated by the database connection;
