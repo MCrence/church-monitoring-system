@@ -420,3 +420,37 @@
 .sponsor-letter-message.form-control:focus{background-image:repeating-linear-gradient(to bottom,transparent 0,transparent calc(2rem - 1px),#b9d1df calc(2rem - 1px),#b9d1df 2rem)}
 .sponsor-letter-send{margin-top:12px}
 @media(max-width:480px){.sponsor-letter-paper{padding:14px 12px;border-width:6px}.sponsor-letter-paper-header{gap:10px}.sponsor-letter-recipient span{overflow-wrap:anywhere}.sponsor-letter-message.form-control{min-height:230px}}
+.sponsorship-school-section p{margin:0;white-space:pre-line}
+.sponsorship-school-form{display:grid;gap:8px;max-width:620px}
+.sponsorship-school-form .btn{justify-self:start}
+.participant-modal{width:min(100%,960px);padding:26px 30px 24px;background:#f5f8fc}
+.participant-modal-header{margin:-26px -30px 22px;padding:25px 30px 21px;border:0;border-radius:16px 16px 0 0;background:radial-gradient(circle at 88% 5%,rgba(75,183,235,.36),transparent 30%),linear-gradient(115deg,#082957,#0e4a86 72%,#0879c9)}
+.participant-modal-header .eyebrow{color:#caff83}
+.participant-modal-header h2{color:#fff}
+.participant-modal-header p{color:#d5e6f7}
+.participant-modal-header .btn-close{filter:brightness(0) invert(1);opacity:.8}
+.participant-modal-header .btn-close:hover{opacity:1}
+.participant-registration-form{display:grid;gap:14px}
+.registration-section{padding:20px 21px;border:1px solid #e0e9f2;border-radius:15px;background:rgba(255,255,255,.94);box-shadow:0 7px 20px rgba(23,55,91,.045)}
+.registration-section-heading{display:flex;align-items:center;gap:12px;margin:0 0 17px;padding:0 0 14px;border-bottom:1px solid #e9eff5}
+.registration-section-heading>span{display:grid;width:38px;height:38px;flex:0 0 38px;place-items:center;border:1px solid #d6e9c6;border-radius:12px;background:#f1f9e9;color:#407c20;font:700 12px 'Space Grotesk';letter-spacing:.5px}
+.registration-section-heading h3{margin:0;color:#0c315d;font:600 17px 'Space Grotesk';letter-spacing:-.2px}
+.registration-section-heading p{margin:4px 0 0;color:#70839a;font-size:12px}
+.registration-section .form-label{margin-bottom:7px;color:#385570;font-size:12px}
+.registration-section .form-control,.registration-section .form-select{min-height:44px;background-color:#fbfdff}
+.registration-section textarea.form-control{min-height:74px}
+.registration-field-hint{display:block;margin-top:6px;color:#71849a;font-size:11px;line-height:1.45}
+.registration-note{padding:11px 13px;border:1px solid #e2edf5;border-radius:10px;background:#f6faff;color:#5b7188;font-size:12px;line-height:1.55}
+.participant-modal-footer{position:sticky;bottom:-24px;margin:0 -30px -24px;padding:16px 30px 24px;border-color:#e0e9f2;background:rgba(245,248,252,.96);backdrop-filter:blur(10px)}
+.participant-modal-footer .btn-dark{min-width:190px;background:linear-gradient(100deg,#0a376a,#0879c9);border-color:#0879c9;box-shadow:0 7px 16px rgba(8,81,143,.16)}
+@media(max-width:640px){
+  .participant-modal{padding:17px 13px 19px}
+  .participant-modal-header{margin:-17px -13px 15px;padding:20px 17px 18px}
+  .registration-section{padding:16px 14px;border-radius:13px}
+  .registration-section-heading{align-items:flex-start;gap:10px;margin-bottom:14px;padding-bottom:12px}
+  .registration-section-heading>span{width:34px;height:34px;flex-basis:34px;border-radius:10px}
+  .registration-section-heading h3{font-size:15px}
+  .registration-section-heading p{font-size:11px}
+  .participant-modal-footer{bottom:-19px;margin:0 -13px -19px;padding:13px 13px 19px}
+  .participant-modal-footer .btn-dark{min-width:0}
+}

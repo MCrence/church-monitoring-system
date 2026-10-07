@@ -22,7 +22,14 @@ const { getAttendanceTransition } = require('./utils/attendance-transition');
 const { createParticipantPasscode, isValidParticipantPasscode } = require('./utils/participant-passcode');
 const { createPersistentRateLimiter } = require('./utils/persistent-rate-limit');
 const { initializeSponsorshipTables } = require('./utils/sponsorship-tables');
-const { canonicalClientOrigin, getProductionSecurityErrors } = require('./utils/security-config');
+const {
+  GOER_EDUCATION_LEVELS,
+  canGoerAccessParticipant,
+  canGoerManageCare,
+  canGoerUsePermission,
+  isGoerRole,
+} = require('./utils/goer-access');
+const { getProductionSecurityErrors } = require('./utils/security-config');
 const {
   BASELINE_VERSION,
   MODEL_VERSION,
@@ -50,9 +57,6 @@ if (!Number.isSafeInteger(trustProxyHops) || trustProxyHops < 0) {
 
 const app = express();
 app.set('trust proxy', trustProxyHops);
-const clientOrigin = process.env.CLIENT_ORIGIN
-  ? canonicalClientOrigin(process.env.CLIENT_ORIGIN) || process.env.CLIENT_ORIGIN
-  : 'http://localhost:5173';
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   port: Number(process.env.DB_PORT || 3306),
@@ -111,7 +115,8 @@ const participantProfileColumnsReady = (async () => {
        AND COLUMN_NAME IN (
          'education_level', 'grade_level', 'program_course_encrypted',
          'first_name_encrypted', 'middle_name_encrypted', 'last_name_encrypted',
-         'sponsorship_lifecycle', 'monthly_allowance', 'passcode_encrypted'
+         'sponsorship_lifecycle', 'monthly_allowance', 'passcode_encrypted',
+         'school_name_encrypted', 'school_address_encrypted'
        )`,
   );
   const existing = new Set(columns.map((column) => column.COLUMN_NAME));
@@ -125,6 +130,8 @@ const participantProfileColumnsReady = (async () => {
     ['sponsorship_lifecycle', "VARCHAR(24) NOT NULL DEFAULT 'active'"],
     ['monthly_allowance', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00'],
     ['passcode_encrypted', 'TEXT DEFAULT NULL'],
+    ['school_name_encrypted', 'TEXT DEFAULT NULL'],
+    ['school_address_encrypted', 'TEXT DEFAULT NULL'],
   ];
   for (const [column, definition] of additions) {
     if (!existing.has(column)) {
@@ -171,13 +178,26 @@ const staffPermissionsReady = (async () => {
   const [columns] = await pool.execute(
     `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'
-       AND COLUMN_NAME = 'access_permissions'`,
+       AND COLUMN_NAME IN (
+         'access_permissions', 'goer_education_level',
+         'first_name', 'middle_name', 'last_name'
+       )`,
   );
-  if (columns.length === 0) {
-    try {
-      await pool.query('ALTER TABLE users ADD COLUMN access_permissions TEXT DEFAULT NULL');
-    } catch (error) {
-      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+  const existing = new Set(columns.map((column) => column.COLUMN_NAME));
+  const additions = [
+    ['access_permissions', 'TEXT DEFAULT NULL'],
+    ['goer_education_level', 'VARCHAR(50) DEFAULT NULL'],
+    ['first_name', 'VARCHAR(100) DEFAULT NULL'],
+    ['middle_name', 'VARCHAR(100) DEFAULT NULL'],
+    ['last_name', 'VARCHAR(100) DEFAULT NULL'],
+  ];
+  for (const [column, definition] of additions) {
+    if (!existing.has(column)) {
+      try {
+        await pool.query(`ALTER TABLE users ADD COLUMN ${column} ${definition}`);
+      } catch (error) {
+        if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+      }
     }
   }
 })();
@@ -239,7 +259,7 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 app.use(helmet(isProduction
   ? { hsts: { maxAge: 31_536_000, includeSubDomains: true, preload: false } }
   : {}));
-app.use(cors({ origin: clientOrigin }));
+app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
 app.use((req, res, next) => {
   const hasReceiptUpload = req.method === 'POST' &&
     /^\/api\/sponsorship\/children\/\d+\/disbursements$/.test(req.path);
@@ -284,7 +304,9 @@ async function authenticate(req, res, next) {
       return res.status(401).json({ error: 'Session expired' });
     }
     const [users] = await pool.execute(
-      'SELECT username, role, status, access_permissions FROM users WHERE id = ? LIMIT 1',
+      `SELECT username, email, role, status, access_permissions, goer_education_level,
+              first_name, middle_name, last_name
+       FROM users WHERE id = ? LIMIT 1`,
       [payload.id],
     );
     if (!users[0] || users[0].status !== 'active') {
@@ -296,8 +318,17 @@ async function authenticate(req, res, next) {
       ...payload,
       username: users[0].username,
       role: users[0].role,
+      goerEducationLevel: users[0].goer_education_level,
+      firstName: users[0].first_name,
+      middleName: users[0].middle_name,
+      lastName: users[0].last_name,
       permissions: permissionsForUser(users[0]),
     };
+    req.user.username = [
+      users[0].first_name,
+      users[0].middle_name,
+      users[0].last_name,
+    ].filter(Boolean).join(' ') || users[0].username || users[0].email;
     next();
   } catch (error) {
     next(error);
@@ -315,6 +346,7 @@ function checkRole(allowedRoles) {
 }
 
 const staffRoles = ['System Administrator', 'Church Administrator'];
+const accountRoles = [...staffRoles, 'Goer'];
 const STAFF_PERMISSION_KEYS = [
   'dashboard:view',
   'participants:view',
@@ -336,6 +368,9 @@ function permissionsForUser(user) {
   if (String(user.role).toLowerCase() === 'system administrator') {
     return STAFF_PERMISSION_KEYS;
   }
+  if (isGoerRole(user.role)) {
+    return ['checkin:record', 'goer-care:view', 'goer-care:record'];
+  }
   if (user.access_permissions === null || user.access_permissions === undefined) {
     return LEGACY_STAFF_PERMISSIONS;
   }
@@ -353,6 +388,8 @@ function permissionsForUser(user) {
 
 function hasPermission(user, permission) {
   if (String(user.role).toLowerCase() === 'system administrator') return true;
+  if (!canGoerUsePermission(user.role, permission)) return false;
+  if (isGoerRole(user.role)) return Boolean(user.permissions?.includes(permission));
   const permissions = user.permissions || permissionsForUser(user);
   if (permissions.includes(permission)) return true;
   return (
@@ -371,11 +408,24 @@ function checkPermission(permission) {
   };
 }
 
+function checkSponsorshipView(req, res, next) {
+  const allowed = isGoerRole(req.user?.role)
+    ? req.user.permissions?.includes('goer-care:view')
+    : hasPermission(req.user, 'sponsorship:view');
+  if (!allowed) return res.status(403).json({ error: 'Insufficient permissions' });
+  next();
+}
+
+function checkSponsorshipRecord(req, res, next) {
+  const allowed = isGoerRole(req.user?.role)
+    ? canGoerManageCare(req.user)
+    : hasPermission(req.user, 'sponsorship:manage');
+  if (!allowed) return res.status(403).json({ error: 'Insufficient permissions' });
+  next();
+}
+
 const educationLevels = new Set([
-  'Elementary',
-  'Junior High School',
-  'Senior High School',
-  'College',
+  ...GOER_EDUCATION_LEVELS,
 ]);
 const genderOptions = new Set(['Male', 'Female', 'Prefer not to say']);
 const gradeLevelsByEducation = {
@@ -437,19 +487,39 @@ function splitFullName(fullName) {
   };
 }
 
+function staffNameFields(body) {
+  const firstName = String(body.firstName || '').trim();
+  const middleName = String(body.middleName || '').trim();
+  const lastName = String(body.lastName || '').trim();
+  if (!firstName || !lastName) return { error: 'First name and last name are required' };
+  if ([firstName, middleName, lastName].some((part) => part.length > 100)) {
+    return { error: 'Each name must be 100 characters or fewer' };
+  }
+  return { firstName, middleName, lastName, fullName: [firstName, middleName, lastName].filter(Boolean).join(' ') };
+}
+
 function accountView(user) {
+  const hasStoredName = Boolean(user.first_name || user.middle_name || user.last_name);
+  const legacyName = !hasStoredName && user.username ? splitFullName(user.username) : {};
+  const firstName = user.first_name || legacyName.firstName || '';
+  const middleName = user.middle_name || legacyName.middleName || '';
+  const lastName = user.last_name || legacyName.lastName || '';
   return {
     id: user.id,
-    username: user.username,
+    firstName,
+    middleName,
+    lastName,
+    fullName: [firstName, middleName, lastName].filter(Boolean).join(' ') || user.username || '',
     email: user.email,
     role: user.role,
     permissions: permissionsForUser(user),
+    goerEducationLevel: user.goer_education_level || null,
   };
 }
 
 function issueToken(user) {
   return jwt.sign(
-    { id: user.id, username: user.username, role: user.role },
+    { id: user.id, role: user.role },
     process.env.JWT_SECRET,
     { expiresIn: '15m', algorithm: 'HS256' },
   );
@@ -483,7 +553,7 @@ function participantView(row) {
       return null;
     }
   };
-  for (const [field, encryptedField] of Object.entries({ fullName: 'full_name_encrypted', firstName: 'first_name_encrypted', middleName: 'middle_name_encrypted', lastName: 'last_name_encrypted', dateOfBirth: 'date_of_birth_encrypted', phone: 'phone_encrypted', address: 'address_encrypted', medicalNotes: 'medical_notes_encrypted', weight: 'weight_encrypted', height: 'height_encrypted', medicalConditions: 'medical_conditions_encrypted', emergencyContactName: 'emergency_contact_name_encrypted', emergencyContactPhone: 'emergency_contact_phone_encrypted', sponsorName: 'sponsor_name_encrypted', sponsorContact: 'sponsor_contact_encrypted', programAffiliation: 'program_affiliation_encrypted', programCourse: 'program_course_encrypted' })) {
+  for (const [field, encryptedField] of Object.entries({ fullName: 'full_name_encrypted', firstName: 'first_name_encrypted', middleName: 'middle_name_encrypted', lastName: 'last_name_encrypted', dateOfBirth: 'date_of_birth_encrypted', phone: 'phone_encrypted', address: 'address_encrypted', schoolName: 'school_name_encrypted', schoolAddress: 'school_address_encrypted', medicalNotes: 'medical_notes_encrypted', weight: 'weight_encrypted', height: 'height_encrypted', medicalConditions: 'medical_conditions_encrypted', emergencyContactName: 'emergency_contact_name_encrypted', emergencyContactPhone: 'emergency_contact_phone_encrypted', sponsorName: 'sponsor_name_encrypted', sponsorContact: 'sponsor_contact_encrypted', programAffiliation: 'program_affiliation_encrypted', programCourse: 'program_course_encrypted' })) {
     result[field] = safeDecrypt(result[encryptedField]);
     delete result[encryptedField];
   }
@@ -593,6 +663,42 @@ app.get('/api/checkin/events', authenticate, checkPermission('checkin:record'), 
       'SELECT id, name, starts_at, location FROM events ORDER BY starts_at DESC',
     );
     res.json(rows);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/checkin/group', authenticate, checkPermission('checkin:record'), async (req, res, next) => {
+  try {
+    if (!isGoerRole(req.user.role) || !GOER_EDUCATION_LEVELS.includes(req.user.goerEducationLevel)) {
+      return res.status(403).json({ error: 'A Goer account with an assigned education group is required' });
+    }
+    await participantProfileColumnsReady;
+    const [rows] = await pool.execute(
+      `SELECT p.id, p.participant_code, p.full_name_encrypted, p.grade_level,
+              (SELECT c.event_name FROM check_in_logs c
+               WHERE c.participant_id = p.id AND DATE(c.checked_in_at) = CURDATE()
+               ORDER BY c.checked_in_at DESC, c.id DESC LIMIT 1) AS attendance_event,
+              (SELECT c.checked_in_at FROM check_in_logs c
+               WHERE c.participant_id = p.id AND DATE(c.checked_in_at) = CURDATE()
+               ORDER BY c.checked_in_at DESC, c.id DESC LIMIT 1) AS checked_in_at,
+              (SELECT c.checked_out_at FROM check_in_logs c
+               WHERE c.participant_id = p.id AND DATE(c.checked_in_at) = CURDATE()
+               ORDER BY c.checked_in_at DESC, c.id DESC LIMIT 1) AS checked_out_at
+       FROM participants p
+       WHERE p.participant_type = 'sponsored_child'
+         AND p.education_level = ? AND p.status = 'active'
+       ORDER BY p.participant_code`,
+      [req.user.goerEducationLevel],
+    );
+    const children = rows.map((row) => ({
+      id: row.id,
+      participantCode: row.participant_code,
+      name: decrypt(row.full_name_encrypted) || 'Unnamed child',
+      gradeLevel: row.grade_level || '',
+      attendanceEvent: row.attendance_event,
+      checkedInAt: row.checked_in_at,
+      checkedOutAt: row.checked_out_at,
+    })).sort((left, right) => left.name.localeCompare(right.name));
+    res.json({ educationLevel: req.user.goerEducationLevel, children });
   } catch (error) { next(error); }
 });
 
@@ -790,7 +896,8 @@ app.post('/api/auth/login', loginRateLimit, async (req, res, next) => {
   try {
     await legacyRolesReady;
     await staffPermissionsReady;
-    const [rows] = await pool.execute('SELECT * FROM users WHERE username = ? OR email = ? LIMIT 1', [req.body.username, req.body.username]);
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const [rows] = await pool.execute('SELECT * FROM users WHERE email = ? LIMIT 1', [email]);
     const user = rows[0];
     if (!user || user.status !== 'active' || !(await bcrypt.compare(req.body.password || '', user.password_hash))) return res.status(401).json({ error: 'Invalid credentials' });
     const token = issueToken(user);
@@ -800,13 +907,150 @@ app.post('/api/auth/login', loginRateLimit, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.get('/api/goers', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+  try {
+    await staffPermissionsReady;
+    const [goers] = await pool.execute(
+      `SELECT id, username, first_name, middle_name, last_name, email, role, status, access_permissions,
+              goer_education_level, created_at
+       FROM users WHERE LOWER(role) = 'goer'
+       ORDER BY first_name, last_name, email`,
+    );
+    res.json({
+      goers: goers.map((user) => ({
+        ...accountView(user),
+        status: user.status,
+        createdAt: user.created_at,
+      })),
+    });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/goers', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+  try {
+    const names = staffNameFields(req.body);
+    if (names.error) return res.status(400).json({ error: names.error });
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    const educationLevel = String(req.body.educationLevel || '');
+    if (email.length > 150 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Enter a valid email address' });
+    }
+    if (Buffer.byteLength(password, 'utf8') < 8 || Buffer.byteLength(password, 'utf8') > 72) {
+      return res.status(400).json({ error: 'Password must be between 8 and 72 bytes' });
+    }
+    if (!GOER_EDUCATION_LEVELS.includes(educationLevel)) {
+      return res.status(400).json({ error: 'Select a valid education group' });
+    }
+    await staffPermissionsReady;
+    const [existing] = await pool.execute(
+      'SELECT id FROM users WHERE email = ? LIMIT 1',
+      [email],
+    );
+    if (existing.length) return res.status(409).json({ error: 'Email is already in use' });
+    const [result] = await pool.execute(
+      `INSERT INTO users
+         (username, first_name, middle_name, last_name, email, password_hash, role, status, access_permissions,
+          goer_education_level, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'Goer', 'active', NULL, ?, NOW(), NOW())`,
+      [
+        `account-${crypto.randomUUID()}`,
+        names.firstName,
+        names.middleName || null,
+        names.lastName,
+        email,
+        await bcrypt.hash(password, 12),
+        educationLevel,
+      ],
+    );
+    await writeAuditLog(req.user, 'goer.created', 'user', result.insertId, {
+      fullName: names.fullName,
+      educationLevel,
+    });
+    res.status(201).json({
+      goer: {
+        id: result.insertId,
+        firstName: names.firstName,
+        middleName: names.middleName,
+        lastName: names.lastName,
+        fullName: names.fullName,
+        email,
+        role: 'Goer',
+        status: 'active',
+        permissions: ['checkin:record'],
+        goerEducationLevel: educationLevel,
+      },
+    });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email is already in use' });
+    next(error);
+  }
+});
+
+app.put('/api/goers/:id/group', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+  try {
+    const educationLevel = String(req.body.educationLevel || '');
+    if (!GOER_EDUCATION_LEVELS.includes(educationLevel)) {
+      return res.status(400).json({ error: 'Select a valid education group' });
+    }
+    const [accounts] = await pool.execute(
+      `SELECT id FROM users WHERE id = ? AND LOWER(role) = 'goer' LIMIT 1`,
+      [req.params.id],
+    );
+    if (!accounts.length) return res.status(404).json({ error: 'Goer account not found' });
+    const [result] = await pool.execute(
+      `UPDATE users SET goer_education_level = ?, updated_at = NOW()
+       WHERE id = ? AND LOWER(role) = 'goer'`,
+      [educationLevel, req.params.id],
+    );
+    if (!result.affectedRows) {
+      const [[account]] = await pool.execute(
+        `SELECT id FROM users WHERE id = ? AND LOWER(role) = 'goer' LIMIT 1`,
+        [req.params.id],
+      );
+      if (!account) return res.status(404).json({ error: 'Goer account not found' });
+    }
+    await writeAuditLog(req.user, 'goer.group.updated', 'user', req.params.id, { educationLevel });
+    res.json({ educationLevel });
+  } catch (error) { next(error); }
+});
+
+app.put('/api/goers/:id/status', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+  try {
+    const status = String(req.body.status || '').toLowerCase();
+    if (!['active', 'inactive'].includes(status)) {
+      return res.status(400).json({ error: 'Status must be active or inactive' });
+    }
+    const [accounts] = await pool.execute(
+      `SELECT id FROM users WHERE id = ? AND LOWER(role) = 'goer' LIMIT 1`,
+      [req.params.id],
+    );
+    if (!accounts.length) return res.status(404).json({ error: 'Goer account not found' });
+    const [result] = await pool.execute(
+      `UPDATE users SET status = ?, updated_at = NOW()
+       WHERE id = ? AND LOWER(role) = 'goer'`,
+      [status, req.params.id],
+    );
+    if (!result.affectedRows) {
+      const [[account]] = await pool.execute(
+        `SELECT id FROM users WHERE id = ? AND LOWER(role) = 'goer' LIMIT 1`,
+        [req.params.id],
+      );
+      if (!account) return res.status(404).json({ error: 'Goer account not found' });
+    }
+    await writeAuditLog(req.user, `goer.${status}`, 'user', req.params.id);
+    res.json({ status });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/staff', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
   try {
     await staffPermissionsReady;
     const [staff] = await pool.execute(
-      `SELECT id, username, email, role, status, access_permissions, created_at
+      `SELECT id, username, first_name, middle_name, last_name, email, role, status,
+              access_permissions, created_at
        FROM users WHERE LOWER(role) = 'church administrator'
-       ORDER BY username`,
+       ORDER BY first_name, last_name, email`,
     );
     res.json({ staff: staff.map((user) => ({ ...accountView(user), status: user.status, createdAt: user.created_at })) });
   } catch (error) { next(error); }
@@ -814,13 +1058,11 @@ app.get('/api/staff', authenticate, checkRole(['System Administrator']), async (
 
 app.post('/api/staff', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
   try {
-    const username = String(req.body.username || '').trim();
+    const names = staffNameFields(req.body);
+    if (names.error) return res.status(400).json({ error: names.error });
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
     const permissions = req.body.permissions;
-    if (!username || username.length > 100) {
-      return res.status(400).json({ error: 'Username must be between 1 and 100 characters' });
-    }
     if (email.length > 150 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: 'Enter a valid email address' });
     }
@@ -832,24 +1074,36 @@ app.post('/api/staff', authenticate, checkRole(['System Administrator']), async 
     }
     await staffPermissionsReady;
     const [existing] = await pool.execute(
-      'SELECT id FROM users WHERE username = ? OR email = ? LIMIT 1',
-      [username, email],
+      'SELECT id FROM users WHERE email = ? LIMIT 1',
+      [email],
     );
-    if (existing.length) return res.status(409).json({ error: 'Username or email is already in use' });
+    if (existing.length) return res.status(409).json({ error: 'Email is already in use' });
     const [result] = await pool.execute(
       `INSERT INTO users
-         (username, email, password_hash, role, status, access_permissions, created_at, updated_at)
-       VALUES (?, ?, ?, 'Church Administrator', 'active', ?, NOW(), NOW())`,
-      [username, email, await bcrypt.hash(password, 12), JSON.stringify([...new Set(permissions)])],
+         (username, first_name, middle_name, last_name, email, password_hash, role,
+          status, access_permissions, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'Church Administrator', 'active', ?, NOW(), NOW())`,
+      [
+        `account-${crypto.randomUUID()}`,
+        names.firstName,
+        names.middleName || null,
+        names.lastName,
+        email,
+        await bcrypt.hash(password, 12),
+        JSON.stringify([...new Set(permissions)]),
+      ],
     );
     await writeAuditLog(req.user, 'staff.created', 'user', result.insertId, {
-      username,
+      fullName: names.fullName,
       permissions: [...new Set(permissions)],
     });
     res.status(201).json({
       staff: {
         id: result.insertId,
-        username,
+        firstName: names.firstName,
+        middleName: names.middleName,
+        lastName: names.lastName,
+        fullName: names.fullName,
         email,
         role: 'Church Administrator',
         status: 'active',
@@ -857,7 +1111,7 @@ app.post('/api/staff', authenticate, checkRole(['System Administrator']), async 
       },
     });
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Username or email is already in use' });
+    if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email is already in use' });
     next(error);
   }
 });
@@ -902,10 +1156,12 @@ app.put('/api/staff/:id/status', authenticate, checkRole(['System Administrator'
   } catch (error) { next(error); }
 });
 
-app.get('/api/account', authenticate, checkRole(staffRoles), async (req, res, next) => {
+app.get('/api/account', authenticate, checkRole(accountRoles), async (req, res, next) => {
   try {
     const [rows] = await pool.execute(
-      'SELECT id, username, email, role, access_permissions FROM users WHERE id = ? AND status = ? LIMIT 1',
+      `SELECT id, username, first_name, middle_name, last_name, email, role,
+              access_permissions, goer_education_level
+       FROM users WHERE id = ? AND status = ? LIMIT 1`,
       [req.user.id, 'active'],
     );
     if (!rows[0]) return res.status(404).json({ error: 'Account not found' });
@@ -913,21 +1169,21 @@ app.get('/api/account', authenticate, checkRole(staffRoles), async (req, res, ne
   } catch (error) { next(error); }
 });
 
-app.put('/api/account', authenticate, checkRole(staffRoles), async (req, res, next) => {
+app.put('/api/account', authenticate, checkRole(accountRoles), async (req, res, next) => {
   try {
-    const username = String(req.body.username || '').trim();
+    const names = staffNameFields(req.body);
+    if (names.error) return res.status(400).json({ error: names.error });
     const currentPassword = String(req.body.currentPassword || '');
     const newPassword = String(req.body.newPassword || '');
-    if (!username || username.length > 100) {
-      return res.status(400).json({ error: 'Username must be between 1 and 100 characters' });
-    }
     if (newPassword && (Buffer.byteLength(newPassword, 'utf8') < 8 || Buffer.byteLength(newPassword, 'utf8') > 72)) {
       return res.status(400).json({ error: 'New password must be between 8 and 72 bytes' });
     }
     if (!currentPassword) return res.status(400).json({ error: 'Current password is required' });
 
     const [rows] = await pool.execute(
-      'SELECT id, username, email, role, password_hash, access_permissions FROM users WHERE id = ? AND status = ? LIMIT 1',
+      `SELECT id, username, first_name, middle_name, last_name, email, role,
+              password_hash, access_permissions, goer_education_level
+       FROM users WHERE id = ? AND status = ? LIMIT 1`,
       [req.user.id, 'active'],
     );
     const account = rows[0];
@@ -935,23 +1191,10 @@ app.put('/api/account', authenticate, checkRole(staffRoles), async (req, res, ne
     if (!(await bcrypt.compare(currentPassword, account.password_hash))) {
       return res.status(403).json({ error: 'Current password is incorrect' });
     }
-    if (username !== account.username) {
-      const [existing] = await pool.execute(
-        'SELECT id FROM users WHERE username = ? AND id <> ? LIMIT 1',
-        [username, account.id],
-      );
-      if (existing.length) return res.status(409).json({ error: 'Username is already in use' });
-    }
-    if (username === account.username && !newPassword) {
-      return res.status(400).json({ error: 'Enter a new username or password' });
-    }
-
     const updates = [];
     const values = [];
-    if (username !== account.username) {
-      updates.push('username = ?');
-      values.push(username);
-    }
+    updates.push('first_name = ?', 'middle_name = ?', 'last_name = ?');
+    values.push(names.firstName, names.middleName || null, names.lastName);
     if (newPassword) {
       updates.push('password_hash = ?');
       values.push(await bcrypt.hash(newPassword, 12));
@@ -964,10 +1207,15 @@ app.put('/api/account', authenticate, checkRole(staffRoles), async (req, res, ne
       'account.credentials.updated',
       'user',
       account.id,
-      { changedFields: [...(username !== account.username ? ['username'] : []), ...(newPassword ? ['password'] : [])] },
+      { changedFields: ['first_name', 'middle_name', 'last_name', ...(newPassword ? ['password'] : [])] },
     );
 
-    const updatedUser = { ...account, username };
+    const updatedUser = {
+      ...account,
+      first_name: names.firstName,
+      middle_name: names.middleName || null,
+      last_name: names.lastName,
+    };
     for (const token of sessions.keys()) {
       if (Number(jwt.decode(token)?.id) === Number(account.id)) {
         sessions.delete(token);
@@ -978,12 +1226,11 @@ app.put('/api/account', authenticate, checkRole(staffRoles), async (req, res, ne
     sessions.set(token, Date.now());
     res.json({ token, user: accountView(updatedUser) });
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Username is already in use' });
     next(error);
   }
 });
 
-app.post('/api/account/email/request', authenticate, checkRole(staffRoles), async (req, res, next) => {
+app.post('/api/account/email/request', authenticate, checkRole(accountRoles), async (req, res, next) => {
   try {
     const email = String(req.body.email || '').trim().toLowerCase();
     const currentPassword = String(req.body.currentPassword || '');
@@ -1052,7 +1299,7 @@ app.post('/api/account/email/request', authenticate, checkRole(staffRoles), asyn
   } catch (error) { next(error); }
 });
 
-app.post('/api/account/email/verify', authenticate, checkRole(staffRoles), async (req, res, next) => {
+app.post('/api/account/email/verify', authenticate, checkRole(accountRoles), async (req, res, next) => {
   try {
     const email = String(req.body.email || '').trim().toLowerCase();
     const code = String(req.body.code || '').trim();
@@ -1087,7 +1334,9 @@ app.post('/api/account/email/verify', authenticate, checkRole(staffRoles), async
     await writeAuditLog(req.user, 'account.email.updated', 'user', userId);
     emailChallenges.delete(userId);
     const [rows] = await pool.execute(
-      'SELECT id, username, email, role, access_permissions FROM users WHERE id = ? LIMIT 1',
+      `SELECT id, username, first_name, middle_name, last_name, email, role,
+              access_permissions, goer_education_level
+       FROM users WHERE id = ? LIMIT 1`,
       [userId],
     );
     res.json({ user: accountView(rows[0]) });
@@ -1102,6 +1351,11 @@ app.post('/api/participants', authenticate, checkPermission('participants:manage
   try {
     await participantProfileColumnsReady;
     await connection.beginTransaction();
+    const participantType = req.body.participantType || 'sponsored_child';
+    if (participantType !== 'sponsored_child') {
+      await connection.rollback();
+      return res.status(400).json({ error: 'Participant registration is for sponsored children. Create Goer staff accounts under Manage Accounts.' });
+    }
     const nameError = participantNameError(req.body);
     if (nameError) {
       await connection.rollback();
@@ -1117,17 +1371,25 @@ app.post('/api/participants', authenticate, checkPermission('participants:manage
       await connection.rollback();
       return res.status(400).json({ error: eligibilityError });
     }
+    const schoolAddress = String(req.body.schoolAddress || '').trim();
+    const schoolName = String(req.body.schoolName || '').trim();
+    if (schoolName.length > 200) {
+      await connection.rollback();
+      return res.status(400).json({ error: 'School name must be 200 characters or fewer' });
+    }
+    if (schoolAddress.length > 500) {
+      await connection.rollback();
+      return res.status(400).json({ error: 'School address must be 500 characters or fewer' });
+    }
     const fullName = [req.body.firstName, req.body.middleName, req.body.lastName]
       .map((part) => String(part || '').trim())
       .filter(Boolean)
       .join(' ');
-    const passcode = req.body.participantType === 'sponsored_child'
-      ? createParticipantPasscode()
-      : null;
+    const passcode = createParticipantPasscode();
     const participantCode = `FMC-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
     const [result] = await connection.execute(
-      'INSERT INTO participants (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted, last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted, passcode_hash, passcode_encrypted, medical_conditions_encrypted, weight_encrypted, height_encrypted, emergency_contact_name_encrypted, emergency_contact_phone_encrypted, sponsor_name_encrypted, sponsor_contact_encrypted, sponsorship_type, enrollment_date, program_affiliation_encrypted, education_level, grade_level, program_course_encrypted, status, participant_code, sponsorship_lifecycle, monthly_allowance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NOW(), NOW())',
-      [req.body.participantType || 'goer', encrypt(fullName), encrypt(String(req.body.firstName).trim()), encrypt(String(req.body.middleName || '').trim() || null), encrypt(String(req.body.lastName).trim()), encrypt(req.body.dateOfBirth), gender || null, encrypt(req.body.phone), encrypt(req.body.address), passcode ? await bcrypt.hash(passcode, 12) : null, passcode ? encrypt(passcode) : null, encrypt(req.body.medicalConditions), encrypt(req.body.weight), encrypt(req.body.height), encrypt(req.body.emergencyContactName), encrypt(req.body.emergencyContactPhone), encrypt(req.body.sponsorName), encrypt(req.body.sponsorContact), req.body.sponsorshipType || null, req.body.enrollmentDate || null, encrypt(req.body.programAffiliation), req.body.participantType === 'sponsored_child' ? req.body.educationLevel : null, req.body.participantType === 'sponsored_child' ? req.body.gradeLevel : null, req.body.participantType === 'sponsored_child' ? encrypt(req.body.programCourse) : null, 'active', participantCode, req.body.participantType === 'sponsored_child' ? 'new' : 'active'],
+      'INSERT INTO participants (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted, last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted, passcode_hash, passcode_encrypted, medical_conditions_encrypted, weight_encrypted, height_encrypted, emergency_contact_name_encrypted, emergency_contact_phone_encrypted, sponsor_name_encrypted, sponsor_contact_encrypted, sponsorship_type, enrollment_date, program_affiliation_encrypted, education_level, grade_level, program_course_encrypted, school_name_encrypted, school_address_encrypted, status, participant_code, sponsorship_lifecycle, monthly_allowance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NOW(), NOW())',
+      [participantType, encrypt(fullName), encrypt(String(req.body.firstName).trim()), encrypt(String(req.body.middleName || '').trim() || null), encrypt(String(req.body.lastName).trim()), encrypt(req.body.dateOfBirth), gender || null, encrypt(req.body.phone), encrypt(req.body.address), await bcrypt.hash(passcode, 12), encrypt(passcode), encrypt(req.body.medicalConditions), encrypt(req.body.weight), encrypt(req.body.height), encrypt(req.body.emergencyContactName), encrypt(req.body.emergencyContactPhone), encrypt(req.body.sponsorName), encrypt(req.body.sponsorContact), req.body.sponsorshipType || null, req.body.enrollmentDate || null, encrypt(req.body.programAffiliation), req.body.educationLevel, req.body.gradeLevel, encrypt(req.body.programCourse), encrypt(schoolName || null), encrypt(schoolAddress || null), 'active', participantCode, 'new'],
     );
     const uid = crypto.randomUUID();
     const qrPayload = encrypt(uid);
@@ -1150,10 +1412,14 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
   try {
     await participantProfileColumnsReady;
     const [existingRows] = await pool.execute(
-      'SELECT gender FROM participants WHERE id = ? LIMIT 1',
+      'SELECT gender, participant_type FROM participants WHERE id = ? LIMIT 1',
       [req.params.id],
     );
     if (!existingRows[0]) return res.status(404).json({ error: 'Participant not found' });
+    const participantType = existingRows[0].participant_type;
+    if (!['sponsored_child', 'goer'].includes(participantType)) {
+      return res.status(400).json({ error: 'Participant type cannot be edited' });
+    }
     const gender = String(req.body.gender || '').trim();
     if (
       gender &&
@@ -1164,8 +1430,19 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
     }
     const nameError = participantNameError(req.body);
     if (nameError) return res.status(400).json({ error: nameError });
-    const eligibilityError = sponsoredChildEligibilityError(req.body);
+    const eligibilityError = sponsoredChildEligibilityError({
+      ...req.body,
+      participantType,
+    });
     if (eligibilityError) return res.status(400).json({ error: eligibilityError });
+    const schoolAddress = String(req.body.schoolAddress || '').trim();
+    const schoolName = String(req.body.schoolName || '').trim();
+    if (schoolName.length > 200) {
+      return res.status(400).json({ error: 'School name must be 200 characters or fewer' });
+    }
+    if (schoolAddress.length > 500) {
+      return res.status(400).json({ error: 'School address must be 500 characters or fewer' });
+    }
     if (
       Object.prototype.hasOwnProperty.call(req.body, 'passcode') &&
       req.body.passcode !== '' &&
@@ -1178,7 +1455,7 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
     const lastName = String(req.body.lastName).trim();
     const fullName = [firstName, middleName, lastName].filter(Boolean).join(' ');
     const fields = {
-      participant_type: req.body.participantType || 'goer',
+      participant_type: participantType,
       full_name_encrypted: encrypt(fullName),
       first_name_encrypted: encrypt(firstName),
       middle_name_encrypted: encrypt(middleName || null),
@@ -1197,9 +1474,11 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
       sponsorship_type: req.body.sponsorshipType || null,
       enrollment_date: req.body.enrollmentDate || null,
       program_affiliation_encrypted: encrypt(req.body.programAffiliation),
-      education_level: req.body.participantType === 'sponsored_child' ? req.body.educationLevel : null,
-      grade_level: req.body.participantType === 'sponsored_child' ? req.body.gradeLevel : null,
-      program_course_encrypted: req.body.participantType === 'sponsored_child' ? encrypt(req.body.programCourse) : null,
+      education_level: participantType === 'sponsored_child' ? req.body.educationLevel : null,
+      grade_level: participantType === 'sponsored_child' ? req.body.gradeLevel : null,
+      program_course_encrypted: participantType === 'sponsored_child' ? encrypt(req.body.programCourse) : null,
+      school_name_encrypted: participantType === 'sponsored_child' ? encrypt(schoolName || null) : null,
+      school_address_encrypted: participantType === 'sponsored_child' ? encrypt(schoolAddress || null) : null,
       status: req.body.status || 'active',
     };
     if (isValidParticipantPasscode(req.body.passcode)) {
@@ -1234,6 +1513,7 @@ app.delete('/api/participants/:id', authenticate, checkPermission('participants:
 app.post('/api/checkin', authenticate, checkPermission('checkin:record'), async (req, res, next) => {
   let connection;
   try {
+    await participantProfileColumnsReady;
     const payload = String(req.body.qrPayload || '');
     try {
       decrypt(payload);
@@ -1259,7 +1539,19 @@ app.post('/api/checkin', authenticate, checkPermission('checkin:record'), async 
       return res.status(404).json({ error: 'Invalid or revoked QR code' });
     }
     const qr = qrRows[0];
-    await connection.execute('SELECT id FROM participants WHERE id = ? FOR UPDATE', [qr.participant_id]);
+    const [participants] = await connection.execute(
+      `SELECT id, participant_type, education_level, status
+       FROM participants WHERE id = ? FOR UPDATE`,
+      [qr.participant_id],
+    );
+    if (!participants[0]) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Participant not found for this QR code' });
+    }
+    if (!canGoerAccessParticipant(req.user, participants[0])) {
+      await connection.rollback();
+      return res.status(403).json({ error: 'This Goer account can only record attendance for active sponsored children in its assigned group' });
+    }
     const [attendanceRows] = await connection.execute(
       `SELECT id, checked_out_at
        FROM check_in_logs
@@ -1419,8 +1711,10 @@ async function verifyPublicSponsoredChild(qrPayload, passcode) {
   const lookupKey = crypto.createHmac('sha256', process.env.JWT_SECRET).update(qrPayload).digest('hex');
   await sponsorLookupAttemptsReady;
   const [rows] = await pool.execute(
-    `SELECT p.id, p.full_name_encrypted, p.participant_code, p.sponsorship_status,
-            p.sponsorship_lifecycle, p.monthly_allowance, p.status, p.passcode_hash
+    `SELECT p.id, p.full_name_encrypted, p.participant_code, p.school_name_encrypted,
+            p.school_address_encrypted,
+            p.sponsorship_status, p.sponsorship_lifecycle, p.monthly_allowance,
+            p.status, p.passcode_hash
      FROM participants p
      JOIN qr_codes q ON q.participant_id = p.id
      WHERE q.qr_uid = ? AND q.status = 'active' AND p.participant_type = 'sponsored_child'
@@ -1492,23 +1786,47 @@ async function getSponsorshipThreads(participantId) {
   }));
 }
 
-app.get('/api/sponsorship/children', authenticate, checkPermission('sponsorship:view'), async (req, res, next) => {
+async function getAccessibleSponsorshipChild(user, participantId) {
+  const [[child]] = await pool.execute(
+    `SELECT id, participant_type, education_level, status
+     FROM participants
+     WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+     LIMIT 1`,
+    [participantId],
+  );
+  if (!child || !canGoerAccessParticipant(user, child)) return null;
+  return child;
+}
+
+app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (req, res, next) => {
   try {
     await participantProfileColumnsReady;
+    const isGoer = isGoerRole(req.user.role);
+    const groupScope = isGoer
+      ? 'AND education_level = ? AND status = \'active\''
+      : '';
+    const adminFields = isGoer
+      ? ''
+      : `, school_name_encrypted, school_address_encrypted,
+         sponsorship_lifecycle, sponsorship_status`;
     const [rows] = await pool.execute(
-      `SELECT id, full_name_encrypted, participant_code, sponsorship_lifecycle,
-              monthly_allowance, sponsorship_status
+      `SELECT id, full_name_encrypted, participant_code, monthly_allowance ${adminFields}
        FROM participants
-       WHERE participant_type = 'sponsored_child' AND status <> 'deleted'
+       WHERE participant_type = 'sponsored_child' AND status <> 'deleted' ${groupScope}
        ORDER BY FIELD(sponsorship_lifecycle, 'new', 'active', 'deceased', 'graduated'), full_name_encrypted`,
+      isGoer ? [req.user.goerEducationLevel] : [],
     );
     const children = rows.map((row) => ({
       id: row.id,
       name: decrypt(row.full_name_encrypted) || 'Unnamed child',
       participantCode: row.participant_code,
-      lifecycle: row.sponsorship_lifecycle || 'active',
       monthlyAllowance: Number(row.monthly_allowance || 0),
-      sponsorStatus: row.sponsorship_status || 'unknown',
+      ...(!isGoer ? {
+        schoolName: row.school_name_encrypted ? decrypt(row.school_name_encrypted) : '',
+        schoolAddress: row.school_address_encrypted ? decrypt(row.school_address_encrypted) : '',
+        lifecycle: row.sponsorship_lifecycle || 'active',
+        sponsorStatus: row.sponsorship_status || 'unknown',
+      } : {}),
     }));
     children.sort((left, right) => left.name.localeCompare(right.name));
     res.json(children);
@@ -1622,13 +1940,24 @@ app.post('/api/sponsorship/children/:id/updates', authenticate, checkPermission(
 
 app.put('/api/sponsorship/children/:id', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
   try {
+    await participantProfileColumnsReady;
     const lifecycle = String(req.body.lifecycle || '');
     const monthlyAllowance = Number(req.body.monthlyAllowance);
+    const schoolNameProvided = Object.prototype.hasOwnProperty.call(req.body, 'schoolName');
+    const schoolAddressProvided = Object.prototype.hasOwnProperty.call(req.body, 'schoolAddress');
+    const schoolName = String(req.body.schoolName || '').trim();
+    const schoolAddress = String(req.body.schoolAddress || '').trim();
     if (!sponsorshipLifecycleStatuses.has(lifecycle)) {
       return res.status(400).json({ error: 'Select a valid child lifecycle status' });
     }
     if (!Number.isFinite(monthlyAllowance) || monthlyAllowance < 0 || monthlyAllowance > 1000000) {
       return res.status(400).json({ error: 'Monthly allowance must be between 0 and 1,000,000' });
+    }
+    if (schoolName.length > 200) {
+      return res.status(400).json({ error: 'School name must be 200 characters or fewer' });
+    }
+    if (schoolAddress.length > 500) {
+      return res.status(400).json({ error: 'School address must be 500 characters or fewer' });
     }
     const [[child]] = await pool.execute(
       `SELECT id FROM participants
@@ -1637,32 +1966,95 @@ app.put('/api/sponsorship/children/:id', authenticate, checkPermission('sponsors
       [req.params.id],
     );
     if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    const updates = [
+      'sponsorship_lifecycle = ?',
+      'monthly_allowance = ?',
+    ];
+    const values = [lifecycle, monthlyAllowance.toFixed(2)];
+    if (schoolNameProvided) {
+      updates.push('school_name_encrypted = ?');
+      values.push(encrypt(schoolName || null));
+    }
+    if (schoolAddressProvided) {
+      updates.push('school_address_encrypted = ?');
+      values.push(encrypt(schoolAddress || null));
+    }
+    values.push(req.params.id);
     await pool.execute(
       `UPDATE participants
-       SET sponsorship_lifecycle = ?, monthly_allowance = ?, updated_at = NOW()
+       SET ${updates.join(', ')}, updated_at = NOW()
        WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'`,
-      [lifecycle, monthlyAllowance.toFixed(2), req.params.id],
+      values,
     );
     await writeAuditLog(req.user, 'sponsorship.child.updated', 'participant', req.params.id, {
       lifecycle,
       monthlyAllowance: monthlyAllowance.toFixed(2),
+      schoolNameUpdated: schoolNameProvided,
+      schoolAddressUpdated: schoolAddressProvided,
     });
-    res.json({ lifecycle, monthlyAllowance: Number(monthlyAllowance.toFixed(2)) });
+    res.json({
+      lifecycle,
+      monthlyAllowance: Number(monthlyAllowance.toFixed(2)),
+      ...(schoolNameProvided ? { schoolName } : {}),
+      ...(schoolAddressProvided ? { schoolAddress } : {}),
+    });
   } catch (error) { next(error); }
 });
 
-app.get('/api/sponsorship/children/:id/disbursements', authenticate, checkPermission('sponsorship:view'), async (req, res, next) => {
+app.get('/api/sponsorship/children/:id/disbursements', authenticate, checkSponsorshipView, async (req, res, next) => {
   try {
     await sponsorshipTablesReady;
-    const [rows] = await pool.execute(
-      `SELECT id, amount, DATE_FORMAT(disbursed_on, '%Y-%m-%d') AS disbursed_on,
-              description, receipt_mime, created_at
-       FROM sponsorship_disbursements
-       WHERE participant_id = ?
-       ORDER BY disbursed_on DESC, id DESC`,
-      [req.params.id],
+    const child = await getAccessibleSponsorshipChild(req.user, req.params.id);
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    const isGoer = isGoerRole(req.user.role);
+    const [disbursementRows, careRows] = isGoer
+      ? [[], (await pool.execute(
+        `SELECT id, amount, DATE_FORMAT(recorded_on, '%Y-%m-%d') AS recorded_on,
+                care_type, description, receipt_mime, created_at
+         FROM sponsored_child_care_records
+         WHERE participant_id = ?
+         ORDER BY recorded_on DESC, id DESC`,
+        [child.id],
+      ))[0]]
+      : await Promise.all([
+        pool.execute(
+          `SELECT id, amount, DATE_FORMAT(disbursed_on, '%Y-%m-%d') AS recorded_on,
+                  description, receipt_mime, created_at
+           FROM sponsorship_disbursements
+           WHERE participant_id = ?
+           ORDER BY disbursed_on DESC, id DESC`,
+          [child.id],
+        ).then(([rows]) => rows),
+        pool.execute(
+          `SELECT id, amount, DATE_FORMAT(recorded_on, '%Y-%m-%d') AS recorded_on,
+                  care_type, description, receipt_mime, created_at
+           FROM sponsored_child_care_records
+           WHERE participant_id = ?
+           ORDER BY recorded_on DESC, id DESC`,
+          [child.id],
+        ).then(([rows]) => rows),
+      ]);
+    const records = [
+      ...disbursementRows.map((row) => ({
+        ...row,
+        id: `disbursement-${row.id}`,
+        recordType: 'disbursement',
+        amount: Number(row.amount),
+        hasReceipt: Boolean(row.receipt_mime),
+      })),
+      ...careRows.map((row) => ({
+        ...row,
+        id: `received-${row.id}`,
+        recordType: 'received',
+        amount: Number(row.amount),
+        hasReceipt: Boolean(row.receipt_mime),
+      })),
+    ];
+    records.sort((left, right) =>
+      right.recorded_on.localeCompare(left.recorded_on) ||
+      new Date(right.created_at).getTime() - new Date(left.created_at).getTime(),
     );
-    res.json(rows.map((row) => ({ ...row, amount: Number(row.amount), hasReceipt: Boolean(row.receipt_mime) })));
+    res.json(records);
   } catch (error) { next(error); }
 });
 
@@ -1680,12 +2072,7 @@ app.post('/api/sponsorship/children/:id/disbursements', authenticate, checkPermi
     if (receipt.error) return res.status(400).json({ error: receipt.error });
     if (!receipt.data) return res.status(400).json({ error: 'A receipt proof is required for each allowance or gift record' });
     await sponsorshipTablesReady;
-    const [[child]] = await pool.execute(
-      `SELECT id FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1`,
-      [req.params.id],
-    );
+    const child = await getAccessibleSponsorshipChild(req.user, req.params.id);
     if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
     const [result] = await pool.execute(
       `INSERT INTO sponsorship_disbursements
@@ -1702,29 +2089,101 @@ app.post('/api/sponsorship/children/:id/disbursements', authenticate, checkPermi
   } catch (error) { next(error); }
 });
 
-app.post('/api/sponsorship/disbursements/:id/receipt', authenticate, checkPermission('sponsorship:view'), async (req, res, next) => {
+app.post('/api/sponsorship/children/:id/care-records', authenticate, checkSponsorshipRecord, async (req, res, next) => {
+  try {
+    const careType = String(req.body.careType || '');
+    const amount = Number(req.body.amount);
+    const recordedOn = String(req.body.recordedOn || '');
+    const description = String(req.body.description || '').trim();
+    const receipt = parseReceipt(req.body.receiptData);
+    if (!['gift', 'allowance'].includes(careType)) {
+      return res.status(400).json({ error: 'Select whether the child received a gift or allowance' });
+    }
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) {
+      return res.status(400).json({ error: 'Enter an amount above 0 and no more than 1,000,000' });
+    }
+    if (!validDate(recordedOn)) return res.status(400).json({ error: 'Enter a valid record date' });
+    if (description.length > 255) return res.status(400).json({ error: 'Description must be 255 characters or fewer' });
+    if (receipt.error) return res.status(400).json({ error: receipt.error });
+    if (!receipt.data) return res.status(400).json({ error: 'Receipt proof is required for each received gift or allowance record' });
+    await sponsorshipTablesReady;
+    const child = await getAccessibleSponsorshipChild(req.user, req.params.id);
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    const [result] = await pool.execute(
+      `INSERT INTO sponsored_child_care_records
+         (participant_id, care_type, amount, recorded_on, description, receipt_mime, receipt_data, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        child.id,
+        careType,
+        amount.toFixed(2),
+        recordedOn,
+        description || null,
+        receipt.mime,
+        encryptBytes(receipt.data),
+        req.user.id,
+      ],
+    );
+    await writeAuditLog(req.user, 'sponsorship.care-record.received', 'participant', child.id, {
+      careType,
+      amount: amount.toFixed(2),
+      recordedOn,
+      hasReceipt: Boolean(receipt.data),
+    });
+    res.status(201).json({
+      id: `received-${result.insertId}`,
+      amount: Number(amount.toFixed(2)),
+      recordedOn,
+      careType,
+      hasReceipt: Boolean(receipt.data),
+    });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/sponsorship/disbursements/:id/receipt', authenticate, checkSponsorshipView, async (req, res, next) => {
   try {
     await sponsorshipTablesReady;
-    const [rows] = await pool.execute(
-      `SELECT receipt_mime, receipt_data FROM sponsorship_disbursements WHERE id = ? LIMIT 1`,
-      [req.params.id],
-    );
+    const routeId = String(req.params.id);
+    const match = routeId.match(/^(received|disbursement)-(\d+)$/);
+    const source = match ? match[1] : 'disbursement';
+    const id = match ? match[2] : routeId;
+    if (!/^\d+$/.test(id)) return res.status(404).json({ error: 'Receipt proof not found' });
+    if (isGoerRole(req.user.role) && source !== 'received') {
+      return res.status(404).json({ error: 'Receipt proof not found' });
+    }
+    const [rows] = source === 'received'
+      ? await pool.execute(
+        `SELECT receipt_mime, receipt_data, participant_id
+         FROM sponsored_child_care_records WHERE id = ? LIMIT 1`,
+        [id],
+      )
+      : await pool.execute(
+        `SELECT receipt_mime, receipt_data, participant_id
+         FROM sponsorship_disbursements WHERE id = ? LIMIT 1`,
+        [id],
+      );
     if (!rows[0] || !rows[0].receipt_data) return res.status(404).json({ error: 'Receipt proof not found' });
+    const child = await getAccessibleSponsorshipChild(req.user, rows[0].participant_id);
+    if (!child) return res.status(404).json({ error: 'Receipt proof not found' });
     res.json({ mimeType: rows[0].receipt_mime, data: decryptBytes(rows[0].receipt_data).toString('base64') });
   } catch (error) { next(error); }
 });
 
-app.get('/api/sponsorship/letters', authenticate, checkPermission('sponsorship:view'), async (req, res, next) => {
+app.get('/api/sponsorship/letters', authenticate, checkSponsorshipView, async (req, res, next) => {
   try {
     await sponsorshipTablesReady;
+    const groupScope = isGoerRole(req.user.role)
+      ? 'AND p.education_level = ? AND p.status = \'active\''
+      : '';
     const [rows] = await pool.query(
       `SELECT t.id, t.participant_id, t.subject, t.subject_encrypted, t.status, t.created_at, t.updated_at,
               p.full_name_encrypted, p.participant_code
        FROM sponsorship_letter_threads t
        JOIN participants p ON p.id = t.participant_id
-       WHERE p.status <> 'deleted' AND p.participant_type = 'sponsored_child'
+       WHERE p.status <> 'deleted' AND p.participant_type = 'sponsored_child' ${groupScope}
        ORDER BY t.updated_at DESC
        LIMIT 100`,
+      isGoerRole(req.user.role) ? [req.user.goerEducationLevel] : [],
     );
     const ids = rows.map((thread) => thread.id);
     const messages = ids.length
@@ -1753,13 +2212,24 @@ app.get('/api/sponsorship/letters', authenticate, checkPermission('sponsorship:v
   } catch (error) { next(error); }
 });
 
-app.post('/api/sponsorship/letters/:id/reply', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+app.post('/api/sponsorship/letters/:id/reply', authenticate, checkSponsorshipRecord, async (req, res, next) => {
   try {
     const message = String(req.body.message || '').trim();
     if (!message || message.length > 5000) return res.status(400).json({ error: 'Reply must be between 1 and 5,000 characters' });
     await sponsorshipTablesReady;
-    const [[thread]] = await pool.execute('SELECT id FROM sponsorship_letter_threads WHERE id = ? LIMIT 1', [req.params.id]);
+    const [[thread]] = await pool.execute(
+      `SELECT t.id, t.participant_id, t.status
+       FROM sponsorship_letter_threads t
+       WHERE t.id = ? LIMIT 1`,
+      [req.params.id],
+    );
     if (!thread) return res.status(404).json({ error: 'Letter thread not found' });
+    if (!await getAccessibleSponsorshipChild(req.user, thread.participant_id)) {
+      return res.status(404).json({ error: 'Letter thread not found' });
+    }
+    if (isGoerRole(req.user.role) && thread.status === 'closed') {
+      return res.status(409).json({ error: 'This letter thread is closed. Start a new letter instead.' });
+    }
     await pool.execute(
       `INSERT INTO sponsorship_letter_messages (thread_id, sender_type, sender_id, message)
        VALUES (?, 'staff', ?, ?)`,
@@ -1771,6 +2241,37 @@ app.post('/api/sponsorship/letters/:id/reply', authenticate, checkPermission('sp
     );
     await writeAuditLog(req.user, 'sponsorship.letter.replied', 'letter_thread', thread.id);
     res.status(201).json({ sent: true });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/sponsorship/children/:id/letters', authenticate, checkSponsorshipRecord, async (req, res, next) => {
+  try {
+    const subject = String(req.body.subject || '').trim();
+    const message = String(req.body.message || '').trim();
+    if (!subject || subject.length > 160) {
+      return res.status(400).json({ error: 'Letter subject must be between 1 and 160 characters' });
+    }
+    if (!message || message.length > 5000) {
+      return res.status(400).json({ error: 'Letter message must be between 1 and 5,000 characters' });
+    }
+    await sponsorshipTablesReady;
+    const child = await getAccessibleSponsorshipChild(req.user, req.params.id);
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    const [created] = await pool.execute(
+      `INSERT INTO sponsorship_letter_threads
+         (participant_id, subject, subject_encrypted, status)
+       VALUES (?, 'Encrypted subject', ?, 'open')`,
+      [child.id, encryptLetter(subject)],
+    );
+    await pool.execute(
+      `INSERT INTO sponsorship_letter_messages (thread_id, sender_type, sender_id, message)
+       VALUES (?, 'staff', ?, ?)`,
+      [created.insertId, req.user.id, encryptLetter(message)],
+    );
+    await writeAuditLog(req.user, 'sponsorship.letter.created', 'letter_thread', created.insertId, {
+      participantId: child.id,
+    });
+    res.status(201).json({ threadId: created.insertId });
   } catch (error) { next(error); }
 });
 
@@ -1820,6 +2321,12 @@ app.post('/api/public/sponsor-status', guardianRateLimit, async (req, res, next)
         id: child.id,
         name: decrypt(child.full_name_encrypted),
         participantCode: child.participant_code,
+        schoolName: child.school_name_encrypted
+          ? decrypt(child.school_name_encrypted)
+          : '',
+        schoolAddress: child.school_address_encrypted
+          ? decrypt(child.school_address_encrypted)
+          : '',
         sponsorStatus: child.sponsorship_status || 'unknown',
         lifecycle: child.sponsorship_lifecycle || 'active',
         monthlyAllowance: Number(child.monthly_allowance || 0),

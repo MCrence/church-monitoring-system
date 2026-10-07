@@ -18,6 +18,25 @@ async function initializeSponsorshipTables(pool) {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS sponsored_child_care_records (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      participant_id INT UNSIGNED NOT NULL,
+      care_type VARCHAR(20) NOT NULL,
+      amount DECIMAL(10,2) NOT NULL,
+      recorded_on DATE NOT NULL,
+      description VARCHAR(255) DEFAULT NULL,
+      receipt_mime VARCHAR(100) NOT NULL,
+      receipt_data LONGBLOB NOT NULL,
+      created_by INT UNSIGNED DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_sponsored_child_care_records_child_date (participant_id, recorded_on),
+      CONSTRAINT fk_sponsored_child_care_records_participant
+        FOREIGN KEY (participant_id) REFERENCES participants (id)
+        ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS sponsorship_letter_threads (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
       participant_id INT UNSIGNED NOT NULL,

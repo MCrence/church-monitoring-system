@@ -116,8 +116,7 @@ without encryption; new uploads are encrypted when a valid `AES_KEY` is
 configured. Do not treat this as evidence of hardware-backed key storage.
 
 Production startup requires a 32-byte-or-longer `JWT_SECRET`, a distinct
-`AES_KEY`, and a production HTTPS `CLIENT_ORIGIN` (a single trailing slash is
-normalized). Database connections use
+`AES_KEY`, and an exact HTTPS `CLIENT_ORIGIN`. Database connections use
 certificate-validated TLS in production and require TLS 1.3; development can
 enable database TLS with `DB_SSL=true` and optionally provide `DB_SSL_CA`.
 `/api/health` reports the TLS protocol negotiated by the database connection;
@@ -189,9 +188,11 @@ The [ISO/IEC 25010 evaluation protocol](./ISO-IEC-25010-EVALUATION.md) lists
 measurable criteria and distinguishes local test results from usability,
 production-cloud, and security evidence that still must be collected.
 
-The account settings feature requires unique usernames and email addresses.
-Fresh database imports include these indexes. For an existing database, first
-resolve any duplicate usernames or email addresses, then run:
+All staff and Goer sign-in uses unique email addresses. The legacy `username` column
+is retained internally for existing records and schema compatibility; new
+accounts receive a generated internal value that is not used to sign in. Fresh
+database imports include unique username and email indexes. For an existing
+database, first resolve any duplicate values, then run:
 
 ```sql
 ALTER TABLE users
@@ -212,16 +213,27 @@ security boundary.
 | --- | --- |
 | System Administrator | All staff modules, staff account registration and permission management, audit history, and personal account settings |
 | Church Administrator | Personal account settings and the modules individually assigned by a System Administrator, including optional sponsored-child care access |
+| Goer | Check-in, group-scoped care records, and sponsor letters for active sponsored children in one assigned education group |
 
-Sponsored Child and Goer are participant types, not staff login roles.
-Participants do not receive staff accounts through participant registration. Only
-a System Administrator can register staff accounts. New staff accounts receive
-the Church Administrator role; the System Administrator selects access to the
-dashboard, participant viewing/management, event viewing/management, check-in,
-analytics, reports, and the participant QR portal. Management permission also
-grants the related view permission. System Administrators can later update
-permissions or deactivate/reactivate a staff account. A staff account cannot
-grant itself more access or manage other accounts.
+Sponsored Child is a participant type. Goer is a separate staff login role and
+is not assigned through participant registration. Only a System Administrator
+can register accounts through the Manage Accounts page. Staff and Goer
+registration collects first, middle, and last names, an email address used for
+sign-in, and a temporary password. Church Administrator accounts receive
+individually selected access to the dashboard, participants, events, check-in,
+analytics, reports, the participant QR portal, and optionally sponsored care.
+Management permission also grants the related view permission. Goer accounts
+are assigned one of Elementary, Junior High School, Senior High School, or
+College. They can record attendance, log a child’s received gift or allowance
+with receipt proof, and create or reply to sponsor letters for active children
+in their assigned group. The server enforces that group assignment on every
+relevant read and write. Goers cannot change lifecycle or allowance settings,
+edit school or growth records, manage letter status, or access participant
+administration. Goer receipt records are kept separately from sponsor
+disbursements, so they do not appear as money sent in the guardian sponsorship
+history. System Administrators can update a Goer’s group or
+deactivate/reactivate the account.
+A staff account cannot grant itself more access or manage other accounts.
 
 Existing Church Administrator accounts with no saved permission list retain
 their prior access for compatibility. New permission selections are enforced by
@@ -236,11 +248,13 @@ Graduated marks a child who has exited sponsorship. These lifecycle changes do
 not delete the participant or revoke their QR code.
 
 Staff with View sponsored care permission can review lifecycle, monthly
-allowance, past disbursements, receipt proofs, and child letter threads. Staff
-with Manage sponsored care permission can also update lifecycle and allowance,
-record an allowance or gift with a JPG, PNG, or PDF receipt proof (up to 4 MB),
-reply to letters, and update letter status. Receipt proof files are stored in
-the database and are not served from the public uploads directory.
+allowance, past disbursements, received-care records, receipt proofs, and child
+letter threads. Staff with Manage sponsored care permission can also update
+lifecycle and allowance, record a sponsor disbursement, reply to letters, and
+update letter status. Goers record a received gift or allowance separately
+from a sponsor disbursement. Receipt proofs accept JPG, PNG, or PDF files (up
+to 4 MB); proof files are stored in the database and are not served from the
+public uploads directory.
 
 Guardians scan the child's active QR code, then enter the child's
 6-digit numeric passcode in the verification dialog to view that child's
@@ -284,8 +298,9 @@ grade is selected from Grades 1–6, Junior High from Grades 7–10, Senior High
 from Grades 11–12, and College from Years 1–6. A college program/course is
 required for College. Goer records are not subject to these age and education rules. Existing participant data is preserved; the new
 qualification is validated when creating or editing a sponsored-child record.
-Education course data and each name part are encrypted in the database; the
-education level and grade/year are stored as non-sensitive classification data.
+Education course data, school name and address, and each name part are
+encrypted in the database; the education level and grade/year are stored as
+non-sensitive classification data.
 Participant registration and editing use required first and last names plus
 an optional middle name. Existing full names remain intact; when editing a
 legacy record, the form initially separates its first word, middle words, and

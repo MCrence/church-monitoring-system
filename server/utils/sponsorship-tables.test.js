@@ -3,7 +3,7 @@ const test = require('node:test');
 
 const { initializeSponsorshipTables } = require('./sponsorship-tables');
 
-test('creates sponsorship parent tables before dependent message table', async () => {
+test('creates sponsorship tables before dependent message table', async () => {
   const created = [];
   const pool = {
     async query(sql) {
@@ -29,6 +29,7 @@ test('creates sponsorship parent tables before dependent message table', async (
 
   assert.deepEqual(created, [
     'sponsorship_disbursements',
+    'sponsored_child_care_records',
     'sponsorship_letter_threads',
     'sponsorship_letter_messages',
   ]);

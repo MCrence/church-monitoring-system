@@ -182,6 +182,8 @@ CREATE TABLE `participants` (
   `education_level` varchar(50) DEFAULT NULL,
   `grade_level` varchar(50) DEFAULT NULL,
   `program_course_encrypted` text DEFAULT NULL,
+  `school_name_encrypted` text DEFAULT NULL,
+  `school_address_encrypted` text DEFAULT NULL,
   `first_name_encrypted` text DEFAULT NULL,
   `middle_name_encrypted` text DEFAULT NULL,
   `last_name_encrypted` text DEFAULT NULL,
@@ -1361,6 +1363,10 @@ CREATE TABLE `users` (
   `password_hash` varchar(255) NOT NULL,
   `role` varchar(50) NOT NULL,
   `access_permissions` text DEFAULT NULL,
+  `goer_education_level` varchar(50) DEFAULT NULL,
+  `first_name` varchar(100) DEFAULT NULL,
+  `middle_name` varchar(100) DEFAULT NULL,
+  `last_name` varchar(100) DEFAULT NULL,
   `status` varchar(30) NOT NULL,
   `last_login_at` datetime DEFAULT NULL,
   `created_at` datetime DEFAULT NULL,
@@ -1528,6 +1534,23 @@ CREATE TABLE `sponsorship_disbursements` (
   PRIMARY KEY (`id`),
   KEY `idx_sponsorship_disbursements_participant` (`participant_id`,`disbursed_on`),
   CONSTRAINT `fk_sponsorship_disbursements_participant`
+    FOREIGN KEY (`participant_id`) REFERENCES `participants` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `sponsored_child_care_records` (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `participant_id` int(11) UNSIGNED NOT NULL,
+  `care_type` varchar(20) NOT NULL,
+  `amount` decimal(10,2) NOT NULL,
+  `recorded_on` date NOT NULL,
+  `description` varchar(255) DEFAULT NULL,
+  `receipt_mime` varchar(100) NOT NULL,
+  `receipt_data` longblob NOT NULL,
+  `created_by` int(11) UNSIGNED DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_sponsored_child_care_records_child_date` (`participant_id`,`recorded_on`),
+  CONSTRAINT `fk_sponsored_child_care_records_participant`
     FOREIGN KEY (`participant_id`) REFERENCES `participants` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 

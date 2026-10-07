@@ -26,6 +26,7 @@ const apiCall = async (p, o = {}) => {
 };
 const api = "/api";
 const STAFF_ROLES = ["system administrator", "church administrator"];
+const GOER_ROLE = "goer";
 const STAFF_PERMISSION_OPTIONS = [
   { key: "dashboard:view", label: "Dashboard", description: "View system overview and summary metrics." },
   { key: "participants:view", label: "View participants", description: "Browse participant records and profiles." },
@@ -53,7 +54,7 @@ const PAGE_PERMISSIONS = {
   sponsorship: "sponsorship:view",
 };
 const PAGE_ACCESS = {
-  account: STAFF_ROLES,
+  account: [...STAFF_ROLES, GOER_ROLE],
   audit: ["system administrator"],
   staff: ["system administrator"],
 };
@@ -66,12 +67,17 @@ const PAGE_LINKS = [
   ["reports", "Reports"],
   ["portal", "Child portal"],
   ["sponsorship", "Sponsored care"],
-  ["staff", "Staff accounts"],
+  ["staff", "Manage Accounts"],
   ["audit", "Audit history"],
 ];
 const canAccessPermission = (permission, user) => {
   const role = String(user?.role || user || "").toLowerCase();
   if (role === "system administrator") return true;
+  if (role === GOER_ROLE) {
+    return permission === "checkin:record" ||
+      (permission === "sponsorship:view" &&
+        user?.permissions?.includes("goer-care:view"));
+  }
   if (!permission || !STAFF_ROLES.includes(role)) return false;
   const permissions = Array.isArray(user?.permissions)
     ? user.permissions
@@ -193,16 +199,11 @@ const Badge = ({ level }) => (
   <span className={`risk-badge ${level}`}>{level}</span>
 );
 function Login({ done, onBack }) {
-  const [f, setF] = useState({ username: "", password: "" });
+  const [f, setF] = useState({ email: "", password: "" });
   const [err, setErr] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const submit = async (e) => {
     e.preventDefault();
-    const eligibilityError = sponsoredChildEligibilityError(f);
-    if (eligibilityError) {
-      alert(eligibilityError);
-      return;
-    }
     setSubmitting(true);
     setErr("");
     try {
@@ -242,10 +243,11 @@ function Login({ done, onBack }) {
           <form onSubmit={submit} className="vstack gap-3">
             <input
               className="form-control form-control-lg"
-              placeholder="Username or email"
-              value={f.username}
-              onChange={(e) => setF({ ...f, username: e.target.value })}
-              autoComplete="username"
+              type="email"
+              placeholder="Email address"
+              value={f.email}
+              onChange={(e) => setF({ ...f, email: e.target.value })}
+              autoComplete="email"
               disabled={submitting}
               required
             />
@@ -292,7 +294,8 @@ function LoadingScreen({ message }) {
 }
 function Header({ user, page, go, logout }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const isStaff = STAFF_ROLES.includes(String(user.role).toLowerCase());
+  const canManageAccount = STAFF_ROLES.includes(String(user.role).toLowerCase()) ||
+    String(user.role).toLowerCase() === GOER_ROLE;
   const links = PAGE_LINKS.filter(([key]) => canAccessPage(key, user));
   return (
     <aside className="topbar app-sidebar">
@@ -331,15 +334,15 @@ function Header({ user, page, go, logout }) {
         ))}
       </nav>
       <div className="user-menu">
-        <span className="avatar">{user.username?.[0]?.toUpperCase()}</span>
-        {isStaff ? (
+        <span className="avatar">{(user.fullName || user.email || "?")[0]?.toUpperCase()}</span>
+        {canManageAccount ? (
           <button
             className="account-trigger d-none d-md-inline"
             type="button"
             aria-label="Open account settings"
             onClick={() => go("account")}
           >
-            {user.username}
+            {user.fullName || user.email}
           </button>
         ) : (
           <span className="d-none d-md-inline">{user.role}</span>
@@ -353,7 +356,7 @@ function Header({ user, page, go, logout }) {
 }
 function AccountSettings({ onUserUpdated }) {
   const [account, setAccount] = useState(null);
-  const [username, setUsername] = useState("");
+  const [name, setName] = useState({ firstName: "", middleName: "", lastName: "" });
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -371,7 +374,11 @@ function AccountSettings({ onUserUpdated }) {
     apiCall("/account")
       .then(({ user: profile }) => {
         setAccount(profile);
-        setUsername(profile.username);
+        setName({
+          firstName: profile.firstName || "",
+          middleName: profile.middleName || "",
+          lastName: profile.lastName || "",
+        });
         setEmail(profile.email);
       })
       .catch((error) => setAccountError(error.message))
@@ -389,13 +396,17 @@ function AccountSettings({ onUserUpdated }) {
     try {
       const result = await apiCall("/account", {
         method: "PUT",
-        body: JSON.stringify({ username, currentPassword, newPassword }),
+        body: JSON.stringify({ ...name, currentPassword, newPassword }),
       });
       localStorage.token = result.token;
       localStorage.user = JSON.stringify(result.user);
       onUserUpdated(result.user);
       setAccount(result.user);
-      setUsername(result.user.username);
+      setName({
+        firstName: result.user.firstName || "",
+        middleName: result.user.middleName || "",
+        lastName: result.user.lastName || "",
+      });
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
@@ -447,9 +458,9 @@ function AccountSettings({ onUserUpdated }) {
   return (
     <>
       <Title
-        e="ADMIN ACCOUNT"
+        e={String(account?.role || "").toLowerCase() === GOER_ROLE ? "GOER ACCOUNT" : "ADMIN ACCOUNT"}
         t="Manage your account."
-        d="Update your username, password, and verified email address."
+        d="Update your name, password, and verified email address."
       />
       {loading ? (
         <p role="status">Loading account details...</p>
@@ -457,19 +468,21 @@ function AccountSettings({ onUserUpdated }) {
         <div className="row g-4">
           <section className="col-12 col-lg-6">
             <div className="surface form-surface account-panel">
-              <h2>Username and password</h2>
+              <h2>Name and password</h2>
               <form className="vstack gap-3" onSubmit={updateCredentials}>
-                <div>
-                  <label className="form-label" htmlFor="account-username">Username</label>
-                  <input
-                    id="account-username"
-                    className="form-control"
-                    autoComplete="username"
-                    maxLength={100}
-                    required
-                    value={username}
-                    onChange={(event) => setUsername(event.target.value)}
-                  />
+                <div className="row g-3">
+                  <div className="col-12 col-md-4">
+                    <label className="form-label" htmlFor="account-first-name">First name</label>
+                    <input id="account-first-name" className="form-control" autoComplete="given-name" maxLength={100} required value={name.firstName} onChange={(event) => setName({ ...name, firstName: event.target.value })} />
+                  </div>
+                  <div className="col-12 col-md-4">
+                    <label className="form-label" htmlFor="account-middle-name">Middle name</label>
+                    <input id="account-middle-name" className="form-control" autoComplete="additional-name" maxLength={100} value={name.middleName} onChange={(event) => setName({ ...name, middleName: event.target.value })} />
+                  </div>
+                  <div className="col-12 col-md-4">
+                    <label className="form-label" htmlFor="account-last-name">Last name</label>
+                    <input id="account-last-name" className="form-control" autoComplete="family-name" maxLength={100} required value={name.lastName} onChange={(event) => setName({ ...name, lastName: event.target.value })} />
+                  </div>
                 </div>
                 <div>
                   <label className="form-label" htmlFor="account-current-password">Current password</label>
@@ -495,7 +508,7 @@ function AccountSettings({ onUserUpdated }) {
                     value={newPassword}
                     onChange={(event) => setNewPassword(event.target.value)}
                   />
-                  <small className="text-secondary">Leave blank if you are only changing your username.</small>
+                  <small className="text-secondary">Leave blank if you are only updating your name.</small>
                 </div>
                 {newPassword && (
                   <div>
@@ -620,29 +633,6 @@ const GenderSelect = ({ id, value, onChange }) => (
     </select>
   </div>
 );
-const TypeChoice = ({ value, onChange }) => (
-  <div className="col-12">
-    <label className="form-label">Participant type</label>
-    <div className="type-choice" role="group" aria-label="Participant type">
-      <button
-        type="button"
-        className={value === "sponsored_child" ? "selected" : ""}
-        onClick={() => onChange("sponsored_child")}
-      >
-        <strong>Sponsored Child</strong>
-        <small>Health, guardian, sponsor, and program details</small>
-      </button>
-      <button
-        type="button"
-        className={value === "goer" ? "selected" : ""}
-        onClick={() => onChange("goer")}
-      >
-        <strong>Goer</strong>
-        <small>Personal information only</small>
-      </button>
-    </div>
-  </div>
-);
 function Dashboard({ go }) {
   const [d, setD] = useState({ counts: {}, recentCheckins: [], atRisk: [] });
   const [greeting, setGreeting] = useState(() => getGreeting());
@@ -751,10 +741,12 @@ function Register({ onClose, onCreated }) {
     gender: "",
     phone: "",
     address: "",
-    participantType: "goer",
+    participantType: "sponsored_child",
     educationLevel: "",
     gradeLevel: "",
     programCourse: "",
+    schoolName: "",
+    schoolAddress: "",
     weight: "",
     height: "",
     medicalConditions: "",
@@ -804,8 +796,8 @@ function Register({ onClose, onCreated }) {
         <header className="participant-modal-header">
           <div>
             <span className="eyebrow">PARTICIPANTS / NEW RECORD</span>
-            <h2 id="register-participant-title">{result ? "Participant registered." : "Register a participant."}</h2>
-            <p>Create an encrypted profile and issue a secure digital ID.</p>
+            <h2 id="register-participant-title">{result ? "Sponsored child registered." : "Register a sponsored child."}</h2>
+            <p>Create an encrypted sponsored-child profile and issue a secure digital ID.</p>
           </div>
           <button type="button" className="btn-close" aria-label="Close registration" onClick={onClose} />
         </header>
@@ -827,139 +819,139 @@ function Register({ onClose, onCreated }) {
             </div>
           </div>
         ) : (
-          <form onSubmit={submit}>
-            <div className="row g-3">
-              <Field label="First name" value={f.firstName} onChange={update("firstName")} required />
-              <Field label="Middle name (optional)" value={f.middleName} onChange={update("middleName")} />
-              <Field label="Last name" value={f.lastName} onChange={update("lastName")} required />
-              <Field
-                label="Date of birth"
-                type="date"
-                value={f.dateOfBirth}
-                onChange={update("dateOfBirth")}
-                required={f.participantType === "sponsored_child"}
-              />
-              <TypeChoice
-                value={f.participantType}
-                onChange={(value) => setF({ ...f, participantType: value })}
-              />
-              <GenderSelect
-                id="register-gender"
-                value={f.gender}
-                onChange={update("gender")}
-              />
-              <Field label="Phone" value={f.phone} onChange={update("phone")} />
-              <Field
-                label="Address"
-                value={f.address}
-                onChange={update("address")}
-              />
-              {f.participantType === "sponsored_child" && (
-                <>
-                  <div className="col-12">
-                    <p className="text-secondary mb-0">
-                      Sponsored children must be 6–22 years old and select an education level and grade/year. College students must also provide their course.
-                    </p>
-                  </div>
-                  <div className="col-12 col-md-6">
-                    <label className="form-label" htmlFor="register-education-level">Education level</label>
-                    <select
-                      id="register-education-level"
-                      className="form-select"
-                      value={f.educationLevel}
-                      onChange={(event) => setF({
-                        ...f,
-                        educationLevel: event.target.value,
-                        gradeLevel: "",
-                        programCourse: event.target.value === "College" ? f.programCourse : "",
-                      })}
-                      required
-                    >
-                      <option value="">Select education level</option>
-                      {EDUCATION_LEVELS.map((level) => <option key={level}>{level}</option>)}
-                    </select>
-                  </div>
-                  {f.educationLevel && (
+          <form className="participant-registration-form" onSubmit={submit}>
+            <section className="registration-section">
+              <header className="registration-section-heading">
+                <span>01</span>
+                <div><h3>Child details</h3><p>Start with the child’s basic information.</p></div>
+              </header>
+              <div className="row g-3">
+                <Field label="First name" value={f.firstName} onChange={update("firstName")} required />
+                <Field label="Middle name (optional)" value={f.middleName} onChange={update("middleName")} />
+                <Field label="Last name" value={f.lastName} onChange={update("lastName")} required />
+                <Field
+                  label="Date of birth"
+                  type="date"
+                  value={f.dateOfBirth}
+                  onChange={update("dateOfBirth")}
+                  required={f.participantType === "sponsored_child"}
+                />
+                <GenderSelect id="register-gender" value={f.gender} onChange={update("gender")} />
+                <Field label="Phone" value={f.phone} onChange={update("phone")} />
+                <Field label="Home address" value={f.address} onChange={update("address")} />
+              </div>
+            </section>
+            {f.participantType === "sponsored_child" && (
+              <>
+                <section className="registration-section registration-education-section">
+                  <header className="registration-section-heading">
+                    <span>02</span>
+                    <div><h3>Education and school</h3><p>Add the school the child currently attends and their study details.</p></div>
+                  </header>
+                  <div className="row g-3">
                     <div className="col-12 col-md-6">
-                      <label className="form-label" htmlFor="register-grade-level">
-                        {f.educationLevel === "College" ? "College year" : "Grade level"}
-                      </label>
+                      <label className="form-label" htmlFor="register-school-name">School currently attending</label>
+                      <input
+                        id="register-school-name"
+                        className="form-control"
+                        value={f.schoolName}
+                        onChange={update("schoolName")}
+                        maxLength={200}
+                        aria-describedby="register-school-name-hint"
+                      />
+                      <small className="registration-field-hint" id="register-school-name-hint">
+                      Enter the full name of the school where the child is currently enrolled.
+                      </small>
+                    </div>
+                    <div className="col-12 col-md-6">
+                      <label className="form-label" htmlFor="register-education-level">Education level</label>
                       <select
-                        id="register-grade-level"
+                        id="register-education-level"
                         className="form-select"
-                        value={f.gradeLevel}
-                        onChange={update("gradeLevel")}
+                        value={f.educationLevel}
+                        onChange={(event) => setF({
+                          ...f,
+                          educationLevel: event.target.value,
+                          gradeLevel: "",
+                          programCourse: event.target.value === "College" ? f.programCourse : "",
+                        })}
                         required
                       >
-                        <option value="">Select {f.educationLevel === "College" ? "college year" : "grade level"}</option>
-                        {GRADE_LEVELS[f.educationLevel].map((grade) => <option key={grade}>{grade}</option>)}
+                        <option value="">Select education level</option>
+                        {EDUCATION_LEVELS.map((level) => <option key={level}>{level}</option>)}
                       </select>
                     </div>
-                  )}
-                  {f.educationLevel === "College" && (
-                    <Field
-                      label="College program or course"
-                      value={f.programCourse}
-                      onChange={update("programCourse")}
-                      required
-                    />
-                  )}
-                  <Field
-                    label="Weight"
-                    placeholder="e.g. 32 kg"
-                    value={f.weight}
-                    onChange={update("weight")}
-                  />
-                  <Field
-                    label="Height"
-                    placeholder="e.g. 132 cm"
-                    value={f.height}
-                    onChange={update("height")}
-                  />
-                  <Field
-                    label="Medical conditions"
-                    value={f.medicalConditions}
-                    onChange={update("medicalConditions")}
-                  />
-                  <Field
-                    label="Emergency contact name"
-                    value={f.emergencyContactName}
-                    onChange={update("emergencyContactName")}
-                  />
-                  <Field
-                    label="Emergency contact phone"
-                    value={f.emergencyContactPhone}
-                    onChange={update("emergencyContactPhone")}
-                  />
-                  <Field
-                    label="Sponsor name"
-                    value={f.sponsorName}
-                    onChange={update("sponsorName")}
-                  />
-                  <Field
-                    label="Sponsor contact"
-                    value={f.sponsorContact}
-                    onChange={update("sponsorContact")}
-                  />
-                  <Field
-                    label="Sponsorship type"
-                    value={f.sponsorshipType}
-                    onChange={update("sponsorshipType")}
-                  />
-                  <Field
-                    label="Enrollment date"
-                    type="date"
-                    value={f.enrollmentDate}
-                    onChange={update("enrollmentDate")}
-                  />
-                  <Field
-                    label="Program affiliation"
-                    value={f.programAffiliation}
-                    onChange={update("programAffiliation")}
-                  />
-                </>
-              )}
-            </div>
+                    {f.educationLevel && (
+                      <div className="col-12 col-md-6">
+                        <label className="form-label" htmlFor="register-grade-level">
+                          {f.educationLevel === "College" ? "College year" : "Grade level"}
+                        </label>
+                        <select
+                          id="register-grade-level"
+                          className="form-select"
+                          value={f.gradeLevel}
+                          onChange={update("gradeLevel")}
+                          required
+                        >
+                          <option value="">Select {f.educationLevel === "College" ? "college year" : "grade level"}</option>
+                          {GRADE_LEVELS[f.educationLevel].map((grade) => <option key={grade}>{grade}</option>)}
+                        </select>
+                      </div>
+                    )}
+                    {f.educationLevel === "College" && (
+                      <Field
+                        label="College program or course"
+                        value={f.programCourse}
+                        onChange={update("programCourse")}
+                        required
+                      />
+                    )}
+                    <div className="col-12">
+                      <label className="form-label" htmlFor="register-school-address">School address</label>
+                      <textarea
+                        id="register-school-address"
+                        className="form-control"
+                        rows="2"
+                        maxLength={500}
+                        value={f.schoolAddress}
+                        onChange={update("schoolAddress")}
+                      />
+                    </div>
+                    <div className="col-12">
+                      <p className="registration-note mb-0">
+                        Sponsored children must be 6–22 years old and select an education level and grade/year. College students must also provide their course.
+                      </p>
+                    </div>
+                  </div>
+                </section>
+                <section className="registration-section">
+                  <header className="registration-section-heading">
+                    <span>03</span>
+                    <div><h3>Health and emergency contact</h3><p>Optional details to help staff provide appropriate care.</p></div>
+                  </header>
+                  <div className="row g-3">
+                    <Field label="Weight" placeholder="e.g. 32 kg" value={f.weight} onChange={update("weight")} />
+                    <Field label="Height" placeholder="e.g. 132 cm" value={f.height} onChange={update("height")} />
+                    <Field label="Medical conditions" value={f.medicalConditions} onChange={update("medicalConditions")} />
+                    <Field label="Emergency contact name" value={f.emergencyContactName} onChange={update("emergencyContactName")} />
+                    <Field label="Emergency contact phone" value={f.emergencyContactPhone} onChange={update("emergencyContactPhone")} />
+                  </div>
+                </section>
+                <section className="registration-section">
+                  <header className="registration-section-heading">
+                    <span>04</span>
+                    <div><h3>Sponsorship details</h3><p>Record sponsor and program information, if available.</p></div>
+                  </header>
+                  <div className="row g-3">
+                    <Field label="Sponsor name" value={f.sponsorName} onChange={update("sponsorName")} />
+                    <Field label="Sponsor contact" value={f.sponsorContact} onChange={update("sponsorContact")} />
+                    <Field label="Sponsorship type" value={f.sponsorshipType} onChange={update("sponsorshipType")} />
+                    <Field label="Enrollment date" type="date" value={f.enrollmentDate} onChange={update("enrollmentDate")} />
+                    <Field label="Program affiliation" value={f.programAffiliation} onChange={update("programAffiliation")} />
+                  </div>
+                </section>
+              </>
+            )}
             {error && <div className="alert alert-danger mt-3 mb-0" role="alert">{error}</div>}
             <footer className="participant-modal-footer">
               <button type="button" className="btn btn-outline-secondary" onClick={onClose} disabled={saving}>Cancel</button>
@@ -1104,7 +1096,7 @@ function Participants({ canManage, user }) {
       {canManage && (
         <div className="participant-register-action">
           <button type="button" className="btn btn-dark" onClick={() => setShowRegistration(true)}>
-            + Register participant
+            + Register sponsored child
           </button>
         </div>
       )}
@@ -1199,6 +1191,8 @@ function Participants({ canManage, user }) {
                     ["Education", form.educationLevel],
                     ["Grade/year", form.gradeLevel],
                     ["College course", form.programCourse],
+                    ["School name", form.schoolName],
+                    ["School address", form.schoolAddress],
                     ["Phone", form.phone],
                     ["Address", form.address],
                     ["Emergency contact", form.emergencyContactName],
@@ -1222,6 +1216,9 @@ function Participants({ canManage, user }) {
                     EDITING {form.participant_code}
                   </span>
                   <h2>Participant details</h2>
+                      <p className="text-secondary mb-0">
+                        Type: {form.participantType === "sponsored_child" ? "Sponsored Child" : "Existing Goer participant record"}
+                      </p>
                 </div>
                 <select
                   className="form-select status-select"
@@ -1242,12 +1239,6 @@ function Participants({ canManage, user }) {
                   value={(form.dateOfBirth || "").slice(0, 10)}
                   onChange={update("dateOfBirth")}
                   required={form.participantType === "sponsored_child"}
-                />
-                <TypeChoice
-                  value={form.participantType}
-                  onChange={(value) =>
-                    setForm({ ...form, participantType: value })
-                  }
                 />
                 <GenderSelect
                   id="edit-gender"
@@ -1314,6 +1305,23 @@ function Participants({ canManage, user }) {
                         required
                       />
                     )}
+                    <Field
+                      label="School name"
+                      value={form.schoolName || ""}
+                      onChange={update("schoolName")}
+                      maxLength={200}
+                    />
+                    <div className="col-12">
+                      <label className="form-label" htmlFor="edit-school-address">School address</label>
+                      <textarea
+                        id="edit-school-address"
+                        className="form-control"
+                        rows="2"
+                        maxLength={500}
+                        value={form.schoolAddress || ""}
+                        onChange={update("schoolAddress")}
+                      />
+                    </div>
                     <Field
                       label="Weight"
                       value={form.weight || ""}
@@ -1971,7 +1979,8 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
     </div>
   );
 }
-function Scanner({ portal = false }) {
+function Scanner({ portal = false, user = null }) {
+  const isGoer = String(user?.role || "").toLowerCase() === GOER_ROLE;
   const [payload, setPayload] = useState("");
   const [toast, setToast] = useState(null);
   const [pass, setPass] = useState("");
@@ -1980,12 +1989,34 @@ function Scanner({ portal = false }) {
   const [event, setEvent] = useState("custom");
   const [attendanceAction, setAttendanceAction] = useState("check_in");
   const [events, setEvents] = useState([]);
+  const [groupRoster, setGroupRoster] = useState(null);
+  const [groupRosterLoading, setGroupRosterLoading] = useState(isGoer);
+  const [groupRosterError, setGroupRosterError] = useState("");
   const portalBusy = useRef(false);
   const checkinBusy = useRef(false);
-
   useEffect(() => {
     if (!portal) apiCall("/checkin/events").then(setEvents).catch(() => {});
   }, [portal]);
+  const fetchGoerRoster = useCallback(() => apiCall("/checkin/group"), []);
+  useEffect(() => {
+    if (portal || !isGoer) return undefined;
+    let mounted = true;
+    fetchGoerRoster()
+      .then((result) => {
+        if (!mounted) return;
+        setGroupRoster(result);
+        setGroupRosterError("");
+        setGroupRosterLoading(false);
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        setGroupRosterError(error.message);
+        setGroupRosterLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [fetchGoerRoster, isGoer, portal]);
   const selectedEvent = events.find((item) => String(item.id) === event);
   const eventName = selectedEvent?.name || "Sunday service";
   const eventLocation = selectedEvent?.location || null;
@@ -2023,6 +2054,14 @@ function Scanner({ portal = false }) {
     if (result.status === "checked_out") showToast("Check-out recorded.", "success");
     else if (result.status === "duplicate") showToast("Already checked in today for this event.", "warning");
     else showToast("Check-in recorded.", "success");
+    if (isGoer) {
+      fetchGoerRoster()
+        .then((roster) => {
+          setGroupRoster(roster);
+          setGroupRosterError("");
+        })
+        .catch((error) => setGroupRosterError(error.message));
+    }
   };
   const handleAttendance = async (value) => {
     try {
@@ -2152,6 +2191,8 @@ function Scanner({ portal = false }) {
               <div><small>Education</small><strong>{profile.educationLevel || "Not provided"}</strong></div>
               <div><small>Grade/year</small><strong>{profile.gradeLevel || "Not provided"}</strong></div>
               {profile.educationLevel === "College" && <div><small>College course</small><strong>{profile.programCourse || "Not provided"}</strong></div>}
+              <div><small>School</small><strong>{profile.schoolName || "Not provided"}</strong></div>
+              <div><small>School address</small><strong>{profile.schoolAddress || "Not provided"}</strong></div>
               <div><small>Enrollment date</small><strong>{profile.enrollmentDate || "Not provided"}</strong></div>
               <div><small>Program affiliation</small><strong>{profile.programAffiliation || "Not provided"}</strong></div>
             </div>
@@ -2171,7 +2212,9 @@ function Scanner({ portal = false }) {
       <Title
         e={portal ? "SPONSORED CHILD PORTAL" : "CHECK-IN STATION"}
         t={portal ? "A private window into care." : "Make every arrival count."}
-        d="Use the device camera or paste a QR payload."
+        d={isGoer
+          ? `Record attendance for your ${user.goerEducationLevel} group only.`
+          : "Use the device camera or paste a QR payload."}
       />
       <div className="row g-4">
         <div className="col-12 col-md-6">
@@ -2236,6 +2279,31 @@ function Scanner({ portal = false }) {
           </div>
         </div>
       </div>
+      {!portal && isGoer && (
+        <section className="surface table-surface staff-list-panel mt-4">
+          <div className="panel-title">
+            <h2>{groupRoster?.educationLevel || user.goerEducationLevel} group attendance</h2>
+            <span>{groupRoster?.children.length ?? 0} children</span>
+          </div>
+          {groupRosterError && <div className="alert alert-danger" role="alert">{groupRosterError}</div>}
+          {groupRosterLoading ? <p role="status">Loading group attendance...</p> : groupRoster?.children.length ? (
+            <div className="table-responsive">
+              <table className="table align-middle">
+                <thead><tr><th>Child</th><th>Grade/year</th><th>Today’s attendance</th></tr></thead>
+                <tbody>{groupRoster.children.map((child) => (
+                  <tr key={child.id}>
+                    <td><strong>{child.name}</strong><small className="d-block text-secondary">{child.participantCode}</small></td>
+                    <td>{child.gradeLevel || "—"}</td>
+                    <td>{child.checkedInAt
+                      ? <>{child.checkedOutAt ? "Checked out" : "Checked in"} · {child.attendanceEvent}<small className="d-block text-secondary">{new Date(child.checkedOutAt || child.checkedInAt).toLocaleTimeString()}</small></>
+                      : <span className="text-secondary">No attendance recorded today</span>}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : !groupRosterError ? <p className="text-secondary">No active sponsored children are assigned to this group.</p> : null}
+        </section>
+      )}
       {toast && (
         <div style={{position: 'fixed', right: 20, bottom: 20, zIndex: 2000, padding: '10px 14px', borderRadius: 8, color: '#fff', backgroundColor: toast.type === 'success' ? '#28a745' : toast.type === 'warning' ? '#ff9f1c' : toast.type === 'danger' ? '#dc3545' : '#0d6efd', boxShadow: '0 4px 12px rgba(0,0,0,0.15)'}}>
           {toast.text}
@@ -2865,7 +2933,11 @@ const formatCurrency = (value) => new Intl.NumberFormat(undefined, {
 }).format(Number(value || 0));
 
 function SponsoredCare({ user }) {
+  const isGoer = String(user?.role || "").toLowerCase() === GOER_ROLE;
   const canManage = canAccessPermission("sponsorship:manage", user);
+  const canRecordCare = canManage ||
+    (isGoer && user?.permissions?.includes("goer-care:record"));
+  const canViewUpdates = !isGoer && canAccessPermission("sponsorship:view", user);
   const [children, setChildren] = useState([]);
   const [letters, setLetters] = useState([]);
   const [selectedChildId, setSelectedChildId] = useState(null);
@@ -2876,7 +2948,9 @@ function SponsoredCare({ user }) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("active");
   const [monthlyAllowance, setMonthlyAllowance] = useState("0");
-  const [gift, setGift] = useState({ amount: "", disbursedOn: new Date().toISOString().slice(0, 10), description: "", receiptData: "" });
+  const [schoolName, setSchoolName] = useState("");
+  const [schoolAddress, setSchoolAddress] = useState("");
+  const [gift, setGift] = useState({ careType: "allowance", amount: "", disbursedOn: new Date().toISOString().slice(0, 10), description: "", receiptData: "" });
   const [childUpdate, setChildUpdate] = useState({
     type: "growth",
     recordedOn: new Date().toISOString().slice(0, 10),
@@ -2887,6 +2961,8 @@ function SponsoredCare({ user }) {
   });
   const [receiptName, setReceiptName] = useState("");
   const [reply, setReply] = useState("");
+  const [letterSubject, setLetterSubject] = useState("");
+  const [letterMessage, setLetterMessage] = useState("");
   const [selectedThreadId, setSelectedThreadId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -2913,6 +2989,8 @@ function SponsoredCare({ user }) {
     setSelectedChildId(child.id);
     setStatus(child.lifecycle);
     setMonthlyAllowance(String(child.monthlyAllowance));
+    setSchoolName(child.schoolName || "");
+    setSchoolAddress(child.schoolAddress || "");
     setDisbursements([]);
     setChildUpdates([]);
     setStaffProof(null);
@@ -2921,7 +2999,9 @@ function SponsoredCare({ user }) {
     try {
       const [records, updates] = await Promise.all([
         apiCall(`/sponsorship/children/${child.id}/disbursements`),
-        apiCall(`/sponsorship/children/${child.id}/updates`),
+        canViewUpdates
+          ? apiCall(`/sponsorship/children/${child.id}/updates`)
+          : Promise.resolve([]),
       ]);
       setDisbursements(records);
       setChildUpdates(updates);
@@ -2961,10 +3041,10 @@ function SponsoredCare({ user }) {
     try {
       const saved = await apiCall(`/sponsorship/children/${selectedChildId}`, {
         method: "PUT",
-        body: JSON.stringify({ lifecycle: status, monthlyAllowance }),
+        body: JSON.stringify({ lifecycle: status, monthlyAllowance, schoolName, schoolAddress }),
       });
       setChildren((previous) => previous.map((child) => child.id === selectedChildId
-        ? { ...child, lifecycle: saved.lifecycle, monthlyAllowance: saved.monthlyAllowance }
+        ? { ...child, lifecycle: saved.lifecycle, monthlyAllowance: saved.monthlyAllowance, schoolName: saved.schoolName, schoolAddress: saved.schoolAddress }
         : child));
       setMessage("Sponsored child details updated.");
     } catch (saveError) {
@@ -2977,14 +3057,22 @@ function SponsoredCare({ user }) {
     setError("");
     setMessage("");
     try {
-      await apiCall(`/sponsorship/children/${selectedChildId}/disbursements`, {
+      await apiCall(`/sponsorship/children/${selectedChildId}/${isGoer ? "care-records" : "disbursements"}`, {
         method: "POST",
-        body: JSON.stringify(gift),
+        body: JSON.stringify(isGoer
+          ? {
+            careType: gift.careType,
+            amount: gift.amount,
+            recordedOn: gift.disbursedOn,
+            description: gift.description,
+            receiptData: gift.receiptData,
+          }
+          : gift),
       });
-      setGift({ amount: "", disbursedOn: new Date().toISOString().slice(0, 10), description: "", receiptData: "" });
+      setGift({ careType: "allowance", amount: "", disbursedOn: new Date().toISOString().slice(0, 10), description: "", receiptData: "" });
       setReceiptName("");
       setDisbursements(await apiCall(`/sponsorship/children/${selectedChildId}/disbursements`));
-      setMessage("Allowance/gift and receipt proof recorded.");
+      setMessage(isGoer ? "Received gift or allowance recorded." : "Allowance/gift and receipt proof recorded.");
     } catch (saveError) {
       setError(saveError.message);
     }
@@ -2992,7 +3080,9 @@ function SponsoredCare({ user }) {
 
   const openStaffReceipt = async (id) => {
     try {
-      const proof = await apiCall(`/sponsorship/disbursements/${id}/receipt`);
+      const proof = await apiCall(`/sponsorship/disbursements/${id}/receipt`, {
+        method: "POST",
+      });
       setStaffProof(proof);
     } catch (loadError) {
       setError(loadError.message);
@@ -3013,9 +3103,28 @@ function SponsoredCare({ user }) {
       });
       setReply("");
       await refreshLetters();
-      setMessage("Reply sent to the guardian.");
+      setMessage(isGoer ? "Reply sent to the sponsor." : "Reply sent to the guardian.");
     } catch (replyError) {
       setError(replyError.message);
+    }
+  };
+  const sendGoerLetter = async (event) => {
+    event.preventDefault();
+    if (!selectedChildId) return;
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiCall(`/sponsorship/children/${selectedChildId}/letters`, {
+        method: "POST",
+        body: JSON.stringify({ subject: letterSubject, message: letterMessage }),
+      });
+      setLetterSubject("");
+      setLetterMessage("");
+      await refreshLetters();
+      setSelectedThreadId(result.threadId);
+      setMessage("Letter sent to the sponsor.");
+    } catch (letterError) {
+      setError(letterError.message);
     }
   };
   const updateThreadStatus = async (threadId, nextStatus) => {
@@ -3034,24 +3143,29 @@ function SponsoredCare({ user }) {
     `${child.name} ${child.participantCode}`.toLowerCase().includes(query.toLowerCase()),
   );
   const selectedChild = children.find((child) => child.id === selectedChildId);
-  const selectedThread = letters.find((thread) => Number(thread.id) === Number(selectedThreadId));
+  const selectedThread = letters.find((thread) =>
+    Number(thread.id) === Number(selectedThreadId) &&
+    Number(thread.participantId) === Number(selectedChildId),
+  );
 
   return (
     <>
       <Title
-        e="SPONSORED CHILDREN"
-        t="Sponsored care."
-        d="Follow each child’s sponsorship journey, allowance, gifts, receipt proofs, and letters."
+        e={isGoer ? "YOUR ASSIGNED GROUP" : "SPONSORED CHILDREN"}
+        t={isGoer ? "Group care updates." : "Sponsored care."}
+        d={isGoer
+          ? `Record received gifts or allowances and contact sponsors for children in your ${user.goerEducationLevel} group.`
+          : "Follow each child’s sponsorship journey, allowance, gifts, receipt proofs, and letters."}
       />
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
       {message && <div className="alert alert-success" role="status">{message}</div>}
-      <div className="sponsorship-summary-grid">
+      {!isGoer && <div className="sponsorship-summary-grid">
         {SPONSOR_LIFECYCLE.map((lifecycle) => (
           <button key={lifecycle} className={`sponsorship-summary-card ${filter === lifecycle ? "selected" : ""}`} onClick={() => setFilter(filter === lifecycle ? "all" : lifecycle)}>
             <span>{lifecycle}</span><strong>{children.filter((child) => child.lifecycle === lifecycle).length}</strong>
           </button>
         ))}
-      </div>
+      </div>}
       <div className="sponsorship-workspace">
         <section className="surface sponsorship-child-list">
           <div className="sponsorship-list-heading">
@@ -3059,28 +3173,58 @@ function SponsoredCare({ user }) {
             <span>{visibleChildren.length}</span>
           </div>
           <input className="form-control mb-3" aria-label="Search sponsored children" placeholder="Search name or ID" value={query} onChange={(event) => setQuery(event.target.value)} />
-          <select className="form-select mb-3" aria-label="Filter by lifecycle status" value={filter} onChange={(event) => setFilter(event.target.value)}>
+          {!isGoer && <select className="form-select mb-3" aria-label="Filter by lifecycle status" value={filter} onChange={(event) => setFilter(event.target.value)}>
             <option value="all">All lifecycle statuses</option>
             {SPONSOR_LIFECYCLE.map((lifecycle) => <option value={lifecycle} key={lifecycle}>{lifecycle}</option>)}
-          </select>
+          </select>}
           {loading ? <p role="status">Loading children...</p> : visibleChildren.map((child) => (
             <button className={`sponsorship-child-row ${Number(selectedChildId) === Number(child.id) ? "selected" : ""}`} key={child.id} onClick={() => selectChild(child)}>
               <span><strong>{child.name}</strong><small>{child.participantCode || `Child #${child.id}`}</small></span>
-              <span className={`lifecycle-pill ${child.lifecycle}`}>{child.lifecycle}</span>
+              {!isGoer && <span className={`lifecycle-pill ${child.lifecycle}`}>{child.lifecycle}</span>}
             </button>
           ))}
           {!loading && !visibleChildren.length && <p className="text-secondary">No children in this category.</p>}
         </section>
         <section className="surface sponsorship-child-detail">
           {!selectedChild ? (
-            <div className="sponsorship-empty"><span aria-hidden="true">♡</span><h2>Select a child</h2><p>Choose a record to manage sponsorship details, allowance, and letters.</p></div>
+            <div className="sponsorship-empty"><span aria-hidden="true">♡</span><h2>Select a child</h2><p>{isGoer ? "Choose a child in your assigned group to record a gift or allowance, or write to their sponsor." : "Choose a record to manage sponsorship details, allowance, and letters."}</p></div>
           ) : (
             <>
               <div className="sponsorship-detail-heading">
                 <div><span className="eyebrow">{selectedChild.participantCode || `CHILD #${selectedChild.id}`}</span><h2>{selectedChild.name}</h2></div>
-                <span className={`lifecycle-pill ${selectedChild.lifecycle}`}>{selectedChild.lifecycle}</span>
+                {!isGoer && <span className={`lifecycle-pill ${selectedChild.lifecycle}`}>{selectedChild.lifecycle}</span>}
               </div>
-              <section className="sponsorship-detail-section">
+                {!isGoer && <section className="sponsorship-detail-section sponsorship-school-section">
+                  <h3>School details</h3>
+                  {canManage ? (
+                    <form className="sponsorship-school-form" onSubmit={saveChild}>
+                      <label className="form-label" htmlFor="sponsored-child-school-name">School name</label>
+                      <input
+                        id="sponsored-child-school-name"
+                        className="form-control"
+                        maxLength={200}
+                        value={schoolName}
+                        onChange={(event) => setSchoolName(event.target.value)}
+                      />
+                      <label className="form-label" htmlFor="sponsored-child-school-address">School address</label>
+                      <textarea
+                        id="sponsored-child-school-address"
+                        className="form-control"
+                        rows="2"
+                        maxLength={500}
+                        value={schoolAddress}
+                        onChange={(event) => setSchoolAddress(event.target.value)}
+                      />
+                      <button className="btn btn-sm btn-outline-dark" type="submit">Save school address</button>
+                    </form>
+                  ) : (
+                    <div className="sponsorship-school-readonly">
+                      <p><strong>School name:</strong> {selectedChild.schoolName || "Not provided"}</p>
+                      <p><strong>School address:</strong> {selectedChild.schoolAddress || "Not provided"}</p>
+                    </div>
+                  )}
+                </section>}
+                {canViewUpdates && <section className="sponsorship-detail-section">
                 <div className="sponsorship-list-heading">
                   <div>
                     <h3>Growth and activity history</h3>
@@ -3200,7 +3344,7 @@ function SponsoredCare({ user }) {
                     ))}
                   </div>
                 ) : <p className="text-secondary mt-3 mb-0">No growth, activity, or care updates recorded.</p>}
-              </section>
+              </section>}
               <section className="sponsorship-detail-section">
                 <h3>Sponsorship and allowance</h3>
                 {canManage ? (
@@ -3219,11 +3363,12 @@ function SponsoredCare({ user }) {
                   </form>
                 ) : <p>Monthly allowance: <strong>{formatCurrency(selectedChild.monthlyAllowance)}</strong></p>}
                 <h4 className="sponsorship-subheading">Record allowance or gift</h4>
-                {canManage ? (
+                {canRecordCare ? (
                   <form className="sponsorship-gift-form" onSubmit={addGift}>
+                    {isGoer && <div><label className="form-label" htmlFor="gift-care-type">Received</label><select id="gift-care-type" className="form-select" value={gift.careType} onChange={(event) => setGift({ ...gift, careType: event.target.value })}><option value="allowance">Allowance</option><option value="gift">Gift</option></select></div>}
                     <div><label className="form-label" htmlFor="gift-amount">Amount (PHP)</label><input id="gift-amount" className="form-control" type="number" min="0.01" max="1000000" step="0.01" required value={gift.amount} onChange={(event) => setGift({ ...gift, amount: event.target.value })} /></div>
                     <div><label className="form-label" htmlFor="gift-date">Date</label><input id="gift-date" className="form-control" type="date" required value={gift.disbursedOn} onChange={(event) => setGift({ ...gift, disbursedOn: event.target.value })} /></div>
-                    <div className="sponsorship-gift-description"><label className="form-label" htmlFor="gift-description">Gift / allowance note</label><input id="gift-description" className="form-control" maxLength={255} value={gift.description} onChange={(event) => setGift({ ...gift, description: event.target.value })} placeholder="e.g. Monthly school allowance" /></div>
+                    <div className="sponsorship-gift-description"><label className="form-label" htmlFor="gift-description">{isGoer ? "Gift / allowance note" : "Description"}</label><input id="gift-description" className="form-control" maxLength={255} value={gift.description} onChange={(event) => setGift({ ...gift, description: event.target.value })} placeholder="e.g. Monthly school allowance" /></div>
                     <div className="sponsorship-gift-description"><label className="form-label" htmlFor="gift-receipt">Receipt proof (JPG, PNG, PDF; max 4 MB)</label><input id="gift-receipt" className="form-control" type="file" accept="image/jpeg,image/png,application/pdf" required onChange={(event) => {
                       const file = event.target.files?.[0];
                       if (!file) return;
@@ -3245,15 +3390,15 @@ function SponsoredCare({ user }) {
                       reader.onerror = () => setError("Unable to read the receipt file. Try a different file.");
                       reader.readAsDataURL(file);
                     }} />{receiptName && <small className="text-secondary">{receiptName}</small>}</div>
-                    <button className="btn btn-outline-dark" type="submit" disabled={!gift.receiptData}>Save disbursement and proof</button>
+                    <button className="btn btn-outline-dark" type="submit" disabled={!gift.receiptData}>{isGoer ? "Record received gift / allowance" : "Save disbursement and proof"}</button>
                   </form>
                 ) : <p className="text-secondary">You can view the records, but do not have permission to manage allowances.</p>}
                 <div className="table-responsive mt-3">
                   <table className="table align-middle">
-                    <thead><tr><th>Date</th><th>Gift / allowance</th><th>Note</th><th>Proof</th></tr></thead>
+                    <thead><tr><th>Date</th><th>Record</th><th>Amount</th><th>Note</th><th>Proof</th></tr></thead>
                     <tbody>{disbursements.map((record) => (
-                      <tr key={record.id}><td>{new Date(record.disbursed_on).toLocaleDateString()}</td><td>{formatCurrency(record.amount)}</td><td>{record.description || "—"}</td><td>{record.hasReceipt ? <button className="btn btn-sm btn-outline-primary" onClick={() => openStaffReceipt(record.id)}>View proof</button> : "—"}</td></tr>
-                    ))}{!disbursements.length && <tr><td colSpan="4" className="text-secondary">No allowance or gift records.</td></tr>}</tbody>
+                      <tr key={record.id}><td>{new Date(record.recorded_on).toLocaleDateString()}</td><td>{record.recordType === "received" ? `${record.care_type[0].toUpperCase()}${record.care_type.slice(1)} received` : "Sponsor disbursement"}</td><td>{formatCurrency(record.amount)}</td><td>{record.description || "—"}</td><td>{record.hasReceipt ? (isGoer ? "Receipt on file" : <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => openStaffReceipt(record.id)}>View proof</button>) : "—"}</td></tr>
+                    ))}{!disbursements.length && <tr><td colSpan="5" className="text-secondary">No allowance or gift records.</td></tr>}</tbody>
                   </table>
                 </div>
                 {staffProof && (
@@ -3282,8 +3427,21 @@ function SponsoredCare({ user }) {
                         {canManage && <select className="form-select form-select-sm" aria-label="Update letter status" value={selectedThread.status} onChange={(event) => updateThreadStatus(selectedThread.id, event.target.value)}><option value="open">Open</option><option value="replied">Replied</option><option value="closed">Closed</option></select>}
                       </div>
                       <div className="sponsorship-messages">{selectedThread.messages.map((entry) => <div className={`sponsorship-message ${entry.sender_type}`} key={entry.id}><span>{entry.sender_type === "staff" ? "Staff" : "Guardian"} · {new Date(entry.created_at).toLocaleString()}</span><p>{entry.message}</p></div>)}</div>
-                      {canManage && selectedThread.status !== "closed" && <form onSubmit={sendStaffReply}><label className="visually-hidden" htmlFor="staff-letter-reply">Reply to guardian</label><textarea id="staff-letter-reply" className="form-control mb-2" rows="3" maxLength={5000} required value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply to the guardian" /><button className="btn btn-sm btn-dark">Send reply</button></form>}
+                      {canRecordCare && selectedThread.status !== "closed" && <form onSubmit={sendStaffReply}><label className="visually-hidden" htmlFor="staff-letter-reply">Reply to sponsor</label><textarea id="staff-letter-reply" className="form-control mb-2" rows="3" maxLength={5000} required value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply to the sponsor" /><button className="btn btn-sm btn-dark">Send reply</button></form>}
                     </div>
+                  )}
+                  {isGoer && (!selectedThread || selectedThread.status === "closed") && (
+                    <form className="guardian-letter-form" onSubmit={sendGoerLetter}>
+                      <div>
+                        <label className="form-label" htmlFor="goer-letter-subject">Subject</label>
+                        <input id="goer-letter-subject" className="form-control" maxLength={160} required value={letterSubject} onChange={(event) => setLetterSubject(event.target.value)} placeholder="A short subject for the sponsor" />
+                      </div>
+                      <div>
+                        <label className="form-label" htmlFor="goer-letter-message">Letter to sponsor</label>
+                        <textarea id="goer-letter-message" className="form-control" rows="5" maxLength={5000} required value={letterMessage} onChange={(event) => setLetterMessage(event.target.value)} placeholder="Write an update or message to the sponsor" />
+                      </div>
+                      <button className="btn btn-dark" type="submit">Send letter</button>
+                    </form>
                   )}
                 </div>
               </section>
@@ -3322,9 +3480,26 @@ function PermissionCheckboxes({ idPrefix, selected, onChange }) {
 }
 function StaffAccounts() {
   const [staff, setStaff] = useState([]);
+  const [goers, setGoers] = useState([]);
+  const [goerGroups, setGoerGroups] = useState({});
+  const [goerForm, setGoerForm] = useState({
+    firstName: "",
+    middleName: "",
+    lastName: "",
+    email: "",
+    password: "",
+    educationLevel: EDUCATION_LEVELS[0],
+  });
   const [permissionsById, setPermissionsById] = useState({});
-  const [form, setForm] = useState({ username: "", email: "", password: "" });
+  const [form, setForm] = useState({
+    firstName: "",
+    middleName: "",
+    lastName: "",
+    email: "",
+    password: "",
+  });
   const [newPermissions, setNewPermissions] = useState([]);
+  const [registrationType, setRegistrationType] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -3342,13 +3517,29 @@ function StaffAccounts() {
   }, [permissionEditor, saving]);
 
   useEffect(() => {
+    if (!registrationType) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape" && !saving) {
+        setRegistrationType(null);
+        setError("");
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [registrationType, saving]);
+
+  useEffect(() => {
     let mounted = true;
-    apiCall("/staff")
-      .then((result) => {
+    Promise.all([apiCall("/staff"), apiCall("/goers")])
+      .then(([staffResult, goerResult]) => {
         if (!mounted) return;
-        setStaff(result.staff);
+        setStaff(staffResult.staff);
         setPermissionsById(Object.fromEntries(
-          result.staff.map((account) => [account.id, account.permissions]),
+          staffResult.staff.map((account) => [account.id, account.permissions]),
+        ));
+        setGoers(goerResult.goers);
+        setGoerGroups(Object.fromEntries(
+          goerResult.goers.map((account) => [account.id, account.goerEducationLevel]),
         ));
         setError("");
       })
@@ -3369,20 +3560,99 @@ function StaffAccounts() {
     setError("");
     setMessage("");
     try {
-      await apiCall("/staff", {
+      const result = await apiCall("/staff", {
         method: "POST",
         body: JSON.stringify({ ...form, permissions: newPermissions }),
       });
-      setForm({ username: "", email: "", password: "" });
+      setForm({ firstName: "", middleName: "", lastName: "", email: "", password: "" });
       setNewPermissions([]);
       setMessage("Church Administrator account created.");
-      const result = await apiCall("/staff");
-      setStaff(result.staff);
-      setPermissionsById(Object.fromEntries(
-        result.staff.map((account) => [account.id, account.permissions]),
+      setStaff((previous) => [...previous, result.staff].sort((left, right) =>
+        left.fullName.localeCompare(right.fullName),
       ));
+      setPermissionsById((previous) => ({
+        ...previous,
+        [result.staff.id]: result.staff.permissions,
+      }));
+      setRegistrationType(null);
     } catch (createError) {
       setError(createError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const createGoer = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiCall("/goers", {
+        method: "POST",
+        body: JSON.stringify(goerForm),
+      });
+      setGoers((previous) => [...previous, result.goer].sort((left, right) =>
+        left.fullName.localeCompare(right.fullName),
+      ));
+      setGoerGroups((previous) => ({
+        ...previous,
+        [result.goer.id]: result.goer.goerEducationLevel,
+      }));
+      setGoerForm({
+        firstName: "",
+        middleName: "",
+        lastName: "",
+        email: "",
+        password: "",
+        educationLevel: EDUCATION_LEVELS[0],
+      });
+      setMessage(`${result.goer.goerEducationLevel} Goer account created.`);
+      setRegistrationType(null);
+    } catch (createError) {
+      setError(createError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveGoerGroup = async (account) => {
+    const educationLevel = goerGroups[account.id];
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiCall(`/goers/${account.id}/group`, {
+        method: "PUT",
+        body: JSON.stringify({ educationLevel }),
+      });
+      setGoers((previous) => previous.map((item) =>
+        item.id === account.id ? { ...item, goerEducationLevel: result.educationLevel } : item,
+      ));
+      setMessage(`${account.fullName} is assigned to ${result.educationLevel}.`);
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleGoerStatus = async (account) => {
+    const status = account.status === "active" ? "inactive" : "active";
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      await apiCall(`/goers/${account.id}/status`, {
+        method: "PUT",
+        body: JSON.stringify({ status }),
+      });
+      setGoers((previous) => previous.map((item) =>
+        item.id === account.id ? { ...item, status } : item,
+      ));
+      setMessage(`${account.fullName} is now ${status}.`);
+    } catch (statusError) {
+      setError(statusError.message);
     } finally {
       setSaving(false);
     }
@@ -3401,7 +3671,7 @@ function StaffAccounts() {
       setStaff((previous) => previous.map((item) =>
         item.id === account.id ? { ...item, permissions } : item,
       ));
-      setMessage(`Permissions saved for ${account.username}.`);
+      setMessage(`Permissions saved for ${account.fullName}.`);
       setPermissionEditor(null);
     } catch (saveError) {
       setError(saveError.message);
@@ -3410,9 +3680,19 @@ function StaffAccounts() {
     }
   };
 
-  const openNewPermissionEditor = () => {
-    setPermissionDraft(newPermissions);
-    setPermissionEditor({ type: "new" });
+  const openRegistrationModal = (type) => {
+    setError("");
+    setRegistrationType(type);
+  };
+  const closeRegistrationModal = () => {
+    if (saving) return;
+    setRegistrationType(null);
+    setError("");
+  };
+  const registrationForm = registrationType === "goer" ? goerForm : form;
+  const setRegistrationField = (field, value) => {
+    const updateForm = registrationType === "goer" ? setGoerForm : setForm;
+    updateForm((previous) => ({ ...previous, [field]: value }));
   };
   const openStaffPermissionEditor = (account) => {
     setPermissionDraft(permissionsById[account.id] || []);
@@ -3436,7 +3716,7 @@ function StaffAccounts() {
       setStaff((previous) => previous.map((item) =>
         item.id === account.id ? { ...item, status } : item,
       ));
-      setMessage(`${account.username} is now ${status}.`);
+      setMessage(`${account.fullName} is now ${status}.`);
     } catch (statusError) {
       setError(statusError.message);
     } finally {
@@ -3448,53 +3728,75 @@ function StaffAccounts() {
     <>
       <Title
         e="STAFF ADMINISTRATION"
-        t="Staff accounts."
-        d="Create Church Administrator accounts and choose each account’s permissions."
+        t="Manage accounts."
+        d="Create permission-based Church Administrator accounts or attendance-only Goer accounts assigned to one education group."
       />
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
       {message && <div className="alert alert-success" role="status">{message}</div>}
       <section className="surface form-surface staff-create-panel">
-        <h2>Register staff</h2>
-        <p className="text-secondary">New accounts have the Church Administrator role. Select only the access needed for the staff member’s work.</p>
-        <form className="vstack gap-3" onSubmit={createStaff}>
-          <div className="row g-3">
-            <div className="col-12 col-md-4">
-              <label className="form-label" htmlFor="staff-username">Username</label>
-              <input id="staff-username" className="form-control" maxLength={100} autoComplete="username" required value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} />
-            </div>
-            <div className="col-12 col-md-4">
-              <label className="form-label" htmlFor="staff-email">Email</label>
-              <input id="staff-email" className="form-control" type="email" maxLength={150} autoComplete="email" required value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} />
-            </div>
-            <div className="col-12 col-md-4">
-              <label className="form-label" htmlFor="staff-password">Temporary password</label>
-              <input id="staff-password" className="form-control" type="password" minLength={8} maxLength={72} autoComplete="new-password" required value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} />
-              <small className="text-secondary">At least 8 characters; give it to the staff member securely.</small>
-            </div>
-          </div>
-          <div className="staff-create-permissions">
-            <div>
-              <strong>Account access</strong>
-              <small>{newPermissions.length} permission{newPermissions.length === 1 ? "" : "s"} selected</small>
-            </div>
-            <button className="btn btn-outline-primary" type="button" onClick={openNewPermissionEditor}>
-              Choose permissions
-            </button>
-          </div>
-          <button className="btn btn-dark align-self-start" type="submit" disabled={saving}>
-            {saving ? "Saving…" : "Create staff account"}
-          </button>
-        </form>
+        <div className="panel-title"><h2>Register account</h2></div>
+        <p className="text-secondary">Choose the account type to open its registration form.</p>
+        <div className="d-flex flex-wrap gap-2">
+          <button className="btn btn-dark" type="button" onClick={() => openRegistrationModal("staff")}>Register Church Administrator</button>
+          <button className="btn btn-outline-primary" type="button" onClick={() => openRegistrationModal("goer")}>Register Goer</button>
+        </div>
       </section>
       <section className="surface table-surface staff-list-panel">
-        <div className="panel-title"><h2>Staff accounts</h2><span>{staff.length} accounts</span></div>
+        <div className="panel-title"><h2>Goer accounts</h2><span>{goers.length} accounts</span></div>
+        {loading ? <p role="status">Loading Goer accounts...</p> : goers.length ? (
+          <div className="staff-account-list">
+            {goers.map((account) => (
+              <article className="staff-account-card" key={account.id}>
+                <div className="staff-account-heading">
+                  <div><h3>{account.fullName}</h3><p>{account.email} · Goer</p></div>
+                  <span className={`staff-account-status ${account.status}`}>{account.status}</span>
+                </div>
+                <div className="row g-2 align-items-end">
+                  <div className="col-12 col-sm-7">
+                    <label className="form-label" htmlFor={`goer-group-${account.id}`}>Assigned group</label>
+                    <select
+                      id={`goer-group-${account.id}`}
+                      className="form-select"
+                      value={goerGroups[account.id] || ""}
+                      onChange={(event) => setGoerGroups((previous) => ({
+                        ...previous,
+                        [account.id]: event.target.value,
+                      }))}
+                    >
+                      <option value="" disabled>Select education group</option>
+                      {EDUCATION_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
+                    </select>
+                  </div>
+                  <div className="col-12 col-sm-auto">
+                    <button
+                      className="btn btn-outline-primary btn-sm"
+                      type="button"
+                      disabled={saving || goerGroups[account.id] === account.goerEducationLevel}
+                      onClick={() => saveGoerGroup(account)}
+                    >
+                      Save group
+                    </button>
+                  </div>
+                </div>
+                <div className="staff-account-actions">
+                  <button className={`btn btn-sm ${account.status === "active" ? "btn-outline-danger" : "btn-outline-success"}`} disabled={saving} onClick={() => toggleGoerStatus(account)}>
+                    {account.status === "active" ? "Deactivate account" : "Activate account"}
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : <p className="text-secondary">No Goer accounts are registered.</p>}
+      </section>
+      <section className="surface table-surface staff-list-panel">
+        <div className="panel-title"><h2>Church Administrator accounts</h2><span>{staff.length} accounts</span></div>
         {loading ? <p role="status">Loading staff accounts...</p> : staff.length ? (
           <div className="staff-account-list">
             {staff.map((account) => (
               <article className="staff-account-card" key={account.id}>
                 <div className="staff-account-heading">
                   <div>
-                    <h3>{account.username}</h3>
+                    <h3>{account.fullName}</h3>
                     <p>{account.email} · {account.role}</p>
                   </div>
                   <span className={`staff-account-status ${account.status}`}>{account.status}</span>
@@ -3522,6 +3824,102 @@ function StaffAccounts() {
           </div>
         ) : <p className="text-secondary">No Church Administrator accounts are registered.</p>}
       </section>
+      {registrationType && createPortal(
+        <div
+          className="staff-permission-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeRegistrationModal();
+          }}
+        >
+          <section
+            className="staff-permission-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="account-registration-title"
+          >
+            <header className="staff-permission-modal-header">
+              <div>
+                <span className="eyebrow">NEW ACCOUNT</span>
+                <h2 id="account-registration-title">
+                  Register {registrationType === "goer" ? "Goer" : "Church Administrator"}
+                </h2>
+                <p>
+                  {registrationType === "goer"
+                    ? "Goer accounts can record attendance only for their assigned education group."
+                    : "Choose the pages and actions this Church Administrator can access."}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn-close"
+                aria-label="Close registration"
+                disabled={saving}
+                onClick={closeRegistrationModal}
+              />
+            </header>
+            {error && <div className="alert alert-danger" role="alert">{error}</div>}
+            <form
+              className="vstack gap-3"
+              onSubmit={registrationType === "goer" ? createGoer : createStaff}
+            >
+              <div className="row g-3">
+                <div className="col-12 col-md-4">
+                  <label className="form-label" htmlFor="register-first-name">First name</label>
+                  <input id="register-first-name" className="form-control" autoComplete="given-name" maxLength={100} required value={registrationForm.firstName} onChange={(event) => setRegistrationField("firstName", event.target.value)} />
+                </div>
+                <div className="col-12 col-md-4">
+                  <label className="form-label" htmlFor="register-middle-name">Middle name</label>
+                  <input id="register-middle-name" className="form-control" autoComplete="additional-name" maxLength={100} value={registrationForm.middleName} onChange={(event) => setRegistrationField("middleName", event.target.value)} />
+                </div>
+                <div className="col-12 col-md-4">
+                  <label className="form-label" htmlFor="register-last-name">Last name</label>
+                  <input id="register-last-name" className="form-control" autoComplete="family-name" maxLength={100} required value={registrationForm.lastName} onChange={(event) => setRegistrationField("lastName", event.target.value)} />
+                </div>
+                <div className="col-12 col-md-6">
+                  <label className="form-label" htmlFor="register-email">Email address (login)</label>
+                  <input id="register-email" className="form-control" type="email" autoComplete="email" maxLength={150} required value={registrationForm.email} onChange={(event) => setRegistrationField("email", event.target.value)} />
+                </div>
+                <div className="col-12 col-md-6">
+                  <label className="form-label" htmlFor="register-password">Temporary password</label>
+                  <input id="register-password" className="form-control" type="password" autoComplete="new-password" minLength={8} maxLength={72} required value={registrationForm.password} onChange={(event) => setRegistrationField("password", event.target.value)} />
+                  <small className="text-secondary">At least 8 characters; give it to the staff member securely.</small>
+                </div>
+              </div>
+              {registrationType === "goer" ? (
+                <div>
+                  <label className="form-label" htmlFor="register-education-level">Assigned education group</label>
+                  <select
+                    id="register-education-level"
+                    className="form-select"
+                    value={goerForm.educationLevel}
+                    onChange={(event) => setGoerForm({ ...goerForm, educationLevel: event.target.value })}
+                  >
+                    {EDUCATION_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <div className="staff-create-permissions">
+                    <div><strong>Account access</strong><small>{newPermissions.length} permission{newPermissions.length === 1 ? "" : "s"} selected</small></div>
+                  </div>
+                  <PermissionCheckboxes
+                    idPrefix="new-staff-modal"
+                    selected={newPermissions}
+                    onChange={setNewPermissions}
+                  />
+                </div>
+              )}
+              <footer className="staff-permission-modal-footer">
+                <button type="button" className="btn btn-outline-secondary" disabled={saving} onClick={closeRegistrationModal}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={saving}>
+                  {saving ? "Saving…" : registrationType === "goer" ? "Create Goer account" : "Create staff account"}
+                </button>
+              </footer>
+            </form>
+          </section>
+        </div>,
+        document.body,
+      )}
       {permissionEditor && createPortal(
         <div
           className="staff-permission-modal-backdrop"
@@ -3539,9 +3937,7 @@ function StaffAccounts() {
               <div>
                 <span className="eyebrow">STAFF ACCESS</span>
                 <h2 id="staff-permission-modal-title">
-                  {permissionEditor.type === "new"
-                    ? "Choose staff permissions"
-                    : `Permissions for ${permissionEditor.account.username}`}
+                  Permissions for {permissionEditor.account.fullName}
                 </h2>
                 <p>Select the pages and actions this Church Administrator can access.</p>
               </div>
@@ -3567,27 +3963,14 @@ function StaffAccounts() {
               >
                 Cancel
               </button>
-              {permissionEditor.type === "staff" ? (
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={saving}
-                  onClick={() => savePermissions(permissionEditor.account, permissionDraft)}
-                >
-                  {saving ? "Saving…" : "Save permissions"}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => {
-                    setNewPermissions(permissionDraft);
-                    setPermissionEditor(null);
-                  }}
-                >
-                  Apply permissions
-                </button>
-              )}
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={saving}
+                onClick={() => savePermissions(permissionEditor.account, permissionDraft)}
+              >
+                {saving ? "Saving…" : "Save permissions"}
+              </button>
             </footer>
           </section>
         </div>,
@@ -3656,13 +4039,13 @@ function App() {
     dashboard: <Dashboard go={navigateToPage} />,
     participants: <Participants canManage={canAccessPermission("participants:manage", user)} user={user} />,
     events: <Events canManage={canAccessPermission("events:manage", user)} />,
-    scanner: <Scanner />,
+    scanner: <Scanner user={user} />,
     portal: <Scanner portal />,
     sponsorship: <SponsoredCare user={user} />,
     analytics: <Analytics />,
     reports: <Reports user={user} />,
   };
-  if (STAFF_ROLES.includes(String(user.role).toLowerCase())) {
+  if (canAccessPage("account", user)) {
     pages.account = <AccountSettings onUserUpdated={setUser} />;
   }
   if (String(user.role).toLowerCase() === "system administrator") {
