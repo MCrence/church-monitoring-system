@@ -22,6 +22,7 @@ const { getAttendanceTransition } = require('./utils/attendance-transition');
 const { createParticipantPasscode, isValidParticipantPasscode } = require('./utils/participant-passcode');
 const { createPersistentRateLimiter } = require('./utils/persistent-rate-limit');
 const { initializeSponsorshipTables } = require('./utils/sponsorship-tables');
+const { sendEmailWithGmailApi } = require('./utils/gmail-api');
 const {
   GOER_EDUCATION_LEVELS,
   canGoerAccessParticipant,
@@ -1254,13 +1255,32 @@ app.post('/api/account/email/request', authenticate, checkRole(accountRoles), as
     const [existing] = await pool.execute('SELECT id FROM users WHERE email = ? LIMIT 1', [email]);
     if (existing.length) return res.status(409).json({ error: 'Email address is already in use' });
 
-    const smtpFrom = process.env.SMTP_FROM;
+    const emailProvider = String(
+      process.env.EMAIL_PROVIDER || (isProduction ? 'gmail-api' : 'smtp'),
+    ).toLowerCase();
+    const gmailFrom = process.env.GMAIL_FROM;
     const smtpHost = process.env.SMTP_HOST;
     const smtpPort = Number(process.env.SMTP_PORT);
+    const smtpFrom = process.env.SMTP_FROM;
     const smtpUser = process.env.SMTP_USER;
     const smtpPassword = process.env.SMTP_PASSWORD;
-    if (!smtpHost || !Number.isInteger(smtpPort) || !smtpFrom || Boolean(smtpUser) !== Boolean(smtpPassword)) {
-      return res.status(503).json({ error: 'Email verification is not configured. Set the SMTP environment variables and try again.' });
+    if (emailProvider === 'gmail-api') {
+      if (
+        !process.env.GMAIL_CLIENT_ID ||
+        !process.env.GMAIL_CLIENT_SECRET ||
+        !process.env.GMAIL_REFRESH_TOKEN ||
+        !gmailFrom
+      ) {
+        return res.status(503).json({
+          error: 'Email verification is not configured. Set the Gmail API OAuth credentials and sender address.',
+        });
+      }
+    } else if (emailProvider === 'smtp') {
+      if (!smtpHost || !Number.isInteger(smtpPort) || !smtpFrom || Boolean(smtpUser) !== Boolean(smtpPassword)) {
+        return res.status(503).json({ error: 'Email verification is not configured. Set the SMTP environment variables and try again.' });
+      }
+    } else {
+      return res.status(503).json({ error: 'Email verification provider is invalid. Set EMAIL_PROVIDER to gmail-api or smtp.' });
     }
 
     const previous = emailChallenges.get(Number(account.id));
@@ -1277,23 +1297,40 @@ app.post('/api/account/email/request', authenticate, checkRole(accountRoles), as
       attempts: 0,
     };
     emailChallenges.set(userId, challenge);
-    const transporter = nodemailer.createTransport({
-      host: smtpHost,
-      port: smtpPort,
-      secure: process.env.SMTP_SECURE === 'true' || smtpPort === 465,
-      ...(smtpUser ? { auth: { user: smtpUser, pass: smtpPassword } } : {}),
-    });
     try {
-      await transporter.sendMail({
-        from: smtpFrom,
+      const message = {
         to: email,
         subject: 'Verify your FMC Field Care email address',
         text: `Your email verification code is ${code}. It expires in 10 minutes.`,
-      });
+      };
+      if (emailProvider === 'gmail-api') {
+        await sendEmailWithGmailApi({
+          clientId: process.env.GMAIL_CLIENT_ID,
+          clientSecret: process.env.GMAIL_CLIENT_SECRET,
+          refreshToken: process.env.GMAIL_REFRESH_TOKEN,
+          from: gmailFrom,
+          ...message,
+        });
+      } else {
+        const transporter = nodemailer.createTransport({
+          host: smtpHost,
+          port: smtpPort,
+          secure: process.env.SMTP_SECURE === 'true' || smtpPort === 465,
+          ...(smtpUser ? { auth: { user: smtpUser, pass: smtpPassword } } : {}),
+        });
+        await transporter.sendMail({ from: smtpFrom, ...message });
+      }
     } catch (error) {
       emailChallenges.delete(userId);
-      console.error('Failed to send account email verification code:', error);
-      return res.status(502).json({ error: 'Could not send the verification email. Check the SMTP settings and try again.' });
+      console.error('Failed to send account email verification code:', {
+        provider: emailProvider,
+        message: error.message,
+      });
+      return res.status(502).json({
+        error: emailProvider === 'gmail-api'
+          ? 'Could not send the verification email. Check the Gmail API OAuth credentials and sender address.'
+          : 'Could not send the verification email. Check the SMTP settings and try again.',
+      });
     }
     res.json({ message: 'Verification code sent to the new email address' });
   } catch (error) { next(error); }

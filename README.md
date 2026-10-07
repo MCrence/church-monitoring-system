@@ -99,15 +99,48 @@ SMTP_SECURE=false
 SMTP_USER=your-smtp-username
 SMTP_PASSWORD=your-smtp-password
 SMTP_FROM=FMC Field Care <verified-sender@example.com>
+# Optional: local development defaults to SMTP; production defaults to Gmail API.
+EMAIL_PROVIDER=smtp
 ```
 
-Configure SMTP with credentials from your email provider. For port `465`, set
-`SMTP_SECURE=true`; for port `587`, use `SMTP_SECURE=false`. The `SMTP_FROM`
-address must be permitted by the provider. SMTP settings are required to send
-admin email verification codes; credential changes do not require email
-delivery. Render Free services block outbound SMTP ports `25`, `465`, and
-`587`; email verification over SMTP therefore requires a deployment plan that
-allows outbound SMTP traffic.
+In local development, configure SMTP with credentials from your email provider.
+For port `465`, set `SMTP_SECURE=true`; for port `587`, use
+`SMTP_SECURE=false`. The `SMTP_FROM` address must be permitted by the provider.
+`EMAIL_PROVIDER` can be `smtp` or `gmail-api`. It defaults to `smtp` outside
+production and to `gmail-api` in production. Render Free blocks outbound SMTP
+ports `25`, `465`, and `587`, so use Gmail API for production email verification.
+
+### Gmail API email verification (Render)
+
+The Gmail API sends mail over HTTPS, avoiding SMTP port restrictions. Create a
+Google Cloud project, enable the Gmail API, and configure an OAuth consent
+screen. Create an OAuth client ID and secret (Web application); if using Google
+OAuth Playground to obtain a refresh token, add
+`https://developers.google.com/oauthplayground` as an authorized redirect URI.
+In OAuth Playground, enable its option to use your own OAuth credentials,
+authorize the scope `https://www.googleapis.com/auth/gmail.send` with the Gmail
+account that will send verification mail, then exchange the authorization code
+for tokens. Keep the refresh token private.
+
+Set these environment variables in the Render service (do not commit or share
+the values):
+
+```env
+EMAIL_PROVIDER=gmail-api
+GMAIL_CLIENT_ID=your-google-oauth-client-id
+GMAIL_CLIENT_SECRET=your-google-oauth-client-secret
+GMAIL_REFRESH_TOKEN=your-google-oauth-refresh-token
+GMAIL_FROM=sender@gmail.com
+```
+
+`GMAIL_FROM` must be the authorized Gmail sender account (or a sender alias
+configured in that account). After saving the variables, restart/redeploy the
+Render service and test an email change with an account you control. OAuth
+consent apps left in Google’s Testing publishing status may have refresh tokens
+that expire after seven days; complete Google’s required consent-screen
+publishing/verification steps for a durable production setup. Keep existing
+SMTP variables only if you still use SMTP locally or explicitly set
+`EMAIL_PROVIDER=smtp`.
 
 Sensitive profile fields continue to decrypt using `AES_KEY`. New encrypted
 values use the active key in `AES_KEYRING`, selected by `AES_KEY_ID`; retain old
