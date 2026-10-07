@@ -99,13 +99,22 @@ SMTP_SECURE=false
 SMTP_USER=your-smtp-username
 SMTP_PASSWORD=your-smtp-password
 SMTP_FROM=FMC Field Care <verified-sender@example.com>
+# For Render Free, use Resend over HTTPS instead of SMTP:
+EMAIL_PROVIDER=resend
+RESEND_API_KEY=re_your_resend_api_key
+EMAIL_FROM=FMC Field Care <verified-sender@your-verified-domain.example>
 ```
 
 Configure SMTP with credentials from your email provider. For port `465`, set
 `SMTP_SECURE=true`; for port `587`, use `SMTP_SECURE=false`. The `SMTP_FROM`
 address must be permitted by the provider. SMTP settings are required to send
 admin email verification codes; credential changes do not require email
-delivery.
+delivery. Render Free services block outbound SMTP ports `25`, `465`, and
+`587`, so configure `EMAIL_PROVIDER=resend`, a Resend API key, and a sender
+address verified in Resend for production email verification. Resend delivery
+uses HTTPS and does not require SMTP credentials. Keep provider keys in
+deployment secrets, never in source control. Production defaults to Resend;
+local development defaults to SMTP unless `EMAIL_PROVIDER` is set explicitly.
 
 Sensitive profile fields continue to decrypt using `AES_KEY`. New encrypted
 values use the active key in `AES_KEYRING`, selected by `AES_KEY_ID`; retain old

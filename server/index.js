@@ -22,6 +22,7 @@ const { getAttendanceTransition } = require('./utils/attendance-transition');
 const { createParticipantPasscode, isValidParticipantPasscode } = require('./utils/participant-passcode');
 const { createPersistentRateLimiter } = require('./utils/persistent-rate-limit');
 const { initializeSponsorshipTables } = require('./utils/sponsorship-tables');
+const { sendEmailWithResend } = require('./utils/email-delivery');
 const {
   GOER_EDUCATION_LEVELS,
   canGoerAccessParticipant,
@@ -1254,13 +1255,26 @@ app.post('/api/account/email/request', authenticate, checkRole(accountRoles), as
     const [existing] = await pool.execute('SELECT id FROM users WHERE email = ? LIMIT 1', [email]);
     if (existing.length) return res.status(409).json({ error: 'Email address is already in use' });
 
+    const emailProvider = String(
+      process.env.EMAIL_PROVIDER || (isProduction ? 'resend' : 'smtp'),
+    ).toLowerCase();
+    const emailFrom = emailProvider === 'resend'
+      ? process.env.EMAIL_FROM
+      : process.env.SMTP_FROM;
     const smtpHost = process.env.SMTP_HOST;
     const smtpPort = Number(process.env.SMTP_PORT);
-    const smtpFrom = process.env.SMTP_FROM;
     const smtpUser = process.env.SMTP_USER;
     const smtpPassword = process.env.SMTP_PASSWORD;
-    if (!smtpHost || !Number.isInteger(smtpPort) || !smtpFrom || Boolean(smtpUser) !== Boolean(smtpPassword)) {
-      return res.status(503).json({ error: 'Email verification is not configured. Set the SMTP environment variables and try again.' });
+    if (emailProvider === 'resend') {
+      if (!process.env.RESEND_API_KEY || !emailFrom) {
+        return res.status(503).json({ error: 'Email verification is not configured. Set RESEND_API_KEY and EMAIL_FROM.' });
+      }
+    } else if (emailProvider === 'smtp') {
+      if (!smtpHost || !Number.isInteger(smtpPort) || !emailFrom || Boolean(smtpUser) !== Boolean(smtpPassword)) {
+        return res.status(503).json({ error: 'Email verification is not configured. Set valid SMTP environment variables.' });
+      }
+    } else {
+      return res.status(503).json({ error: 'Email verification provider is invalid. Set EMAIL_PROVIDER to resend or smtp.' });
     }
 
     const previous = emailChallenges.get(Number(account.id));
@@ -1277,23 +1291,40 @@ app.post('/api/account/email/request', authenticate, checkRole(accountRoles), as
       attempts: 0,
     };
     emailChallenges.set(userId, challenge);
-    const transporter = nodemailer.createTransport({
-      host: smtpHost,
-      port: smtpPort,
-      secure: process.env.SMTP_SECURE === 'true' || smtpPort === 465,
-      ...(smtpUser ? { auth: { user: smtpUser, pass: smtpPassword } } : {}),
-    });
     try {
-      await transporter.sendMail({
-        from: smtpFrom,
+      const message = {
+        from: emailFrom,
         to: email,
         subject: 'Verify your FMC Field Care email address',
         text: `Your email verification code is ${code}. It expires in 10 minutes.`,
-      });
+      };
+      if (emailProvider === 'resend') {
+        await sendEmailWithResend({
+          apiKey: process.env.RESEND_API_KEY,
+          ...message,
+        });
+      } else {
+        const transporter = nodemailer.createTransport({
+          host: smtpHost,
+          port: smtpPort,
+          secure: process.env.SMTP_SECURE === 'true' || smtpPort === 465,
+          ...(smtpUser ? { auth: { user: smtpUser, pass: smtpPassword } } : {}),
+        });
+        await transporter.sendMail(message);
+      }
     } catch (error) {
       emailChallenges.delete(userId);
-      console.error('Failed to send account email verification code:', error);
-      return res.status(502).json({ error: 'Could not send the verification email. Check the SMTP settings and try again.' });
+      console.error('Failed to send account email verification code:', {
+        provider: emailProvider,
+        code: error.code,
+        statusCode: error.statusCode,
+        message: error.message,
+      });
+      return res.status(502).json({
+        error: emailProvider === 'resend'
+          ? 'Could not send the verification email. Check the Resend API key and verified sender address.'
+          : 'Could not send the verification email. Check the SMTP settings and try again.',
+      });
     }
     res.json({ message: 'Verification code sent to the new email address' });
   } catch (error) { next(error); }
