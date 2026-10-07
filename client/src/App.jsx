@@ -1484,8 +1484,8 @@ function PublicHome({ onLogin }) {
       />
     );
   }
-  if (screen === "sponsor" || screen === "goer") {
-    return <PublicLookup mode={screen} onBack={() => setScreen("home")} />;
+  if (screen === "sponsor") {
+    return <PublicLookup onBack={() => setScreen("home")} />;
   }
   return (
     <main className="public-home">
@@ -1498,9 +1498,17 @@ function PublicHome({ onLogin }) {
       </header>
       <section className="public-home-hero">
         <div className="public-home-intro">
-          <span className="public-home-kicker"><span /> FIELD CARE MONITORING SYSTEM</span>
-          <h1>Care that<br /><em>moves forward.</em></h1>
-          <p>A connected place to support children, welcome our community, and keep every step in view.</p>
+          <span className="public-home-kicker"><span /> FMC FIELD CARE · COMMUNITY FIRST</span>
+          <h1>Care that<br /><em>moves lives forward.</em></h1>
+          <p>One caring community. Every child supported, every milestone celebrated, and every story connected.</p>
+          <div className="public-home-actions">
+            <button type="button" className="public-home-primary-action" onClick={() => setScreen("sponsor")}>
+              Visit guardian space <span aria-hidden="true">↗</span>
+            </button>
+            <button type="button" className="public-home-secondary-action" onClick={() => setScreen("staff")}>
+              Staff & Goer sign in <span aria-hidden="true">→</span>
+            </button>
+          </div>
         </div>
         <div className="public-home-visual" aria-hidden="true">
           <div className="public-home-orbit public-home-orbit-outer" />
@@ -1519,16 +1527,16 @@ function PublicHome({ onLogin }) {
             <span className="eyebrow">HOW CAN WE HELP?</span>
             <h2 id="public-home-portals-title">Choose your way in</h2>
           </div>
-          <span className="public-home-section-caption">Select a portal to continue</span>
+          <span className="public-home-section-caption">Choose a secure space to continue</span>
         </div>
         <div className="public-access-grid">
         <button className="public-access-card public-access-staff" onClick={() => setScreen("staff")}>
           <span className="public-access-card-top"><span className="public-access-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-13Z" /><path d="M8 9h8M8 13h5M8 17h3" /></svg>
           </span><span className="public-access-number">01 / STAFF</span></span>
-          <strong>System Manager</strong>
-          <span>Securely sign in to manage the system and support your community.</span>
-          <b>Staff sign in <span aria-hidden="true">↗</span></b>
+          <strong>Staff & Goers</strong>
+          <span>Sign in to manage care, record attendance, and support your assigned group.</span>
+          <b>Continue to sign in <span aria-hidden="true">↗</span></b>
         </button>
         <button className="public-access-card public-access-guardian" onClick={() => setScreen("sponsor")}>
           <span className="public-access-card-top"><span className="public-access-icon" aria-hidden="true">
@@ -1538,25 +1546,16 @@ function PublicHome({ onLogin }) {
           <span>See your child’s sponsorship status with their QR code and passcode.</span>
           <b>Check sponsorship <span aria-hidden="true">↗</span></b>
         </button>
-        <button className="public-access-card public-access-goer" onClick={() => setScreen("goer")}>
-          <span className="public-access-card-top"><span className="public-access-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5" /><path d="M12 7v5l3.5 2" /><path d="m5 4-2 2m16-2 2 2" /></svg>
-          </span><span className="public-access-number">03 / GOER</span></span>
-          <strong>Goer</strong>
-          <span>Pick up where you left off and see your recent attendance.</span>
-          <b>Open Goer portal <span aria-hidden="true">↗</span></b>
-        </button>
         </div>
       </section>
       <footer className="public-home-footer">
         <span><span className="public-home-lock" aria-hidden="true">◆</span> Your information is handled with care.</span>
-        <span>Participant portals require an active QR code. Guardian access also requires the child’s passcode.</span>
+        <span>Guardian access requires the child’s active QR code and passcode.</span>
       </footer>
     </main>
   );
 }
-function PublicLookup({ mode, onBack }) {
-  const isSponsor = mode === "sponsor";
+function PublicLookup({ onBack }) {
   const [payload, setPayload] = useState("");
   const [passcode, setPasscode] = useState("");
   const [result, setResult] = useState(null);
@@ -1567,7 +1566,6 @@ function PublicLookup({ mode, onBack }) {
   const lastScannedAt = useRef(0);
   const onQrScanned = (value) => {
     if (
-      isSponsor &&
       value === lastScannedPayload.current &&
       Date.now() - lastScannedAt.current < 2500
     ) return;
@@ -1576,7 +1574,7 @@ function PublicLookup({ mode, onBack }) {
     setPayload(value);
     setPasscode("");
     setError("");
-    if (isSponsor) setPasscodeOpen(true);
+    setPasscodeOpen(true);
   };
   useEffect(() => {
     if (!passcodeOpen) return undefined;
@@ -1592,7 +1590,7 @@ function PublicLookup({ mode, onBack }) {
   }, [passcodeOpen, loading]);
   const verify = async (event) => {
     event.preventDefault();
-    if (isSponsor && !/^\d{6}$/.test(passcode)) {
+    if (!/^\d{6}$/.test(passcode)) {
       setError("Enter the 6-digit child passcode.");
       return;
     }
@@ -1600,10 +1598,10 @@ function PublicLookup({ mode, onBack }) {
     setError("");
     setResult(null);
     try {
-      const response = await fetch(`${api}/public/${isSponsor ? "sponsor-status" : "goer-profile"}`, {
+      const response = await fetch(`${api}/public/sponsor-status`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ qrPayload: payload.trim(), ...(isSponsor ? { passcode } : {}) }),
+        body: JSON.stringify({ qrPayload: payload.trim(), passcode }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "Unable to verify this QR code.");
@@ -1617,12 +1615,8 @@ function PublicLookup({ mode, onBack }) {
   };
   const submit = (event) => {
     event.preventDefault();
-    if (isSponsor) {
-      setError("");
-      setPasscodeOpen(true);
-      return;
-    }
-    void verify(event);
+    setError("");
+    setPasscodeOpen(true);
   };
   return (
     <>
@@ -1632,82 +1626,37 @@ function PublicLookup({ mode, onBack }) {
         Back to home
       </button>
       <section className="public-lookup-heading">
-        <span className="eyebrow">{isSponsor ? "GUARDIAN PORTAL" : "GOER PORTAL"}</span>
-        <h1>{isSponsor ? "Sponsorship status." : "Your attendance."}</h1>
-        <p>{isSponsor
-          ? "Scan the Sponsored Child’s QR code. You’ll be asked for the passcode after scanning."
-          : "Scan or enter your own active Goer QR code to view your profile and recent attendance."}</p>
+        <span className="eyebrow">GUARDIAN SPACE</span>
+        <h1>Your child’s journey.</h1>
+        <p>Scan the Sponsored Child’s QR code. You’ll be asked for the passcode after scanning.</p>
       </section>
       {!result ? (
         <form className="surface public-lookup-form" onSubmit={submit}>
-          {isSponsor ? (
-            <p className="form-label mb-2">Scan the child’s QR code with your camera</p>
-          ) : (
-            <label className="form-label" htmlFor={`public-qr-${mode}`}>Participant QR code</label>
-          )}
-          {(!isSponsor || !passcodeOpen) && (
+          <p className="form-label mb-2">Scan the child’s QR code with your camera</p>
+          {!passcodeOpen && (
             <Camera
-              id={`public-${mode}-qr`}
+              id="public-sponsor-qr"
               onScan={onQrScanned}
-              {...(isSponsor ? {
-                errorMessage: "Camera unavailable. Grant camera permission to scan the child’s QR code.",
-              } : {})}
-            />
-          )}
-          {!isSponsor && (
-            <input
-              id={`public-qr-${mode}`}
-              className="form-control mb-3"
-              value={payload}
-              onChange={(event) => setPayload(event.target.value)}
-              placeholder="Scan the QR code or paste its payload"
-              autoComplete="off"
-              required
+              errorMessage="Camera unavailable. Grant camera permission to scan the child’s QR code."
             />
           )}
           {error && <div className="alert alert-danger" role="alert">{error}</div>}
-          {!isSponsor && (
-            <button className="btn btn-dark w-100" disabled={loading}>
-              {loading ? "Verifying…" : "View my profile"}
-            </button>
-          )}
         </form>
       ) : (
         <section className="surface public-result" aria-live="polite">
-          <span className="eyebrow">VERIFIED {isSponsor ? "CHILD" : "GOER"}</span>
-          <h2>{isSponsor ? result.child.name : result.goer.name}</h2>
-          <p className="text-secondary">Participant ID: {isSponsor ? result.child.participantCode : result.goer.participantCode}</p>
-          {isSponsor ? (
-            <GuardianSponsoredDetails
-              child={result.child}
-              qrPayload={payload}
-              passcode={passcode}
-            />
-          ) : (
-            <>
-              <h3 className="public-attendance-title">Recent attendance</h3>
-              {result.attendance.length ? (
-                <div className="table-responsive">
-                  <table className="table align-middle">
-                    <thead><tr><th>Event</th><th>Date</th><th>Location</th><th>Status</th></tr></thead>
-                    <tbody>{result.attendance.map((entry, index) => (
-                      <tr key={`${entry.checked_in_at}-${index}`}>
-                        <td>{entry.event_name}</td>
-                        <td>{new Date(entry.checked_in_at).toLocaleString()}</td>
-                        <td>{entry.location || "—"}</td>
-                        <td>{entry.status}</td>
-                      </tr>
-                    ))}</tbody>
-                  </table>
-                </div>
-              ) : <p className="text-secondary mb-0">No attendance records are available yet.</p>}
-            </>
-          )}
+          <span className="eyebrow">VERIFIED CHILD</span>
+          <h2>{result.child.name}</h2>
+          <p className="text-secondary">Participant ID: {result.child.participantCode}</p>
+          <GuardianSponsoredDetails
+            child={result.child}
+            qrPayload={payload}
+            passcode={passcode}
+          />
           <button className="btn btn-outline-dark mt-4" onClick={() => { setResult(null); setPasscode(""); setPayload(""); setPasscodeOpen(false); lastScannedPayload.current = ""; lastScannedAt.current = 0; }}>Look up another</button>
         </section>
       )}
     </main>
-    {isSponsor && passcodeOpen && createPortal(
+    {passcodeOpen && createPortal(
       <div
         className="guardian-passcode-backdrop"
         onMouseDown={(event) => {
@@ -2209,49 +2158,79 @@ function Scanner({ portal = false, user = null }) {
     );
   return (
     <>
-      <Title
-        e={portal ? "SPONSORED CHILD PORTAL" : "CHECK-IN STATION"}
-        t={portal ? "A private window into care." : "Make every arrival count."}
-        d={isGoer
-          ? `Record attendance for your ${user.goerEducationLevel} group only.`
-          : "Use the device camera or paste a QR payload."}
-      />
-      <div className="row g-4">
+      {portal ? (
+        <Title
+          e="SPONSORED CHILD PORTAL"
+          t="A private window into care."
+          d="Use the device camera or enter a QR payload."
+        />
+      ) : (
+        <section className={`checkin-hero${isGoer ? " checkin-hero-goer" : ""}`}>
+          <div className="checkin-hero-copy">
+            <span className="checkin-hero-kicker"><span aria-hidden="true">●</span> {isGoer ? "GROUP ATTENDANCE" : "COMMUNITY CHECK-IN"}</span>
+            <h1>{isGoer ? "Welcome your group." : "Every arrival matters."}</h1>
+            <p>{isGoer
+              ? `Record attendance for your ${user.goerEducationLevel} group with a quick, secure scan.`
+              : "A warm welcome starts here. Scan a participant QR code to record their attendance."}</p>
+          </div>
+          <div className="checkin-hero-side" aria-hidden="true">
+            <span className="checkin-hero-ring checkin-hero-ring-one" />
+            <span className="checkin-hero-ring checkin-hero-ring-two" />
+            <span className="checkin-hero-symbol">✓</span>
+            <span className="checkin-hero-chip">READY TO WELCOME</span>
+          </div>
+        </section>
+      )}
+      <div className={`row g-4 scanner-workspace${portal ? " scanner-workspace-portal" : ""}`}>
         <div className="col-12 col-md-6">
-          <div className="surface scanner-card">
+          <div className={`surface scanner-card${portal ? "" : " checkin-scan-card"}`}>
+            {!portal && <div className="checkin-card-heading">
+              <div><span className="checkin-step">STEP 01</span><h2>Scan participant</h2><p>Position the QR code inside the camera frame.</p></div>
+              <span className="checkin-live-indicator"><i /> QR SCAN</span>
+            </div>}
             <Camera
               id={portal ? "portal-camera" : "station-camera"}
               onScan={scan}
             />
-            <input
-              className="form-control mt-3"
-              placeholder="Or paste QR payload"
-              value={payload}
-              onChange={(e) => setPayload(e.target.value)}
-            />
+            <label className="checkin-payload-label" htmlFor={portal ? "portal-payload" : "station-payload"}>
+              {portal ? "Or paste QR payload" : "Can’t scan? Enter the QR code manually"}
+            </label>
+            <div className="checkin-payload-field">
+              <span aria-hidden="true">⌁</span>
+              <input
+                id={portal ? "portal-payload" : "station-payload"}
+                className="form-control"
+                placeholder="Paste or type QR payload"
+                value={payload}
+                onChange={(e) => setPayload(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
           </div>
         </div>
         <div className="col-12 col-md-6">
-          <div className="surface form-surface">
+          <div className={`surface form-surface${portal ? "" : " checkin-settings-card"}`}>
             {portal ? (
               <>
                 {requiresPasscode && <input className="form-control mb-3" type="password" placeholder="Sponsored Child passcode" value={pass} onChange={(e) => setPass(e.target.value)} />}
               </>
             ) : (
               <>
-                <div className="col-12">
-                  <label className="form-label">Event</label>
-                  <select className="form-select" value={event} onChange={(e) => setEvent(e.target.value)}>
+                <div className="checkin-card-heading checkin-settings-heading">
+                  <div><span className="checkin-step">STEP 02</span><h2>Set up attendance</h2><p>Choose the event and what you’re recording.</p></div>
+                  <span className="checkin-settings-icon" aria-hidden="true">⚙</span>
+                </div>
+                <div className="checkin-setting-field">
+                  <label className="form-label" htmlFor="checkin-event">Event</label>
+                  <select id="checkin-event" className="form-select" value={event} onChange={(e) => setEvent(e.target.value)}>
                     <option value="custom">Sunday service (custom)</option>
                     {events.map((item) => <option key={item.id} value={String(item.id)}>{item.name} · {new Date(item.starts_at).toLocaleString()}</option>)}
                   </select>
                 </div>
                 {selectedEvent?.location && (
-                  <p className="text-secondary small mt-3 mb-0">
-                    Event location: <strong>{selectedEvent.location}</strong>
-                  </p>
+                  <div className="checkin-location"><span aria-hidden="true">⌖</span><span>Event location<strong>{selectedEvent.location}</strong></span></div>
                 )}
-                <div className="col-12">
+                <div className="checkin-setting-field checkin-action-field">
                   <label className="form-label" htmlFor="attendance-action">Attendance action</label>
                   <select
                     id="attendance-action"
@@ -2262,28 +2241,31 @@ function Scanner({ portal = false, user = null }) {
                     <option value="check_in">Check in</option>
                     <option value="check_out">Check out</option>
                   </select>
-                  <small className="text-secondary">
-                    Choose the action before scanning. Check-out requires an active check-in for this event today.
+                  <small className="checkin-helper-text">
+                    {attendanceAction === "check_out"
+                      ? "Only participants with an active check-in for this event can check out."
+                      : "Check-in records the participant’s arrival for the selected event."}
                   </small>
                 </div>
               </>
             )}
             <button
-              className="btn btn-dark mt-3 w-100"
+              className={`btn btn-dark mt-3 w-100${portal ? "" : " checkin-submit-button"}`}
               disabled={!payload}
               onClick={send}
             >
               {portal ? "Verify and open profile" : attendanceAction === "check_out" ? "Record check-out" : "Record check-in"} →
             </button>
+            {!portal && <p className="checkin-privacy-note"><span aria-hidden="true">◇</span> QR details are used only to verify and record attendance.</p>}
             {/* Toast handled separately */}
           </div>
         </div>
       </div>
       {!portal && isGoer && (
-        <section className="surface table-surface staff-list-panel mt-4">
+        <section className="surface table-surface staff-list-panel mt-4 checkin-roster">
           <div className="panel-title">
-            <h2>{groupRoster?.educationLevel || user.goerEducationLevel} group attendance</h2>
-            <span>{groupRoster?.children.length ?? 0} children</span>
+            <div><span className="checkin-step">TODAY’S OVERVIEW</span><h2>{groupRoster?.educationLevel || user.goerEducationLevel} group attendance</h2></div>
+            <span className="checkin-roster-count">{groupRoster?.children.length ?? 0} children</span>
           </div>
           {groupRosterError && <div className="alert alert-danger" role="alert">{groupRosterError}</div>}
           {groupRosterLoading ? <p role="status">Loading group attendance...</p> : groupRoster?.children.length ? (
@@ -2948,8 +2930,6 @@ function SponsoredCare({ user }) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("active");
   const [monthlyAllowance, setMonthlyAllowance] = useState("0");
-  const [schoolName, setSchoolName] = useState("");
-  const [schoolAddress, setSchoolAddress] = useState("");
   const [gift, setGift] = useState({ careType: "allowance", amount: "", disbursedOn: new Date().toISOString().slice(0, 10), description: "", receiptData: "" });
   const [childUpdate, setChildUpdate] = useState({
     type: "growth",
@@ -2989,8 +2969,6 @@ function SponsoredCare({ user }) {
     setSelectedChildId(child.id);
     setStatus(child.lifecycle);
     setMonthlyAllowance(String(child.monthlyAllowance));
-    setSchoolName(child.schoolName || "");
-    setSchoolAddress(child.schoolAddress || "");
     setDisbursements([]);
     setChildUpdates([]);
     setStaffProof(null);
@@ -3041,10 +3019,10 @@ function SponsoredCare({ user }) {
     try {
       const saved = await apiCall(`/sponsorship/children/${selectedChildId}`, {
         method: "PUT",
-        body: JSON.stringify({ lifecycle: status, monthlyAllowance, schoolName, schoolAddress }),
+        body: JSON.stringify({ lifecycle: status, monthlyAllowance }),
       });
       setChildren((previous) => previous.map((child) => child.id === selectedChildId
-        ? { ...child, lifecycle: saved.lifecycle, monthlyAllowance: saved.monthlyAllowance, schoolName: saved.schoolName, schoolAddress: saved.schoolAddress }
+        ? { ...child, lifecycle: saved.lifecycle, monthlyAllowance: saved.monthlyAllowance }
         : child));
       setMessage("Sponsored child details updated.");
     } catch (saveError) {
@@ -3147,82 +3125,95 @@ function SponsoredCare({ user }) {
     Number(thread.id) === Number(selectedThreadId) &&
     Number(thread.participantId) === Number(selectedChildId),
   );
+  const lifecycleCounts = SPONSOR_LIFECYCLE.reduce((counts, lifecycle) => {
+    counts[lifecycle] = children.filter((child) => child.lifecycle === lifecycle).length;
+    return counts;
+  }, {});
+  const selectedChildInitials = selectedChild?.name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
 
   return (
     <>
-      <Title
-        e={isGoer ? "YOUR ASSIGNED GROUP" : "SPONSORED CHILDREN"}
-        t={isGoer ? "Group care updates." : "Sponsored care."}
-        d={isGoer
-          ? `Record received gifts or allowances and contact sponsors for children in your ${user.goerEducationLevel} group.`
-          : "Follow each child’s sponsorship journey, allowance, gifts, receipt proofs, and letters."}
-      />
+      <section className={`sponsorship-page-hero${isGoer ? " goer" : ""}`}>
+        <div className="sponsorship-page-hero-copy">
+          <span className="sponsorship-page-eyebrow"><span aria-hidden="true">✦</span> {isGoer ? "YOUR CARE GROUP" : "CHILDREN · CARE · CONNECTION"}</span>
+          <h1>{isGoer ? "Care starts with you." : "Every child, moving forward."}</h1>
+          <p>{isGoer
+            ? `Keep care moving for the ${user.goerEducationLevel} group. Record what children receive and stay connected with their sponsors.`
+            : "A clearer view of every sponsorship journey—from school details and allowances to the little moments that matter."}</p>
+        </div>
+        <div className="sponsorship-hero-art" aria-hidden="true">
+          <span className="sponsorship-hero-orbit sponsorship-hero-orbit-one" />
+          <span className="sponsorship-hero-orbit sponsorship-hero-orbit-two" />
+          <span className="sponsorship-hero-heart">♡</span>
+          <span className="sponsorship-hero-note">{children.length}<small>{isGoer ? "children in your group" : "children in care"}</small></span>
+        </div>
+      </section>
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
       {message && <div className="alert alert-success" role="status">{message}</div>}
       {!isGoer && <div className="sponsorship-summary-grid">
+        <button className={`sponsorship-summary-card summary-all${filter === "all" ? " selected" : ""}`} onClick={() => setFilter("all")}>
+          <span><i aria-hidden="true">♡</i><span>All children</span></span><strong>{children.length}</strong>
+        </button>
         {SPONSOR_LIFECYCLE.map((lifecycle) => (
-          <button key={lifecycle} className={`sponsorship-summary-card ${filter === lifecycle ? "selected" : ""}`} onClick={() => setFilter(filter === lifecycle ? "all" : lifecycle)}>
-            <span>{lifecycle}</span><strong>{children.filter((child) => child.lifecycle === lifecycle).length}</strong>
+          <button key={lifecycle} className={`sponsorship-summary-card summary-${lifecycle}${filter === lifecycle ? " selected" : ""}`} onClick={() => setFilter(filter === lifecycle ? "all" : lifecycle)}>
+            <span><i aria-hidden="true">{lifecycle === "active" ? "●" : lifecycle === "new" ? "✦" : lifecycle === "graduated" ? "↗" : "♡"}</i><span>{lifecycle}</span></span>
+            <strong>{lifecycleCounts[lifecycle]}</strong>
           </button>
         ))}
       </div>}
       <div className="sponsorship-workspace">
         <section className="surface sponsorship-child-list">
           <div className="sponsorship-list-heading">
-            <h2>Children</h2>
-            <span>{visibleChildren.length}</span>
+            <div><span className="sponsorship-section-eyebrow">{isGoer ? "YOUR ROSTER" : "CARE DIRECTORY"}</span><h2>Children</h2></div>
+            <span className="sponsorship-list-count">{visibleChildren.length} <small>shown</small></span>
           </div>
-          <input className="form-control mb-3" aria-label="Search sponsored children" placeholder="Search name or ID" value={query} onChange={(event) => setQuery(event.target.value)} />
+          <div className="sponsorship-search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input className="form-control" aria-label="Search sponsored children" placeholder="Find a child by name or ID" value={query} onChange={(event) => setQuery(event.target.value)} />
+          </div>
           {!isGoer && <select className="form-select mb-3" aria-label="Filter by lifecycle status" value={filter} onChange={(event) => setFilter(event.target.value)}>
             <option value="all">All lifecycle statuses</option>
             {SPONSOR_LIFECYCLE.map((lifecycle) => <option value={lifecycle} key={lifecycle}>{lifecycle}</option>)}
           </select>}
-          {loading ? <p role="status">Loading children...</p> : visibleChildren.map((child) => (
+          {loading ? <div className="sponsorship-loading" role="status"><span /> Loading your children...</div> : visibleChildren.map((child) => (
             <button className={`sponsorship-child-row ${Number(selectedChildId) === Number(child.id) ? "selected" : ""}`} key={child.id} onClick={() => selectChild(child)}>
-              <span><strong>{child.name}</strong><small>{child.participantCode || `Child #${child.id}`}</small></span>
+              <span className="sponsorship-child-avatar" aria-hidden="true">{child.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
+              <span className="sponsorship-child-copy"><strong>{child.name}</strong><small>{child.participantCode || `Child #${child.id}`}</small></span>
               {!isGoer && <span className={`lifecycle-pill ${child.lifecycle}`}>{child.lifecycle}</span>}
+              <span className="sponsorship-child-arrow" aria-hidden="true">›</span>
             </button>
           ))}
-          {!loading && !visibleChildren.length && <p className="text-secondary">No children in this category.</p>}
+          {!loading && !visibleChildren.length && <div className="sponsorship-no-results"><span aria-hidden="true">⌕</span><strong>No children found</strong><p>Try a different name or lifecycle filter.</p></div>}
         </section>
         <section className="surface sponsorship-child-detail">
           {!selectedChild ? (
-            <div className="sponsorship-empty"><span aria-hidden="true">♡</span><h2>Select a child</h2><p>{isGoer ? "Choose a child in your assigned group to record a gift or allowance, or write to their sponsor." : "Choose a record to manage sponsorship details, allowance, and letters."}</p></div>
+            <div className="sponsorship-empty">
+              <div className="sponsorship-empty-art" aria-hidden="true"><span>♡</span><i>✦</i><b>+</b></div>
+              <span className="sponsorship-section-eyebrow">A LITTLE CARE GOES A LONG WAY</span>
+              <h2>Select a child</h2>
+              <p>{isGoer ? "Choose a child in your assigned group to record a gift or allowance, or write to their sponsor." : "Choose a child to explore their school details, care history, and sponsorship journey."}</p>
+            </div>
           ) : (
             <>
               <div className="sponsorship-detail-heading">
-                <div><span className="eyebrow">{selectedChild.participantCode || `CHILD #${selectedChild.id}`}</span><h2>{selectedChild.name}</h2></div>
-                {!isGoer && <span className={`lifecycle-pill ${selectedChild.lifecycle}`}>{selectedChild.lifecycle}</span>}
+                <div className="sponsorship-profile-summary">
+                  <span className="sponsorship-profile-avatar">{selectedChildInitials}</span>
+                  <div><span className="sponsorship-section-eyebrow">{selectedChild.participantCode || `CHILD #${selectedChild.id}`}</span><h2>{selectedChild.name}</h2><span className="sponsorship-profile-caption">{isGoer ? `Care group · ${user.goerEducationLevel}` : "Growing with a community behind them"}</span></div>
+                </div>
+                {!isGoer && <span className={`lifecycle-pill ${selectedChild.lifecycle}`}><i aria-hidden="true">●</i> {selectedChild.lifecycle}</span>}
               </div>
                 {!isGoer && <section className="sponsorship-detail-section sponsorship-school-section">
                   <h3>School details</h3>
-                  {canManage ? (
-                    <form className="sponsorship-school-form" onSubmit={saveChild}>
-                      <label className="form-label" htmlFor="sponsored-child-school-name">School name</label>
-                      <input
-                        id="sponsored-child-school-name"
-                        className="form-control"
-                        maxLength={200}
-                        value={schoolName}
-                        onChange={(event) => setSchoolName(event.target.value)}
-                      />
-                      <label className="form-label" htmlFor="sponsored-child-school-address">School address</label>
-                      <textarea
-                        id="sponsored-child-school-address"
-                        className="form-control"
-                        rows="2"
-                        maxLength={500}
-                        value={schoolAddress}
-                        onChange={(event) => setSchoolAddress(event.target.value)}
-                      />
-                      <button className="btn btn-sm btn-outline-dark" type="submit">Save school address</button>
-                    </form>
-                  ) : (
-                    <div className="sponsorship-school-readonly">
-                      <p><strong>School name:</strong> {selectedChild.schoolName || "Not provided"}</p>
-                      <p><strong>School address:</strong> {selectedChild.schoolAddress || "Not provided"}</p>
-                    </div>
-                  )}
+                  <div className="sponsorship-school-readonly">
+                    <p><strong>School name:</strong> {selectedChild.schoolName || "Not provided"}</p>
+                    <p><strong>School address:</strong> {selectedChild.schoolAddress || "Not provided"}</p>
+                  </div>
                 </section>}
                 {canViewUpdates && <section className="sponsorship-detail-section">
                 <div className="sponsorship-list-heading">
