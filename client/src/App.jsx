@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Html5Qrcode } from "html5-qrcode";
 import { Chart, registerables } from "chart.js";
@@ -21,10 +21,20 @@ const apiCall = async (p, o = {}) => {
     localStorage.removeItem("user");
     window.dispatchEvent(new Event("auth-expired"));
   }
-  if (!r.ok) throw Error(d.error || "Request failed");
+  if (!r.ok) {
+    const error = new Error(d.error || "Request failed");
+    error.errors = d.errors || {};
+    error.code = d.code || "";
+    error.duplicates = Array.isArray(d.duplicates) ? d.duplicates : [];
+    throw error;
+  }
   return d;
 };
 const api = "/api";
+const formatCount = (value) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num.toLocaleString() : "0";
+};
 const STAFF_ROLES = ["system administrator", "church administrator"];
 const GOER_ROLE = "goer";
 const STAFF_PERMISSION_OPTIONS = [
@@ -37,8 +47,8 @@ const STAFF_PERMISSION_OPTIONS = [
   { key: "analytics:view", label: "Analytics", description: "View and refresh participant analytics." },
   { key: "reports:view", label: "Reports", description: "View and export attendance reports and sponsored-child monitoring data when authorized." },
   { key: "portal:view", label: "Participant QR portal", description: "Look up participant details using a QR code and passcode." },
-  { key: "sponsorship:view", label: "View sponsored care", description: "View child lifecycle, allowance history, and letter threads." },
-  { key: "sponsorship:manage", label: "Manage sponsored care", description: "Record growth, activity, and care updates; update lifecycle and allowances; attach receipt proof; and reply to letters." },
+  { key: "sponsorship:view", label: "View sponsored care", description: "View allowance balance transactions, disbursements, and letter threads." },
+  { key: "sponsorship:manage", label: "Manage sponsored care", description: "Add or deduct allowance balances, record disbursements, record care updates, and reply to letters." },
 ];
 const DEFAULT_STAFF_PERMISSION_KEYS = STAFF_PERMISSION_OPTIONS
   .map(({ key }) => key)
@@ -94,13 +104,27 @@ const canAccessPage = (page, user) => {
   if (PAGE_ACCESS[page]) return PAGE_ACCESS[page].includes(role);
   return canAccessPermission(PAGE_PERMISSIONS[page], user);
 };
+const SPONSOR_LIFECYCLE = [
+  { value: "active", label: "Active", description: "Sponsorship is active." },
+  { value: "on_hold", label: "On Hold", description: "Sponsorship is temporarily paused." },
+  { value: "withdrawn", label: "Withdrawn", description: "The child or guardian voluntarily left the program." },
+  { value: "deceased", label: "Deceased", description: "The child passed away." },
+  { value: "completed", label: "Sponsorship Completed", description: "The child has officially completed the sponsorship program." },
+];
+const normalizeSponsorLifecycle = (value) => {
+  if (value === "graduated") return "completed";
+  if (value === "new" || !value) return "active";
+  return value;
+};
+const sponsorLifecycleLabel = (value) =>
+  SPONSOR_LIFECYCLE.find((status) => status.value === normalizeSponsorLifecycle(value))?.label || "Active";
 const EDUCATION_LEVELS = [
   "Elementary",
   "Junior High School",
   "Senior High School",
   "College",
 ];
-const GENDER_OPTIONS = ["Male", "Female", "Prefer not to say"];
+const GENDER_OPTIONS = ["Male", "Female"];
 const GRADE_LEVELS = {
   Elementary: Array.from({ length: 6 }, (_, index) => `Grade ${index + 1}`),
   "Junior High School": Array.from({ length: 4 }, (_, index) => `Grade ${index + 7}`),
@@ -148,6 +172,63 @@ function composeFullName(person) {
     .map((part) => String(part || "").trim())
     .filter(Boolean)
     .join(" ");
+}
+function calculateParticipantAge(dateOfBirth, today = new Date()) {
+  const date = String(dateOfBirth || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "";
+  const birth = new Date(`${date}T00:00:00.000Z`);
+  if (Number.isNaN(birth.getTime()) || birth.toISOString().slice(0, 10) !== date) return "";
+  let age = today.getUTCFullYear() - birth.getUTCFullYear();
+  if (
+    today.getUTCMonth() < birth.getUTCMonth() ||
+    (today.getUTCMonth() === birth.getUTCMonth() && today.getUTCDate() < birth.getUTCDate())
+  ) age -= 1;
+  return age < 0 ? "" : age;
+}
+function useParticipantAge(dateOfBirth) {
+  const [today, setToday] = useState(() => new Date());
+  useEffect(() => {
+    const now = new Date();
+    const nextUtcDay = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+    const timer = window.setTimeout(() => setToday(new Date()), nextUtcDay - now.getTime());
+    return () => window.clearTimeout(timer);
+  }, [today]);
+  return calculateParticipantAge(dateOfBirth, today);
+}
+function normalizePhilippineMobile(value) {
+  const phone = String(value || "").trim().replace(/[\s()-]/g, "");
+  return /^09\d{9}$/.test(phone) || /^639\d{9}$/.test(phone) || /^\+639\d{9}$/.test(phone);
+}
+function validateParticipantRegistration(form) {
+  const errors = {};
+  if (!form.firstName.trim()) errors.firstName = "First name is required.";
+  else if (form.firstName.trim().length > 100) errors.firstName = "Use 100 characters or fewer.";
+  if (!form.lastName.trim()) errors.lastName = "Last name is required.";
+  else if (form.lastName.trim().length > 100) errors.lastName = "Use 100 characters or fewer.";
+  if (form.middleName.trim().length > 100) errors.middleName = "Use 100 characters or fewer.";
+  if (!form.dateOfBirth) errors.dateOfBirth = "Date of birth is required.";
+  else if (calculateParticipantAge(form.dateOfBirth) === "") errors.dateOfBirth = "Enter a valid date of birth.";
+  else if (calculateParticipantAge(form.dateOfBirth) < 6 || calculateParticipantAge(form.dateOfBirth) > 22) {
+    errors.dateOfBirth = "Sponsored children must be between 6 and 22 years old.";
+  }
+  if (!GENDER_OPTIONS.includes(form.gender)) errors.gender = "Select Male or Female.";
+  if (!EDUCATION_LEVELS.includes(form.educationLevel)) errors.educationLevel = "Select an education level.";
+  else if (!GRADE_LEVELS[form.educationLevel]?.includes(form.gradeLevel)) {
+    errors.gradeLevel = "Select a valid grade or year level.";
+  }
+  if (form.educationLevel === "College" && !form.programCourse.trim()) {
+    errors.programCourse = "Enter the college program or course.";
+  } else if (form.programCourse.trim().length > 200) {
+    errors.programCourse = "Use 200 characters or fewer.";
+  }
+  if (!form.emergencyContactName.trim()) errors.emergencyContactName = "Guardian/emergency contact name is required.";
+  else if (form.emergencyContactName.trim().length > 100) errors.emergencyContactName = "Use 100 characters or fewer.";
+  if (!normalizePhilippineMobile(form.emergencyContactPhone)) {
+    errors.emergencyContactPhone = "Enter a valid Philippine mobile number.";
+  }
+  if (form.schoolName.trim().length > 200) errors.schoolName = "Use 200 characters or fewer.";
+  if (form.schoolAddress.trim().length > 500) errors.schoolAddress = "Use 500 characters or fewer.";
+  return errors;
 }
 function participantNameFields(person) {
   if (person.firstName || person.middleName || person.lastName) {
@@ -610,36 +691,71 @@ function AccountSettings({ onUserUpdated }) {
     </>
   );
 }
-const Field = ({ label, ...p }) => (
+const Field = ({ label, error, ...p }) => {
+  const generatedId = useId();
+  const id = p.id || generatedId;
+  return (
+    <div className="col-12 col-md-6">
+      <label className="form-label" htmlFor={id}>
+        {label}
+      </label>
+      <input
+        {...p}
+        id={id}
+        className={`form-control${error ? " is-invalid" : ""}${p.className ? ` ${p.className}` : ""}`}
+        aria-invalid={error ? "true" : undefined}
+        aria-describedby={[
+          p["aria-describedby"],
+          error ? `${id}-error` : "",
+        ].filter(Boolean).join(" ") || undefined}
+      />
+      {error && <div className="invalid-feedback" id={`${id}-error`}>{error}</div>}
+    </div>
+  );
+};
+function AgeValue({ dateOfBirth }) {
+  const age = useParticipantAge(dateOfBirth);
+  return age === "" ? "Not available" : `${age} years`;
+}
+function AgeField({ dateOfBirth }) {
+  const age = useParticipantAge(dateOfBirth);
+  return (
+    <Field
+      label="Age (calculated)"
+      value={age === "" ? "" : `${age} years`}
+      readOnly
+      aria-readonly="true"
+    />
+  );
+}
+const GenderSelect = ({ id, value, onChange, required = false, error }) => (
   <div className="col-12 col-md-6">
-    <label className="form-label">{label}</label>
-    <input className="form-control" {...p} />
-  </div>
-);
-const GenderSelect = ({ id, value, onChange }) => (
-  <div className="col-12 col-md-6">
-    <label className="form-label" htmlFor={id}>Gender</label>
+    <label className="form-label" htmlFor={id}>
+      Sex
+    </label>
     <select
       id={id}
-      className="form-select"
-      value={value || ""}
+      className={`form-select${error ? " is-invalid" : ""}`}
+      value={GENDER_OPTIONS.includes(value) ? value : ""}
       onChange={onChange}
+      required={required}
+      aria-invalid={error ? "true" : undefined}
+      aria-describedby={error ? `${id}-error` : undefined}
     >
-      <option value="">Select gender (optional)</option>
-      {value && !GENDER_OPTIONS.includes(value) && (
-        <option value={value}>{value} (existing)</option>
-      )}
+      <option value="">Select sex</option>
       {GENDER_OPTIONS.map((option) => <option key={option}>{option}</option>)}
     </select>
+    {error && <div className="invalid-feedback" id={`${id}-error`}>{error}</div>}
   </div>
 );
 function Dashboard({ go }) {
   const [d, setD] = useState({ counts: {}, recentCheckins: [], atRisk: [] });
   const [greeting, setGreeting] = useState(() => getGreeting());
+  const [dashboardError, setDashboardError] = useState("");
   useEffect(() => {
-    apiCall("/dashboard")
+    apiCall(`/dashboard`)
       .then(setD)
-      .catch(() => {});
+      .catch((error) => setDashboardError(error.message));
   }, []);
   useEffect(() => {
     const interval = window.setInterval(() => setGreeting(getGreeting()), 60_000);
@@ -652,18 +768,19 @@ function Dashboard({ go }) {
         t={`Good ${greeting}.`}
         d="A live pulse on participation and care."
       />
+      {dashboardError && <div className="alert alert-danger" role="alert">{dashboardError}</div>}
       <div className="row g-3 mb-4">
         {[
           [
-            "Active participants",
+            "Total active participant",
             d.counts.activeParticipants ?? "—",
             `${d.counts.participants ?? "—"} total records`,
           ],
-          ["Check-ins this week", d.counts.totalCheckins ?? "—", "Last 7 days"],
-          ["Goers checked-in (week)", d.counts.goerCheckins ?? "—", "Last 7 days"],
-          ["Attendance review", d.atRisk.length, "Elevated attendance scores"],
+          ["Total Goer", d.counts.totalGoers ?? "—", "Goer participants"],
+          ["Total staff", d.counts.totalStaff ?? "—", "Active staff accounts"],
+          ["Total Events", d.counts.totalEvents ?? "—", "Events on record"],
         ].map((x) => (
-          <div className="col-12 col-sm-6 col-lg-2" key={x[0]}>
+          <div className="col-12 col-sm-6 col-lg-3" key={x[0]}>
             <div className="stat-card">
               <small>{x[0]}</small>
               <strong>{x[1]}</strong>
@@ -739,7 +856,6 @@ function Register({ onClose, onCreated }) {
     lastName: "",
     dateOfBirth: "",
     gender: "",
-    phone: "",
     address: "",
     participantType: "sponsored_child",
     educationLevel: "",
@@ -752,31 +868,49 @@ function Register({ onClose, onCreated }) {
     medicalConditions: "",
     emergencyContactName: "",
     emergencyContactPhone: "",
-    sponsorName: "",
-    sponsorContact: "",
-    sponsorshipType: "",
-    enrollmentDate: "",
-    programAffiliation: "",
   };
   const [f, setF] = useState(blank);
   const [result, setR] = useState(null);
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
+  const [duplicates, setDuplicates] = useState([]);
+  const [confirmPotentialDuplicate, setConfirmPotentialDuplicate] = useState(false);
   const [saving, setSaving] = useState(false);
-  const update = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const setFieldValue = (key, value) => {
+    setF((current) => ({ ...current, [key]: value }));
+    setFieldErrors((current) => ({ ...current, [key]: "" }));
+    setError("");
+    setDuplicates([]);
+    setConfirmPotentialDuplicate(false);
+  };
+  const update = (key) => (event) => setFieldValue(key, event.target.value);
   const submit = async (e) => {
     e.preventDefault();
-    setSaving(true);
     setError("");
+    const validationErrors = validateParticipantRegistration(f);
+    setFieldErrors(validationErrors);
+    if (Object.keys(validationErrors).length) {
+      setError("Please correct the highlighted fields before registering.");
+      return;
+    }
+    setSaving(true);
     try {
       const created = await apiCall("/participants", {
         method: "POST",
-        body: JSON.stringify({ ...f, fullName: composeFullName(f) }),
+        body: JSON.stringify({
+          ...f,
+          fullName: composeFullName(f),
+          confirmPotentialDuplicate,
+        }),
       });
-      setR(created);
+      setR({ ...created, dateOfBirth: f.dateOfBirth });
       setF(blank);
       await onCreated();
     } catch (x) {
       setError(x.message);
+      setFieldErrors(x.errors || {});
+      setDuplicates(x.duplicates || []);
+      setConfirmPotentialDuplicate(false);
     } finally {
       setSaving(false);
     }
@@ -797,7 +931,7 @@ function Register({ onClose, onCreated }) {
           <div>
             <span className="eyebrow">PARTICIPANTS / NEW RECORD</span>
             <h2 id="register-participant-title">{result ? "Sponsored child registered." : "Register a sponsored child."}</h2>
-            <p>Create an encrypted sponsored-child profile and issue a secure digital ID.</p>
+            <p>Create an encrypted participant profile and issue a secure digital ID.</p>
           </div>
           <button type="button" className="btn-close" aria-label="Close registration" onClick={onClose} />
         </header>
@@ -805,6 +939,7 @@ function Register({ onClose, onCreated }) {
           <div className="participant-registration-success">
             <span className="eyebrow">DIGITAL ID READY</span>
             <h3>{result.participantCode}</h3>
+            <p className="participant-registration-age">Age: <AgeValue dateOfBirth={result.dateOfBirth} /></p>
             <img src={result.qrCodeImage} alt="Generated participant QR code" />
             {result.passcode && (
               <div className="participant-generated-passcode" role="status">
@@ -813,32 +948,45 @@ function Register({ onClose, onCreated }) {
                 <p>Share this passcode securely with the child’s guardian. It is shown only during registration.</p>
               </div>
             )}
+            <div className={`alert ${result.notification?.status === "accepted" || result.notification?.status === "sent" ? "alert-success" : result.notification?.status === "not_configured" ? "alert-warning" : "alert-danger"}`} role="status">
+              {result.notification?.status === "accepted" && "Semaphore accepted the guardian SMS for processing; this does not confirm receipt."}
+              {result.notification?.status === "sent" && "Semaphore reports the SMS sent to the carrier network; this does not confirm receipt by the guardian."}
+              {result.notification?.status === "not_configured" && "The participant was registered, but SMS is not configured. Add the Semaphore credentials to the server environment."}
+              {result.notification?.status === "failed" && "The participant was registered, but Semaphore did not confirm the SMS. Contact the guardian directly."}
+            </div>
             <div className="d-flex flex-wrap justify-content-center gap-2">
               <button type="button" className="btn btn-outline-dark" onClick={() => window.print()}>Print card</button>
               <button type="button" className="btn btn-dark" onClick={onClose}>Done</button>
             </div>
           </div>
         ) : (
-          <form className="participant-registration-form" onSubmit={submit}>
+          <form className="participant-registration-form" onSubmit={submit} noValidate>
+            <p className="registration-note mb-0">Fields marked * are required. Age is calculated from date of birth.</p>
             <section className="registration-section">
               <header className="registration-section-heading">
                 <span>01</span>
                 <div><h3>Child details</h3><p>Start with the child’s basic information.</p></div>
               </header>
               <div className="row g-3">
-                <Field label="First name" value={f.firstName} onChange={update("firstName")} required />
-                <Field label="Middle name (optional)" value={f.middleName} onChange={update("middleName")} />
-                <Field label="Last name" value={f.lastName} onChange={update("lastName")} required />
+                <Field label="First name" value={f.firstName} onChange={update("firstName")} required error={fieldErrors.firstName} />
+                <Field label="Middle name (optional)" value={f.middleName} onChange={update("middleName")} error={fieldErrors.middleName} />
+                <Field label="Last name" value={f.lastName} onChange={update("lastName")} required error={fieldErrors.lastName} />
                 <Field
                   label="Date of birth"
                   type="date"
                   value={f.dateOfBirth}
                   onChange={update("dateOfBirth")}
-                  required={f.participantType === "sponsored_child"}
+                  required
+                  error={fieldErrors.dateOfBirth}
                 />
-                <GenderSelect id="register-gender" value={f.gender} onChange={update("gender")} />
-                <Field label="Phone" value={f.phone} onChange={update("phone")} />
-                <Field label="Home address" value={f.address} onChange={update("address")} />
+                <AgeField dateOfBirth={f.dateOfBirth} />
+                <GenderSelect id="register-gender" value={f.gender} onChange={update("gender")} required error={fieldErrors.gender} />
+                <Field
+                  label="Home address"
+                  placeholder="Street, Barangay, City"
+                  value={f.address}
+                  onChange={update("address")}
+                />
               </div>
             </section>
             {f.participantType === "sponsored_child" && (
@@ -853,12 +1001,14 @@ function Register({ onClose, onCreated }) {
                       <label className="form-label" htmlFor="register-school-name">School currently attending</label>
                       <input
                         id="register-school-name"
-                        className="form-control"
+                        className={`form-control${fieldErrors.schoolName ? " is-invalid" : ""}`}
                         value={f.schoolName}
                         onChange={update("schoolName")}
                         maxLength={200}
-                        aria-describedby="register-school-name-hint"
+                        aria-invalid={fieldErrors.schoolName ? "true" : undefined}
+                        aria-describedby={`register-school-name-hint${fieldErrors.schoolName ? " register-school-name-error" : ""}`}
                       />
+                      {fieldErrors.schoolName && <div className="invalid-feedback d-block" id="register-school-name-error">{fieldErrors.schoolName}</div>}
                       <small className="registration-field-hint" id="register-school-name-hint">
                       Enter the full name of the school where the child is currently enrolled.
                       </small>
@@ -867,19 +1017,29 @@ function Register({ onClose, onCreated }) {
                       <label className="form-label" htmlFor="register-education-level">Education level</label>
                       <select
                         id="register-education-level"
-                        className="form-select"
+                        className={`form-select${fieldErrors.educationLevel ? " is-invalid" : ""}`}
                         value={f.educationLevel}
-                        onChange={(event) => setF({
-                          ...f,
-                          educationLevel: event.target.value,
-                          gradeLevel: "",
-                          programCourse: event.target.value === "College" ? f.programCourse : "",
-                        })}
+                        onChange={(event) => {
+                          const level = event.target.value;
+                          setFieldValue("educationLevel", level);
+                          setF((current) => ({
+                            ...current,
+                            gradeLevel: "",
+                            programCourse: level === "College" ? current.programCourse : "",
+                          }));
+                          setFieldErrors((current) => ({
+                            ...current,
+                            gradeLevel: "",
+                            programCourse: "",
+                          }));
+                        }}
                         required
+                        aria-invalid={fieldErrors.educationLevel ? "true" : undefined}
                       >
                         <option value="">Select education level</option>
                         {EDUCATION_LEVELS.map((level) => <option key={level}>{level}</option>)}
                       </select>
+                      {fieldErrors.educationLevel && <div className="invalid-feedback d-block">{fieldErrors.educationLevel}</div>}
                     </div>
                     {f.educationLevel && (
                       <div className="col-12 col-md-6">
@@ -888,14 +1048,16 @@ function Register({ onClose, onCreated }) {
                         </label>
                         <select
                           id="register-grade-level"
-                          className="form-select"
+                          className={`form-select${fieldErrors.gradeLevel ? " is-invalid" : ""}`}
                           value={f.gradeLevel}
                           onChange={update("gradeLevel")}
                           required
+                          aria-invalid={fieldErrors.gradeLevel ? "true" : undefined}
                         >
                           <option value="">Select {f.educationLevel === "College" ? "college year" : "grade level"}</option>
                           {GRADE_LEVELS[f.educationLevel].map((grade) => <option key={grade}>{grade}</option>)}
                         </select>
+                        {fieldErrors.gradeLevel && <div className="invalid-feedback d-block">{fieldErrors.gradeLevel}</div>}
                       </div>
                     )}
                     {f.educationLevel === "College" && (
@@ -904,18 +1066,21 @@ function Register({ onClose, onCreated }) {
                         value={f.programCourse}
                         onChange={update("programCourse")}
                         required
+                        error={fieldErrors.programCourse}
                       />
                     )}
                     <div className="col-12">
                       <label className="form-label" htmlFor="register-school-address">School address</label>
                       <textarea
                         id="register-school-address"
-                        className="form-control"
+                        className={`form-control${fieldErrors.schoolAddress ? " is-invalid" : ""}`}
                         rows="2"
                         maxLength={500}
                         value={f.schoolAddress}
                         onChange={update("schoolAddress")}
+                        aria-invalid={fieldErrors.schoolAddress ? "true" : undefined}
                       />
+                      {fieldErrors.schoolAddress && <div className="invalid-feedback d-block">{fieldErrors.schoolAddress}</div>}
                     </div>
                     <div className="col-12">
                       <p className="registration-note mb-0">
@@ -927,35 +1092,50 @@ function Register({ onClose, onCreated }) {
                 <section className="registration-section">
                   <header className="registration-section-heading">
                     <span>03</span>
-                    <div><h3>Health and emergency contact</h3><p>Optional details to help staff provide appropriate care.</p></div>
+                    <div><h3>Health and emergency contact</h3><p>Provide a guardian contact for participant notifications by SMS.</p></div>
                   </header>
                   <div className="row g-3">
                     <Field label="Weight" placeholder="e.g. 32 kg" value={f.weight} onChange={update("weight")} />
                     <Field label="Height" placeholder="e.g. 132 cm" value={f.height} onChange={update("height")} />
                     <Field label="Medical conditions" value={f.medicalConditions} onChange={update("medicalConditions")} />
-                    <Field label="Emergency contact name" value={f.emergencyContactName} onChange={update("emergencyContactName")} />
-                    <Field label="Emergency contact phone" value={f.emergencyContactPhone} onChange={update("emergencyContactPhone")} />
-                  </div>
-                </section>
-                <section className="registration-section">
-                  <header className="registration-section-heading">
-                    <span>04</span>
-                    <div><h3>Sponsorship details</h3><p>Record sponsor and program information, if available.</p></div>
-                  </header>
-                  <div className="row g-3">
-                    <Field label="Sponsor name" value={f.sponsorName} onChange={update("sponsorName")} />
-                    <Field label="Sponsor contact" value={f.sponsorContact} onChange={update("sponsorContact")} />
-                    <Field label="Sponsorship type" value={f.sponsorshipType} onChange={update("sponsorshipType")} />
-                    <Field label="Enrollment date" type="date" value={f.enrollmentDate} onChange={update("enrollmentDate")} />
-                    <Field label="Program affiliation" value={f.programAffiliation} onChange={update("programAffiliation")} />
+                    <Field label="Guardian / emergency contact name" value={f.emergencyContactName} onChange={update("emergencyContactName")} required error={fieldErrors.emergencyContactName} />
+                    <Field label="Guardian mobile number" type="tel" inputMode="tel" placeholder="09xx xxx xxxx or +63 9xx xxx xxxx" value={f.emergencyContactPhone} onChange={update("emergencyContactPhone")} required error={fieldErrors.emergencyContactPhone} />
                   </div>
                 </section>
               </>
             )}
             {error && <div className="alert alert-danger mt-3 mb-0" role="alert">{error}</div>}
+            {duplicates.length > 0 && (
+              <section className="participant-duplicate-warning" aria-labelledby="duplicate-warning-title">
+                <h3 id="duplicate-warning-title">Review possible matching participants</h3>
+                <p>Registration is paused so staff can check these records. Exact name-and-date matches cannot be registered again.</p>
+                <ul>
+                  {duplicates.map((duplicate) => (
+                    <li key={duplicate.id}>
+                      <strong>{duplicate.fullName}</strong>
+                      {" · "}{duplicate.participantCode}
+                      {" · "}{duplicate.dateOfBirth || "Date of birth unavailable"}
+                      {duplicate.age !== null && duplicate.age !== undefined ? ` · Age ${duplicate.age}` : ""}
+                      {duplicate.exact && <strong> · Exact match</strong>}
+                    </li>
+                  ))}
+                </ul>
+                {!duplicates.some((duplicate) => duplicate.exact) && (
+                  <label className="form-check-label">
+                    <input
+                      className="form-check-input me-2"
+                      type="checkbox"
+                      checked={confirmPotentialDuplicate}
+                      onChange={(event) => setConfirmPotentialDuplicate(event.target.checked)}
+                    />
+                    I reviewed these possible matches and confirm this is a different participant.
+                  </label>
+                )}
+              </section>
+            )}
             <footer className="participant-modal-footer">
               <button type="button" className="btn btn-outline-secondary" onClick={onClose} disabled={saving}>Cancel</button>
-              <button className="btn btn-dark" disabled={saving}>{saving ? "Creating profile…" : "Create profile and QR →"}</button>
+              <button className="btn btn-dark" disabled={saving || (duplicates.length > 0 && !duplicates.some((duplicate) => duplicate.exact) && !confirmPotentialDuplicate) || duplicates.some((duplicate) => duplicate.exact)}>{saving ? "Creating profile…" : confirmPotentialDuplicate ? "Confirm and create profile →" : "Create profile and QR →"}</button>
             </footer>
           </form>
         )}
@@ -964,13 +1144,18 @@ function Register({ onClose, onCreated }) {
   ), document.body);
 }
 function Participants({ canManage, user }) {
+  const canViewSponsorship = canAccessPermission("sponsorship:view", user);
+  const canManageSponsorship = canAccessPermission("sponsorship:manage", user);
   const [list, setList] = useState([]);
   const [selected, setSelected] = useState(null);
   const [form, setForm] = useState(null);
   const [editing, setEditing] = useState(false);
   const [query, setQuery] = useState("");
+  const [sortBy, setSortBy] = useState("newest");
   const [message, setMessage] = useState("");
   const [showRegistration, setShowRegistration] = useState(false);
+  const [educationFilter, setEducationFilter] = useState("all");
+  const [childStatusFilter, setChildStatusFilter] = useState("all");
   const [visiblePasscode, setVisiblePasscode] = useState(null);
   const [passcodeMessage, setPasscodeMessage] = useState("");
   const [loadingPasscode, setLoadingPasscode] = useState(false);
@@ -982,6 +1167,20 @@ function Participants({ canManage, user }) {
   }, []);
   const update = (key) => (event) =>
     setForm({ ...form, [key]: event.target.value });
+  const closeProfile = () => {
+    setSelected(null);
+    setForm(null);
+    setEditing(false);
+    setMessage("");
+  };
+  useEffect(() => {
+    if (!form) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") closeProfile();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [form]);
   useEffect(() => {
     apiCall("/participants")
       .then((data) => setList(Array.isArray(data) ? data.filter((participant) => participant.status !== "deleted") : []))
@@ -996,6 +1195,10 @@ function Participants({ canManage, user }) {
       setForm({
         ...data.participant,
         participantType: data.participant.participant_type,
+        ...(canViewSponsorship ? {
+          lifecycle: normalizeSponsorLifecycle(data.participant.sponsorship_lifecycle),
+          monthlyAllowance: String(data.participant.monthly_allowance ?? 0),
+        } : {}),
         ...participantNameFields(data.participant),
         passcode: '',
       });
@@ -1032,13 +1235,25 @@ function Participants({ canManage, user }) {
       return;
     }
     try {
+      const changes = { ...form, fullName: composeFullName(form) };
+      delete changes.sponsorName;
+      delete changes.sponsorContact;
+      delete changes.sponsorshipType;
+      if (!canManageSponsorship) {
+        delete changes.lifecycle;
+        delete changes.monthlyAllowance;
+      }
       const data = await apiCall(`/participants/${selected}`, {
         method: "PUT",
-        body: JSON.stringify({ ...form, fullName: composeFullName(form) }),
+        body: JSON.stringify(changes),
       });
       setForm({
         ...data.participant,
         participantType: data.participant.participant_type,
+        ...(canViewSponsorship ? {
+          lifecycle: normalizeSponsorLifecycle(data.participant.sponsorship_lifecycle),
+          monthlyAllowance: String(data.participant.monthly_allowance ?? 0),
+        } : {}),
         ...participantNameFields(data.participant),
       });
       setEditing(false);
@@ -1049,7 +1264,6 @@ function Participants({ canManage, user }) {
       setMessage(error.message);
     }
   };
-
   const deleteParticipant = async () => {
     if (!selected) return;
     if (!window.confirm('Delete participant? This will revoke their QR and mark the participant as deleted.')) return;
@@ -1081,17 +1295,43 @@ function Participants({ canManage, user }) {
       setMessage(err.message);
     }
   };
-  const filtered = list.filter((item) =>
-    `${item.participant_code} ${item.participant_type} ${item.gender}`
-      .toLowerCase()
-      .includes(query.toLowerCase()),
+  const searchQuery = query.trim().toLocaleLowerCase();
+  const visibleParticipants = educationFilter === "all"
+    ? list
+    : list.filter((item) => item.education_level === educationFilter);
+  const statusVisibleParticipants = childStatusFilter === "all"
+    ? visibleParticipants
+    : visibleParticipants.filter((item) =>
+        normalizeSponsorLifecycle(item.sponsorship_lifecycle) === childStatusFilter);
+  const filtered = statusVisibleParticipants.filter((item) =>
+    `${item.fullName || ""} ${item.participant_code || ""} ${item.participant_type || ""} ${item.gender || ""}`
+      .toLocaleLowerCase()
+      .includes(searchQuery),
   );
+  const sortedParticipants = [...filtered].sort((first, second) => {
+    if (sortBy === "name-asc" || sortBy === "name-desc") {
+      const order = (first.fullName || "").localeCompare(second.fullName || "", undefined, {
+        sensitivity: "base",
+      });
+      return sortBy === "name-asc" ? order : -order;
+    }
+    if (sortBy === "age-asc" || sortBy === "age-desc") {
+      const firstAge = typeof first.age === "number" && Number.isFinite(first.age) ? first.age : null;
+      const secondAge = typeof second.age === "number" && Number.isFinite(second.age) ? second.age : null;
+      if (firstAge === null) return secondAge === null ? 0 : 1;
+      if (secondAge === null) return -1;
+      return sortBy === "age-asc" ? firstAge - secondAge : secondAge - firstAge;
+    }
+    const firstCreated = new Date(first.created_at || 0).getTime();
+    const secondCreated = new Date(second.created_at || 0).getTime();
+    return sortBy === "oldest" ? firstCreated - secondCreated : secondCreated - firstCreated;
+  });
   return (
     <>
       <Title
         e="PARTICIPANTS / RECORDS"
         t="Participant directory."
-        d="Review and edit personal and sponsored-child details."
+        d="Explore participant records, review key details, and manage sponsored-child status."
       />
       {canManage && (
         <div className="participant-register-action">
@@ -1101,15 +1341,70 @@ function Participants({ canManage, user }) {
         </div>
       )}
       <div className="row g-4">
-        <div className="col-12 col-lg-5">
-          <div className="surface directory-panel">
-            <input
-              className="form-control mb-3"
-              placeholder="Search participant records"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-            {filtered.map((item) => (
+        <div className="col-12">
+          <div className="surface directory-panel participant-directory-panel">
+            <div className="participant-directory-toolbar">
+              <input
+                className="form-control"
+                type="search"
+                aria-label="Search participants by full name"
+                placeholder="Search by full name"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </div>
+            <div className="participant-directory-filters">
+              <div className="participant-filter-field">
+                <label className="form-label" htmlFor="participants-education-type">Education type</label>
+                <select
+                  id="participants-education-type"
+                  className="form-select"
+                  value={educationFilter}
+                  onChange={(event) => setEducationFilter(event.target.value)}
+                >
+                  <option value="all">All education types</option>
+                  {EDUCATION_LEVELS.map((level) => (
+                    <option key={level} value={level}>{level}</option>
+                  ))}
+                </select>
+              </div>
+              {canViewSponsorship && (
+                <div className="participant-filter-field">
+                  <label className="form-label" htmlFor="participants-child-status">Child status</label>
+                  <select
+                    id="participants-child-status"
+                    className="form-select"
+                    value={childStatusFilter}
+                    onChange={(event) => setChildStatusFilter(event.target.value)}
+                  >
+                    <option value="all">All statuses</option>
+                    {SPONSOR_LIFECYCLE.map(({ value, label }) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className="participant-directory-sort">
+                <label className="form-label" htmlFor="participants-sort">Sort by</label>
+                <select
+                  id="participants-sort"
+                  className="form-select"
+                  value={sortBy}
+                  onChange={(event) => setSortBy(event.target.value)}
+                >
+                  <option value="newest">Newest registered</option>
+                  <option value="oldest">Oldest registered</option>
+                  <option value="name-asc">Name (A–Z)</option>
+                  <option value="name-desc">Name (Z–A)</option>
+                  <option value="age-asc">Age (youngest first)</option>
+                  <option value="age-desc">Age (oldest first)</option>
+                </select>
+              </div>
+              <p className="participant-directory-count" role="status">
+                {sortedParticipants.length} of {list.length} participants
+              </p>
+            </div>
+            {sortedParticipants.map((item) => (
               <button
                 type="button"
                 className={`directory-row ${selected === item.id ? "selected" : ""}`}
@@ -1124,35 +1419,74 @@ function Participants({ canManage, user }) {
                     {item.participant_type === "sponsored_child"
                       ? "Sponsored Child"
                       : "Goer"}{" "}
-                    · {item.gender || "Gender not set"}
+                    · {item.gender || "Sex not set"}
                   </small>
+                  {item.participant_type === "goer" && (
+                    <small className="participant-allowance-summary">Registration status: {item.status || "active"}</small>
+                  )}
+                  {canViewSponsorship && item.participant_type === "sponsored_child" && (
+                    <small className="participant-allowance-summary">
+                      Monthly: {formatCurrency(item.monthly_allowance)} · Available balance: {formatCurrency(item.available_allowance_balance)}
+                    </small>
+                  )}
                 </span>
-                <span className="directory-arrow">→</span>
+                <span className="directory-row-end">
+                  {canViewSponsorship && item.participant_type === "sponsored_child" && (
+                    <span className={`lifecycle-badge ${normalizeSponsorLifecycle(item.sponsorship_lifecycle)}`}>
+                      {sponsorLifecycleLabel(item.sponsorship_lifecycle)}
+                    </span>
+                  )}
+                  <span className="directory-arrow">→</span>
+                </span>
               </button>
             ))}
-            {!filtered.length && (
-              <p className="text-secondary">No participants found.</p>
+            {!sortedParticipants.length && (
+              <p className="text-secondary" role="status">
+                {searchQuery ? "No participants match that name or search." : "No participants found."}
+              </p>
             )}
           </div>
         </div>
-        <div className="col-12 col-lg-7">
+      </div>
+        {form && createPortal(
+          <div
+            className="participant-modal-backdrop participant-profile-backdrop"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) closeProfile();
+            }}
+          >
+            <section className="participant-modal participant-profile-modal" role="dialog" aria-modal="true" aria-labelledby="participant-profile-title">
           {form && !editing ? (
-            <div className="surface participant-qr-card">
+            <div className="participant-qr-card participant-profile-card">
               <div className="d-flex justify-content-between align-items-start mb-3">
                 <div>
                   <span className="eyebrow">DIGITAL PARTICIPANT ID</span>
-                  <h2>{form.participant_code}</h2>
-                  <p className="text-secondary mb-0">{form.participantType === "sponsored_child" ? "Sponsored Child" : "Goer"} · {form.status}</p>
+                  <h2 id="participant-profile-title">{form.fullName}</h2>
+                  <p className="text-secondary mb-0">
+                    {form.participantType === "sponsored_child"
+                      ? `Sponsored Child · ${sponsorLifecycleLabel(form.sponsorship_lifecycle)}`
+                      : `Goer · ${form.status}`}
+                  </p>
+                  <p className="text-secondary mt-2 mb-0">{form.participant_code} · <AgeValue dateOfBirth={form.dateOfBirth} /></p>
                 </div>
-                {canManage && (
-                  <div>
-                    <button type="button" className="btn btn-outline-dark me-2" onClick={() => setEditing(true)}>Edit details</button>
-                    <button type="button" className="btn btn-danger" onClick={deleteParticipant}>Delete</button>
-                  </div>
-                )}
+                <button type="button" className="btn-close" aria-label="Close participant profile" onClick={closeProfile} />
               </div>
-              {form.qr_code_image ? <img className="participant-qr-image" src={`/${form.qr_code_image}`} alt={`QR code for ${form.participant_code}`} /> : <p className="text-secondary">No active QR code found.</p>}
-              {form.qr_code_image && <button type="button" className="btn btn-dark" onClick={() => window.print()}>Print QR card</button>}
+              <div className="participant-profile-actions">
+                {canManage && <button type="button" className="btn btn-dark" onClick={() => { setMessage(""); setEditing(true); }}>Edit details</button>}
+                {canManage && <button type="button" className="btn btn-outline-danger" onClick={deleteParticipant}>Delete participant</button>}
+              </div>
+              {form.participantType === "sponsored_child" && form.qr_code_image ? <img className="participant-qr-image" src={`/${form.qr_code_image}`} alt={`QR code for ${form.participant_code}`} /> : form.participantType === "sponsored_child" ? <p className="text-secondary">No active QR code found.</p> : null}
+              {form.participantType === "sponsored_child" && form.qr_code_image && <div className="d-flex flex-wrap gap-2">
+                <button type="button" className="btn btn-dark" onClick={() => window.print()}>Print QR card</button>
+              </div>}
+              {message && <div className="alert alert-info mt-3 mb-0" role="status">{message}</div>}
+              {canViewSponsorship && form.participantType === "sponsored_child" && (
+                <div className="profile-grid mt-4">
+                  <div><small>Child status</small><strong>{sponsorLifecycleLabel(form.sponsorship_lifecycle)}</strong></div>
+                  <div><small>Monthly allowance</small><strong>{formatCurrency(form.monthly_allowance)}</strong></div>
+                  <div><small>Available sponsorship allowance balance</small><strong>{formatCurrency(form.available_allowance_balance)}</strong></div>
+                </div>
+              )}
               {canViewPasscode && form.participantType === "sponsored_child" && (
                 <div className="participant-passcode-panel">
                   <div>
@@ -1183,11 +1517,12 @@ function Participants({ canManage, user }) {
                   {passcodeMessage && <p className="text-secondary mb-0" role="status">{passcodeMessage}</p>}
                 </div>
               )}
-              {!canManage && (
-                <div className="profile-grid">
+              <div className="profile-grid">
                   {[
                     ["Name", form.fullName],
+                    ["Sex", form.gender],
                     ["Date of birth", form.dateOfBirth],
+                    ["Age", <AgeValue key="age" dateOfBirth={form.dateOfBirth} />],
                     ["Education", form.educationLevel],
                     ["Grade/year", form.gradeLevel],
                     ["College course", form.programCourse],
@@ -1205,30 +1540,31 @@ function Participants({ canManage, user }) {
                       <strong>{value || "Not provided"}</strong>
                     </div>
                   ))}
-                </div>
-              )}
+              </div>
             </div>
-          ) : form ? (
-            <form className="surface form-surface" onSubmit={save}>
+          ) : (
+            <form className="participant-profile-edit" onSubmit={save}>
               <div className="d-flex justify-content-between align-items-start mb-3">
                 <div>
                   <span className="eyebrow">
                     EDITING {form.participant_code}
                   </span>
-                  <h2>Participant details</h2>
+                  <h2 id="participant-profile-title">Edit participant details</h2>
                       <p className="text-secondary mb-0">
                         Type: {form.participantType === "sponsored_child" ? "Sponsored Child" : "Existing Goer participant record"}
                       </p>
                 </div>
-                <select
-                  className="form-select status-select"
-                  value={form.status || "active"}
-                  onChange={update("status")}
-                >
-                  <option value="active">Active</option>
-                  <option value="inactive">Inactive</option>
-                </select>
+                <button type="button" className="btn-close" aria-label="Close participant editor" onClick={() => { setEditing(false); setMessage(""); }} />
               </div>
+              {form.participantType === "goer" && (
+                <div className="participant-account-status">
+                  <label className="form-label" htmlFor="edit-participant-status">Registration status</label>
+                  <select id="edit-participant-status" className="form-select" value={form.status || "active"} onChange={update("status")}>
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                  </select>
+                </div>
+              )}
               <div className="row g-3">
                 <Field label="First name" value={form.firstName || ""} onChange={update("firstName")} required />
                 <Field label="Middle name (optional)" value={form.middleName || ""} onChange={update("middleName")} />
@@ -1240,16 +1576,26 @@ function Participants({ canManage, user }) {
                   onChange={update("dateOfBirth")}
                   required={form.participantType === "sponsored_child"}
                 />
+                <AgeField dateOfBirth={form.dateOfBirth} />
                 <GenderSelect
                   id="edit-gender"
                   value={form.gender}
                   onChange={update("gender")}
                 />
-                <Field
-                  label="Phone"
-                  value={form.phone || ""}
-                  onChange={update("phone")}
-                />
+                {canManageSponsorship && form.participantType === "sponsored_child" && (
+                  <>
+                    <div className="col-12 col-md-6">
+                      <label className="form-label" htmlFor="edit-child-lifecycle">Child status</label>
+                      <select id="edit-child-lifecycle" className="form-select" value={normalizeSponsorLifecycle(form.lifecycle)} onChange={update("lifecycle")}>
+                        {SPONSOR_LIFECYCLE.map(({ value, label }) => <option value={value} key={value}>{label}</option>)}
+                      </select>
+                      <small className="participant-status-description">
+                        {SPONSOR_LIFECYCLE.find(({ value }) => value === normalizeSponsorLifecycle(form.lifecycle))?.description}
+                      </small>
+                    </div>
+                    <Field label="Monthly allowance (PHP)" type="number" min="0" max="1000000" step="0.01" value={form.monthlyAllowance ?? "0"} onChange={update("monthlyAllowance")} />
+                  </>
+                )}
                 <Field
                   label="Address"
                   value={form.address || ""}
@@ -1348,30 +1694,10 @@ function Participants({ canManage, user }) {
                       onChange={update("emergencyContactPhone")}
                     />
                     <Field
-                      label="Sponsor name"
-                      value={form.sponsorName || ""}
-                      onChange={update("sponsorName")}
-                    />
-                    <Field
-                      label="Sponsor contact"
-                      value={form.sponsorContact || ""}
-                      onChange={update("sponsorContact")}
-                    />
-                    <Field
-                      label="Sponsorship type"
-                      value={form.sponsorshipType || ""}
-                      onChange={update("sponsorshipType")}
-                    />
-                    <Field
                       label="Enrollment date"
                       type="date"
                       value={(form.enrollmentDate || "").slice(0, 10)}
                       onChange={update("enrollmentDate")}
-                    />
-                    <Field
-                      label="Program affiliation"
-                      value={form.programAffiliation || ""}
-                      onChange={update("programAffiliation")}
                     />
                     <Field
                       label="New portal passcode (optional)"
@@ -1393,29 +1719,18 @@ function Participants({ canManage, user }) {
               <button className="btn btn-dark mt-4">
                 Save participant changes →
               </button>
-              <button type="button" className="btn btn-link text-secondary mt-4 ms-2" onClick={() => setEditing(false)}>
+              <button type="button" className="btn btn-link text-secondary mt-4 ms-2" onClick={() => { setEditing(false); setMessage(""); }}>
                 Cancel
               </button>
               {message && (
                 <div className="alert alert-info mt-3 mb-0">{message}</div>
               )}
             </form>
-          ) : (
-            <div className="empty-art surface">
-              <span className="tile-icon">↗</span>
-              <h2>
-                Select a participant
-                <br />
-                to begin editing.
-              </h2>
-              <p>
-                Personal information stays protected while authorized staff keep
-                records current.
-              </p>
-            </div>
           )}
-        </div>
-      </div>
+            </section>
+          </div>,
+          document.body,
+        )}
       {showRegistration && (
         <Register
           onClose={() => setShowRegistration(false)}
@@ -1738,6 +2053,9 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [proof, setProof] = useState(null);
+  const [updates, setUpdates] = useState([]);
+  const [loadingUpdates, setLoadingUpdates] = useState(false);
+  const [updatesLoaded, setUpdatesLoaded] = useState(false);
   const selectedThread = threads.find((thread) => Number(thread.id) === Number(threadId));
 
   const loadThreads = useCallback(async () => {
@@ -1819,36 +2137,52 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "Could not load receipt proof.");
-      setProof({ ...data, name: record.description || `Receipt for ${record.disbursedOn}` });
+      setProof({ ...data, name: `Receipt for ${record.disbursedOn}` });
     } catch (proofError) {
       setError(proofError.message);
     }
   };
 
+  const loadUpdates = async () => {
+    if (updatesLoaded || loadingUpdates) return;
+    setLoadingUpdates(true);
+    setError("");
+    try {
+      const response = await fetch(`${api}/public/sponsor-updates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ qrPayload, passcode }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Could not load your child's updates.");
+      setUpdates(data.updates || []);
+      setUpdatesLoaded(true);
+    } catch (loadError) {
+      setError(loadError.message);
+    } finally {
+      setLoadingUpdates(false);
+    }
+  };
+
   return (
     <div className="guardian-sponsored-details">
-      <div className="public-status">
-        <span>Sponsorship status</span>
-        <strong>{String(child.lifecycle || child.sponsorStatus).replaceAll("_", " ")}</strong>
-      </div>
       <div className="guardian-portal-tabs" role="tablist" aria-label="Sponsored child information">
-        <button type="button" className={section === "allowance" ? "active" : ""} role="tab" aria-selected={section === "allowance"} onClick={() => setSection("allowance")}>Allowance & gifts</button>
+        <button type="button" className={section === "allowance" ? "active" : ""} role="tab" aria-selected={section === "allowance"} onClick={() => setSection("allowance")}>Allowance &amp; gifts</button>
+        <button type="button" className={section === "updates" ? "active" : ""} role="tab" aria-selected={section === "updates"} onClick={() => { setSection("updates"); loadUpdates(); }}>Updates</button>
         <button type="button" className={section === "letters" ? "active" : ""} role="tab" aria-selected={section === "letters"} onClick={() => setSection("letters")}>Letters {threads.length > 0 && <span>{threads.length}</span>}</button>
       </div>
       {error && <div className="alert alert-danger mt-3" role="alert">{error}</div>}
       {section === "allowance" ? (
         <section className="guardian-allowance-section">
-          <div className="guardian-allowance-amount"><span>Monthly allowance</span><strong>{formatCurrency(child.monthlyAllowance)}</strong></div>
           <h3 className="public-attendance-title">Allowance and gifts</h3>
           {child.disbursements?.length ? (
             <div className="table-responsive">
               <table className="table align-middle">
-                <thead><tr><th>Date</th><th>Amount</th><th>Note</th><th>Proof</th></tr></thead>
+                <thead><tr><th>Date</th><th>Amount</th><th>Proof</th></tr></thead>
                 <tbody>{child.disbursements.map((record) => (
                   <tr key={record.id}>
                     <td>{new Date(record.disbursedOn).toLocaleDateString()}</td>
                     <td>{formatCurrency(record.amount)}</td>
-                    <td>{record.description || "—"}</td>
                     <td>{record.hasReceipt ? <button className="btn btn-sm btn-outline-primary" onClick={() => viewReceipt(record)}>View receipt</button> : "—"}</td>
                   </tr>
                 ))}</tbody>
@@ -1862,27 +2196,82 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
             </div>
           )}
         </section>
+      ) : section === "updates" ? (
+        <section className="guardian-updates-section">
+          <div className="guardian-updates-heading">
+            <div>
+              <h3>Growth &amp; activity</h3>
+              <p>Measurements, activities attended, and care notes recorded for {child.name}.</p>
+            </div>
+          </div>
+          {loadingUpdates ? (
+            <p role="status">Loading updates...</p>
+          ) : updates.length ? (
+            <div className="guardian-update-list">
+              {updates.map((update) => (
+                <article className={`guardian-update-card update-${update.type}`} key={update.id}>
+                  <div className="guardian-update-icon" aria-hidden="true">
+                    {update.type === "growth" ? "✦" : update.type === "activity" ? "▣" : "✎"}
+                  </div>
+                  <div className="guardian-update-body">
+                    <div className="guardian-update-top">
+                      <strong>{update.type === "growth" ? "Growth measurement" : update.type === "activity" ? "Activity attended" : "Care note"}</strong>
+                      <time>{new Date(`${update.recordedOn}T00:00:00`).toLocaleDateString()}</time>
+                    </div>
+                    {update.type === "growth" && (update.heightCm || update.weightKg) && (
+                      <div className="guardian-update-metrics">
+                        {update.heightCm && <span className="metric-height">{update.heightCm} cm</span>}
+                        {update.weightKg && <span className="metric-weight">{update.weightKg} kg</span>}
+                      </div>
+                    )}
+                    {update.type === "activity" && update.activity && (
+                      <p className="guardian-update-activity">{update.activity}</p>
+                    )}
+                    {update.note && <p className="guardian-update-note">{update.note}</p>}
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="text-secondary">No growth, activity, or care updates recorded yet.</p>
+          )}
+        </section>
       ) : (
         <section className="guardian-letters-section">
-          <div className="guardian-letter-list">
-            {loadingLetters ? <p role="status">Loading your letters...</p> : threads.map((thread) => (
-              <button type="button" className={`sponsorship-thread-row ${Number(threadId) === Number(thread.id) ? "selected" : ""}`} key={thread.id} onClick={() => setThreadId(thread.id)}>
-                <strong>{thread.subject}</strong><span>{thread.status}</span><small>{new Date(thread.updated_at).toLocaleDateString()}</small>
-              </button>
-            ))}
-            {!loadingLetters && !threads.length && <p className="text-secondary">No letters yet. Send a message to get started.</p>}
-          </div>
-          {selectedThread && (
-            <div className="guardian-thread-conversation">
-              <h3>{selectedThread.subject}</h3>
-              <div className="sponsorship-messages">{selectedThread.messages.map((entry) => (
-                <div className={`sponsorship-message ${entry.sender_type}`} key={entry.id}>
-                  <span>{entry.sender_type === "staff" ? "Church staff" : "You"} · {new Date(entry.created_at).toLocaleString()}</span>
-                  <p>{entry.message}</p>
-                </div>
-              ))}</div>
+          <div className="guardian-letters-heading">
+            <div>
+              <h3>Letters</h3>
+              <p>View past messages with the church, or write a new letter.</p>
             </div>
-          )}
+            <button type="button" className="guardian-new-letter-btn" onClick={() => setThreadId(null)}>
+              <span aria-hidden="true">✉</span> New letter
+            </button>
+          </div>
+          <div className="guardian-letters-body">
+            <div className="guardian-letter-list">
+              {loadingLetters ? <p role="status">Loading your letters...</p> : threads.map((thread) => (
+                <button type="button" className={`sponsorship-thread-row ${Number(threadId) === Number(thread.id) ? "selected" : ""}`} key={thread.id} onClick={() => setThreadId(thread.id)}>
+                  <strong>{thread.subject}</strong><span>{thread.status}</span><small>{new Date(thread.updated_at).toLocaleDateString()}{thread.messages?.length ? ` · ${thread.messages.length} message${thread.messages.length === 1 ? "" : "s"}` : ""}</small>
+                </button>
+              ))}
+              {!loadingLetters && !threads.length && <p className="text-secondary">No letters yet. Send a message to get started.</p>}
+            </div>
+            {selectedThread ? (
+              <div className="guardian-thread-conversation">
+                <h3>{selectedThread.subject}</h3>
+                <div className="sponsorship-messages">{selectedThread.messages.map((entry) => (
+                  <div className={`sponsorship-message ${entry.sender_type}`} key={entry.id}>
+                    <span>{entry.sender_type === "staff" ? "Church staff" : "You"} · {new Date(entry.created_at).toLocaleString()}</span>
+                    <p>{entry.message}</p>
+                  </div>
+                ))}</div>
+              </div>
+            ) : (
+              !loadingLetters && threads.length > 0 && (
+                <div className="guardian-no-selection">Select a letter on the left to view past messages, or tap <strong>New letter</strong> to write one.</div>
+              )
+            )}
+          </div>
           <form className="guardian-letter-form" onSubmit={sendLetter}>
             <div className="sponsor-letter-paper">
               <header className="sponsor-letter-paper-header">
@@ -1896,6 +2285,9 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
                 </div>
               </header>
               <div className="sponsor-letter-paper-title">
+                <span className={`guardian-letter-mode ${selectedThread && selectedThread.status !== "closed" ? "mode-reply" : "mode-new"}`}>
+                  {selectedThread && selectedThread.status !== "closed" ? "Reply to thread" : "New letter for your child"}
+                </span>
                 <h3>Mensahe para sa aking sponsor</h3>
                 <p>(A message to my sponsor)</p>
               </div>
@@ -2114,7 +2506,11 @@ function Scanner({ portal = false, user = null }) {
               <strong>{profile.phone || "Not provided"}</strong>
             </div>
             <div>
-              <small>Gender</small>
+              <small>Age</small>
+              <strong><AgeValue dateOfBirth={profile.dateOfBirth} /></strong>
+            </div>
+            <div>
+              <small>Sex</small>
               <strong>{profile.gender || "Not provided"}</strong>
             </div>
             <div>
@@ -2322,6 +2718,8 @@ function Events({ canManage }) {
   const [createPhotoError, setCreatePhotoError] = useState("");
   const [uploadPhotoError, setUploadPhotoError] = useState("");
   const [message, setMessage] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [savingEvent, setSavingEvent] = useState(false);
   const [form, setForm] = useState({ name: "", description: "", startsAt: "", endsAt: "", location: "" });
   const createPhotoInput = useRef(null);
   const modalPhotoInput = useRef(null);
@@ -2331,15 +2729,19 @@ function Events({ canManage }) {
     load();
   }, []);
   useEffect(() => {
-    if (!selected) return undefined;
+    if (!selected && !showCreate) return undefined;
     const closeOnEscape = (event) => {
-      if (event.key === "Escape") setSelected(null);
+      if (event.key === "Escape") {
+        if (showCreate) setShowCreate(false);
+        else setSelected(null);
+      }
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [selected]);
+  }, [selected, showCreate]);
   const create = async (event) => {
     event.preventDefault();
+    setSavingEvent(true);
     try {
       const validationError = validatePhotoSelection(newEventPhotos);
       if (validationError) {
@@ -2352,9 +2754,11 @@ function Events({ canManage }) {
       setNewEventPhotos([]);
       setCreatePhotoError("");
       if (createPhotoInput.current) createPhotoInput.current.value = "";
+      setShowCreate(false);
       setMessage("Event schedule created.");
       await load();
     } catch (error) { setMessage(error.message); }
+    finally { setSavingEvent(false); }
   };
   const viewAttendance = async (id) => {
     setSelected({ id, name: events.find((item) => item.id === id)?.name || "Event" });
@@ -2426,51 +2830,118 @@ function Events({ canManage }) {
   };
   const upcoming = events.filter((item) => new Date(item.starts_at) >= new Date());
   const past = events.filter((item) => new Date(item.starts_at) < new Date());
-  const EventRow = ({ item }) => (
-    <div className="risk-row">
-      <div><strong>{item.name}</strong><small>{new Date(item.starts_at).toLocaleString()} {item.location ? `· ${item.location}` : ""}</small></div>
-      <button className="btn btn-sm btn-outline-dark" onClick={() => viewAttendance(item.id)}>View attendance</button>
-    </div>
-  );
+  const EventCard = ({ item }) => {
+    const starts = new Date(item.starts_at);
+    const day = starts.getDate();
+    const month = starts.toLocaleString(undefined, { month: "short" });
+    const startTime = starts.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    return (
+      <article className="event-card">
+        <div className="event-card-date">
+          <strong>{day}</strong>
+          <span>{month}</span>
+        </div>
+        <div className="event-card-body">
+          <strong>{item.name}</strong>
+          <small>{startTime}{item.location ? ` · ${item.location}` : ""}</small>
+          {item.description && <p>{item.description}</p>}
+          {item.photo_count > 0 && <span className="event-card-photos">{item.photo_count} photo{item.photo_count === 1 ? "" : "s"}</span>}
+        </div>
+        <button className="btn btn-sm btn-outline-dark event-card-btn" onClick={() => viewAttendance(item.id)}>View attendance</button>
+      </article>
+    );
+  };
   return <>
     <Title e="EVENTS / SCHEDULE" t="Plan every gathering." d="Create event schedules and review attendance from completed events." />
-    <div className="row g-4">
-      {canManage && <div className="col-12 col-lg-5">
-        <form className="surface form-surface" onSubmit={create}>
-          <h2 className="mb-3">Create event</h2>
-          <Field label="Event name" value={form.name} onChange={update("name")} required />
-          <Field label="Location" value={form.location} onChange={update("location")} />
-          <Field label="Starts" type="datetime-local" value={form.startsAt} onChange={update("startsAt")} required />
-          <Field label="Ends" type="datetime-local" value={form.endsAt} onChange={update("endsAt")} />
-          <div className="mb-3"><label className="form-label">Description</label><textarea className="form-control" rows="3" value={form.description} onChange={update("description")} /></div>
-          <div className="mb-3">
-            <label className="form-label" htmlFor="event-photos">Event photos (optional, up to 5)</label>
-            <input
-              ref={createPhotoInput}
-              id="event-photos"
-              className="form-control"
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              multiple
-              onChange={(event) => {
-                const files = Array.from(event.target.files || []);
-                setCreatePhotoError(validatePhotoSelection(files));
-                setNewEventPhotos(files);
-              }}
-            />
-            <small className="text-secondary">JPG, PNG, or WebP · up to 4 MB each, 15 MB total</small>
-            {newEventPhotos.length > 0 && <div className="event-selected-files">{newEventPhotos.map((file) => <span key={`${file.name}-${file.lastModified}`}>{file.name}</span>)}</div>}
-            {createPhotoError && <div className="alert alert-danger mt-2 mb-0" role="alert">{createPhotoError}</div>}
-          </div>
-          <button className="btn btn-dark">Save event schedule →</button>
-          {message && <div className="alert alert-info mt-3 mb-0">{message}</div>}
-        </form>
-      </div>}
-      <div className={canManage ? "col-12 col-lg-7" : "col-12"}>
-        <div className="surface table-surface events-list-surface"><h2>Upcoming events</h2>{upcoming.length ? upcoming.map((item) => <EventRow item={item} key={item.id} />) : <p className="text-secondary py-3">No upcoming events.</p>}</div>
-        <div className="surface table-surface events-list-surface mt-4"><h2>Past events</h2>{past.length ? past.map((item) => <EventRow item={item} key={item.id} />) : <p className="text-secondary py-3">No past events.</p>}</div>
+    {message && (
+      <div className="alert alert-info d-flex justify-content-between align-items-center" role="status">
+        <span>{message}</span>
+        <button type="button" className="btn-close" aria-label="Dismiss message" onClick={() => setMessage("")} />
       </div>
+    )}
+    <div className="events-toolbar">
+      <div>
+        <h2>Event schedule</h2>
+        <p>{events.length} event{events.length === 1 ? "" : "s"} · {upcoming.length} upcoming</p>
+      </div>
+      {canManage && (
+        <button type="button" className="event-create-btn" onClick={() => setShowCreate(true)}>
+          <span className="event-create-btn-icon" aria-hidden="true">＋</span> Create event
+        </button>
+      )}
     </div>
+    <div className="events-grid">
+      <section className="events-column">
+        <div className="events-column-heading"><h3>Upcoming events</h3><span>{upcoming.length}</span></div>
+        {upcoming.length ? upcoming.map((item) => <EventCard item={item} key={item.id} />) : <div className="events-empty">No upcoming events.</div>}
+      </section>
+      <section className="events-column">
+        <div className="events-column-heading"><h3>Past events</h3><span>{past.length}</span></div>
+        {past.length ? past.map((item) => <EventCard item={item} key={item.id} />) : <div className="events-empty">No past events.</div>}
+      </section>
+    </div>
+    {showCreate && createPortal(
+      <div className="event-modal-backdrop" onMouseDown={(event) => {
+        if (event.target === event.currentTarget) setShowCreate(false);
+      }}>
+        <section className="event-modal event-create-modal" role="dialog" aria-modal="true" aria-labelledby="event-create-title">
+          <header className="event-modal-header">
+            <div>
+              <span className="eyebrow">EVENT SCHEDULE / NEW</span>
+              <h2 id="event-create-title">Create event</h2>
+              <p>Add a new gathering to the church schedule.</p>
+            </div>
+            <button type="button" className="btn-close" aria-label="Close create event" onClick={() => setShowCreate(false)} />
+          </header>
+          <form className="event-create-form" onSubmit={create}>
+            <div className="event-create-field">
+              <label className="form-label" htmlFor="event-create-name">Event name</label>
+              <input id="event-create-name" className="form-control" required value={form.name} onChange={update("name")} />
+            </div>
+            <div className="event-create-field">
+              <label className="form-label" htmlFor="event-create-location">Location</label>
+              <input id="event-create-location" className="form-control" value={form.location} onChange={update("location")} />
+            </div>
+            <div className="event-create-field">
+              <label className="form-label" htmlFor="event-create-starts">Starts</label>
+              <input id="event-create-starts" className="form-control" type="datetime-local" required value={form.startsAt} onChange={update("startsAt")} />
+            </div>
+            <div className="event-create-field">
+              <label className="form-label" htmlFor="event-create-ends">Ends</label>
+              <input id="event-create-ends" className="form-control" type="datetime-local" value={form.endsAt} onChange={update("endsAt")} />
+            </div>
+            <div className="event-create-full">
+              <label className="form-label" htmlFor="event-create-description">Description</label>
+              <textarea id="event-create-description" className="form-control" rows="3" value={form.description} onChange={update("description")} />
+            </div>
+            <div className="event-create-full">
+              <label className="form-label" htmlFor="event-create-photos">Event photos (optional, up to 5)</label>
+              <input
+                ref={createPhotoInput}
+                id="event-create-photos"
+                className="form-control"
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                multiple
+                onChange={(event) => {
+                  const files = Array.from(event.target.files || []);
+                  setCreatePhotoError(validatePhotoSelection(files));
+                  setNewEventPhotos(files);
+                }}
+              />
+              <small className="text-secondary">JPG, PNG, or WebP · up to 4 MB each, 15 MB total</small>
+              {newEventPhotos.length > 0 && <div className="event-selected-files">{newEventPhotos.map((file) => <span key={`${file.name}-${file.lastModified}`}>{file.name}</span>)}</div>}
+              {createPhotoError && <div className="alert alert-danger mt-2 mb-0" role="alert">{createPhotoError}</div>}
+            </div>
+            <div className="event-create-actions">
+              <button type="button" className="btn btn-outline-secondary" onClick={() => setShowCreate(false)}>Cancel</button>
+              <button className="btn btn-dark" type="submit" disabled={savingEvent}>{savingEvent ? "Saving…" : "Save event schedule"}</button>
+            </div>
+          </form>
+        </section>
+      </div>,
+      document.body,
+    )}
     {selected && createPortal(
       <div className="event-modal-backdrop" onMouseDown={(event) => {
         if (event.target === event.currentTarget) setSelected(null);
@@ -2556,149 +3027,723 @@ function Events({ canManage }) {
     )}
   </>;
 }
-function Analytics() {
-  const [rows, setRows] = useState([]);
-  const [filter, setFilter] = useState("all");
+function Analytics({ user }) {
+  const canExportReports = canAccessPermission("reports:view", user);
+  const canViewSponsorship = canAccessPermission("sponsorship:view", user);
+  const isSystemAdmin = String(user?.role).toLowerCase() === "system administrator";
+  const dateInput = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const defaultRangeStart = new Date();
+  defaultRangeStart.setDate(defaultRangeStart.getDate() - 89);
+  const [from, setFrom] = useState(dateInput(defaultRangeStart));
+  const [to, setTo] = useState(dateInput(new Date()));
+  const [participantType, setParticipantType] = useState("all");
+  const [overview, setOverview] = useState(null);
+  const [overviewLoading, setOverviewLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [trendInterval, setTrendInterval] = useState("week");
+  const [trendEvent, setTrendEvent] = useState("");
+  const [trends, setTrends] = useState([]);
+  const [trendEvents, setTrendEvents] = useState([]);
+  const [trendsLoading, setTrendsLoading] = useState(true);
+  const trendCanvas = useRef(null);
   const [validation, setValidation] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState("");
-  const canvas = useRef(null);
+  const [riskRows, setRiskRows] = useState([]);
+  const [riskLevel, setRiskLevel] = useState("all");
+  const [riskLoading, setRiskLoading] = useState(true);
+  const [sponsoredFilters, setSponsoredFilters] = useState({ educationLevel: "", gradeLevel: "", sponsorshipStatus: "", riskLevel: "" });
+  const [sponsoredRows, setSponsoredRows] = useState([]);
+  const [sponsoredLoading, setSponsoredLoading] = useState(true);
+  const [history, setHistory] = useState(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [reportType, setReportType] = useState("attendance");
+  const [reportFormat, setReportFormat] = useState("csv");
+  const [reportPassword, setReportPassword] = useState("");
+  const [exportParticipantId, setExportParticipantId] = useState("");
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const [decryptFile, setDecryptFile] = useState(null);
+  const [decryptPassword, setDecryptPassword] = useState("");
+  const [decryptBusy, setDecryptBusy] = useState(false);
+  const [decryptError, setDecryptError] = useState("");
+  const [decryptMessage, setDecryptMessage] = useState("");
+
   useEffect(() => {
     let mounted = true;
-    Promise.all([
-      apiCall("/risk-scores"),
-      apiCall("/risk-scores/validation"),
-    ])
-      .then(([riskScores, validationReport]) => {
-        if (!mounted) return;
-        setRows(riskScores);
-        setValidation(validationReport);
-      })
-      .catch((loadError) => {
-        if (mounted) setError(loadError.message);
-      });
+    setOverviewLoading(true);
+    apiCall(`/analytics/overview?from=${from}&to=${to}&participantType=${participantType}`)
+      .then((data) => { if (mounted) setOverview(data); })
+      .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
+      .finally(() => { if (mounted) setOverviewLoading(false); });
     return () => { mounted = false; };
-  }, []);
-  const refreshModel = async () => {
-    setRefreshing(true);
-    setError("");
-    try {
-      const report = await apiCall("/risk-scores/refresh", { method: "POST" });
-      setValidation(report.validation);
-      setRows(await apiCall("/risk-scores"));
-    } catch (refreshError) {
-      setError(refreshError.message);
-    } finally {
-      setRefreshing(false);
-    }
-  };
-  let data = rows.filter((r) => filter === "all" || r.risk_level === filter);
+  }, [from, to, participantType]);
+
   useEffect(() => {
-    if (!canvas.current) return;
-    let c = new Chart(canvas.current, {
-      type: "bar",
+    let mounted = true;
+    setTrendsLoading(true);
+    apiCall(`/analytics/trends?from=${from}&to=${to}&participantType=${participantType}&interval=${trendInterval}&event=${encodeURIComponent(trendEvent)}`)
+      .then((data) => {
+        if (!mounted) return;
+        setTrends(data.records || []);
+        setTrendEvents(data.events || []);
+      })
+      .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
+      .finally(() => { if (mounted) setTrendsLoading(false); });
+    return () => { mounted = false; };
+  }, [from, to, participantType, trendInterval, trendEvent]);
+
+  useEffect(() => {
+    let mounted = true;
+    setRiskLoading(true);
+    apiCall(`/analytics/risk?riskLevel=${riskLevel}`)
+      .then((data) => { if (mounted) setRiskRows(data.records || []); })
+      .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
+      .finally(() => { if (mounted) setRiskLoading(false); });
+    return () => { mounted = false; };
+  }, [riskLevel]);
+
+  useEffect(() => {
+    let mounted = true;
+    setSponsoredLoading(true);
+    Promise.all([
+      apiCall("/risk-scores/validation"),
+      ...(canViewSponsorship ? [apiCall(`/analytics/sponsored-children?educationLevel=${encodeURIComponent(sponsoredFilters.educationLevel)}&gradeLevel=${encodeURIComponent(sponsoredFilters.gradeLevel)}&sponsorshipStatus=${encodeURIComponent(sponsoredFilters.sponsorshipStatus)}&riskLevel=${sponsoredFilters.riskLevel}`)] : []),
+    ])
+      .then(([validationReport, sponsored]) => {
+        if (!mounted) return;
+        setValidation(validationReport);
+        if (canViewSponsorship && sponsored) setSponsoredRows(sponsored.records || []);
+      })
+      .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
+      .finally(() => { if (mounted) setSponsoredLoading(false); });
+    return () => { mounted = false; };
+  }, [canViewSponsorship, sponsoredFilters.educationLevel, sponsoredFilters.gradeLevel, sponsoredFilters.sponsorshipStatus, sponsoredFilters.riskLevel]);
+
+  useEffect(() => {
+    if (!history && !historyLoading) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") {
+        setHistory(null);
+        setHistoryLoading(false);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [history, historyLoading]);
+
+  useEffect(() => {
+    if (!trendCanvas.current || trends.length === 0) return;
+    const chart = new Chart(trendCanvas.current, {
+      type: "line",
       data: {
-        labels: data.slice(0, 10).map((r) => r.participant_id),
+        labels: trends.map((row) => row.label),
         datasets: [
           {
-            data: data.slice(0, 10).map((r) => r.risk_score),
-            backgroundColor: "#e7794f",
+            label: "Sponsored children",
+            data: trends.map((row) => row.sponsoredCheckIns),
+            borderColor: "#0d5c9e",
+            backgroundColor: "rgba(13,92,158,.14)",
+            fill: true,
+            tension: 0.3,
+            pointRadius: 2,
+          },
+          {
+            label: "Church goers",
+            data: trends.map((row) => row.goerCheckIns),
+            borderColor: "#75a84c",
+            backgroundColor: "rgba(117,168,76,.14)",
+            fill: true,
+            tension: 0.3,
+            pointRadius: 2,
           },
         ],
       },
       options: {
         responsive: true,
-        plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true, max: 100 } },
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: { legend: { position: "bottom" } },
+        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
       },
     });
-    return () => c.destroy();
-  }, [data]);
+    return () => chart.destroy();
+  }, [trends]);
+
+  const handleFromChange = (value) => {
+    setFrom(value);
+    if (value && to && value > to) setTo(value);
+  };
+  const handleToChange = (value) => {
+    setTo(value);
+    if (value && from && value < from) setFrom(value);
+  };
+
+  const refreshModel = async () => {
+    setRefreshing(true);
+    setLoadError("");
+    try {
+      const report = await apiCall("/risk-scores/refresh", { method: "POST" });
+      setValidation(report.validation);
+      const riskData = await apiCall(`/analytics/risk?riskLevel=${riskLevel}`);
+      setRiskRows(riskData.records || []);
+    } catch (refreshError) {
+      setLoadError(refreshError.message);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const openHistory = async (participantId) => {
+    setHistory(null);
+    setHistoryLoading(true);
+    try {
+      const data = await apiCall(`/analytics/participants/${participantId}/history`);
+      setHistory(data);
+    } catch (historyError) {
+      setLoadError(historyError.message);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const trendTotals = trends.reduce((acc, row) => ({
+    totalCheckIns: acc.totalCheckIns + row.totalCheckIns,
+    sponsoredCheckIns: acc.sponsoredCheckIns + row.sponsoredCheckIns,
+    goerCheckIns: acc.goerCheckIns + row.goerCheckIns,
+  }), { totalCheckIns: 0, sponsoredCheckIns: 0, goerCheckIns: 0 });
+
+  const downloadReport = async () => {
+    setExportBusy(true);
+    setExportError("");
+    try {
+      const params = new URLSearchParams({ format: reportFormat });
+      if (reportPassword) params.set("password", reportPassword);
+      let path = "";
+      if (reportType === "attendance") {
+        params.set("from", from);
+        params.set("to", to);
+        params.set("participantType", participantType);
+        params.set("interval", trendInterval);
+        if (trendEvent) params.set("event", trendEvent);
+        path = "analytics-attendance";
+      } else if (reportType === "at-risk") {
+        params.set("riskLevel", riskLevel);
+        path = "at-risk";
+      } else if (reportType === "participant-history") {
+        if (!exportParticipantId) {
+          setExportError("Select a participant to export.");
+          setExportBusy(false);
+          return;
+        }
+        params.set("participantId", exportParticipantId);
+        path = "participant-history";
+      } else {
+        if (from) params.set("from", from);
+        if (to) params.set("to", to);
+        path = "audit-trail";
+      }
+      const response = await fetch(`${api}/reports/${path}?${params.toString()}`, { headers: { Authorization: `Bearer ${localStorage.token}` } });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Could not generate the report.");
+      }
+      const blob = await response.blob();
+      const extension = reportPassword ? "enc" : reportFormat;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${reportType}-${new Date().toISOString().slice(0, 10)}.${extension}`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (exportError) {
+      setExportError(exportError.message);
+    } finally {
+      setExportBusy(false);
+    }
+  };
+
+  const decryptExport = async () => {
+    if (!decryptFile || !decryptPassword) return;
+    setDecryptBusy(true);
+    setDecryptError("");
+    setDecryptMessage("");
+    try {
+      const payload = JSON.parse(await decryptFile.text());
+      if (payload.format !== "church-analytics-encrypted-export" || payload.version !== 1) {
+        throw new Error("This file is not an encrypted analytics export.");
+      }
+      const keyMaterial = await window.crypto.subtle.importKey("raw", new TextEncoder().encode(decryptPassword), "PBKDF2", false, ["deriveKey"]);
+      const key = await window.crypto.subtle.deriveKey(
+        { name: "PBKDF2", salt: Uint8Array.from(atob(payload.salt), (char) => char.charCodeAt(0)), iterations: 100000, hash: "SHA-256" },
+        keyMaterial,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["decrypt"],
+      );
+      const ciphertext = Uint8Array.from(atob(payload.ciphertext), (char) => char.charCodeAt(0));
+      const tag = Uint8Array.from(atob(payload.authTag), (char) => char.charCodeAt(0));
+      const combined = new Uint8Array(ciphertext.length + tag.length);
+      combined.set(ciphertext);
+      combined.set(tag, ciphertext.length);
+      const decrypted = await window.crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: Uint8Array.from(atob(payload.iv), (char) => char.charCodeAt(0)), tagLength: 128 },
+        key,
+        combined,
+      );
+      const content = new TextDecoder().decode(decrypted);
+      const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = decryptFile.name.replace(/\.enc$/i, ".txt");
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setDecryptMessage("Export decrypted and downloaded.");
+    } catch (decryptError) {
+      setDecryptError(decryptError.message.includes("not an encrypted") ? decryptError.message : "Decryption failed. Check the password and the selected file.");
+    } finally {
+      setDecryptBusy(false);
+    }
+  };
+
+  const educationOptions = [...new Set(sponsoredRows.map((row) => row.educationLevel).filter(Boolean))].sort();
+  const gradeOptions = [...new Set(sponsoredRows.map((row) => row.gradeLevel).filter(Boolean))].sort();
+  const riskFilterOptions = [["all", "All levels"], ["high", "High"], ["medium", "Medium"], ["low", "Low"]];
+  const sponsorshipStatusOptions = [["all", "Any status"], ["active", "Active"], ["on_hold", "On hold"], ["withdrawn", "Withdrawn"], ["completed", "Completed"], ["graduated", "Graduated"], ["deceased", "Deceased"], ["new", "New"]];
   return (
     <>
       <Title
-        e="ATTENDANCE ANALYTICS"
-        t="Review attendance patterns."
-        d="The system tests whether attendance history predicts a 30-day inactivity outcome. Predictions remain labeled unvalidated unless the chronological holdout passes the published data and metric gates."
+        e="ANALYTICS / INSIGHTS"
+        t="Understand participation."
+        d="Live attendance trends, predictive risk, and sponsored-child analytics built from actual records. Risk scores are decision-support information and always require staff review."
       />
-      <section className={`alert ${validation?.status === "validated" ? "alert-success" : "alert-warning"}`} role="status">
-        <div className="d-flex flex-wrap justify-content-between align-items-start gap-3">
-          <div>
-            <strong>
-              {validation?.status === "validated"
-                ? "Temporal evaluation passed"
-                : validation?.status === "insufficient_or_failed"
-                  ? "Predictions are not validated"
-                  : "No evaluation has been recorded"}
-            </strong>
-            <p className="mb-1 mt-2">{validation?.target || "Outcome: no attendance check-in in the 30 days after a score date."}</p>
-            {validation?.evaluatedAt && (
-              <small>Last evaluated {new Date(validation.evaluatedAt).toLocaleString()}</small>
-            )}
-          </div>
-          <button className="btn btn-dark" type="button" disabled={refreshing} onClick={refreshModel}>
-            {refreshing ? "Evaluating history…" : "Evaluate and refresh scores"}
-          </button>
+      {loadError && (
+        <div className="alert alert-danger d-flex justify-content-between align-items-center" role="alert">
+          <span>{loadError}</span>
+          <button type="button" className="btn-close" aria-label="Dismiss error" onClick={() => setLoadError("")} />
         </div>
-        {error && <p className="mb-0 mt-3" role="alert">{error}</p>}
-        {validation?.metrics && validation?.baseline && (
-          <div className="mt-3">
-            <strong>Held-out results</strong>
-            <p className="mb-1">
-              Training: {validation.counts.trainingExamples} snapshots from {validation.counts.trainingParticipants} participants · test: {validation.counts.testExamples} snapshots from {validation.counts.testParticipants} participants
-              ({validation.counts.testPositive} inactive, {validation.counts.testNegative} attended).
-            </p>
-            <p className="mb-1">
-              PR-AUC {validation.metrics.prAuc} vs prevalence baseline {validation.baseline.prevalence} ·
-              Brier {validation.metrics.brierScore} vs baseline {validation.baseline.brierScore} ·
-              calibration error {validation.metrics.expectedCalibrationError} vs baseline {validation.baseline.expectedCalibrationError}.
-            </p>
-            <small>
-              {validation.evaluationMethod}. A passing retrospective evaluation is not a guarantee of future accuracy; review results with staff and never use scores as the sole basis for decisions about a child.
-            </small>
+      )}
+
+      <section className="surface analytics-section">
+        <div className="analytics-section-heading">
+          <div>
+            <h2>Overview</h2>
+            <p className="analytics-section-sub">Live statistics for the selected range and participant group.</p>
           </div>
-        )}
-        {validation?.reasons?.length > 0 && (
-          <ul className="mb-0 mt-3">
-            {validation.reasons.map((reason) => <li key={reason}>{reason}</li>)}
-          </ul>
+          <div className="analytics-filters">
+            <div className="analytics-filter-field">
+              <label className="form-label" htmlFor="analytics-from">From</label>
+              <input id="analytics-from" className="form-control" type="date" value={from} onChange={(event) => handleFromChange(event.target.value)} />
+            </div>
+            <div className="analytics-filter-field">
+              <label className="form-label" htmlFor="analytics-to">To</label>
+              <input id="analytics-to" className="form-control" type="date" value={to} onChange={(event) => handleToChange(event.target.value)} />
+            </div>
+            <div className="analytics-filter-field">
+              <label className="form-label" htmlFor="analytics-type">Participant type</label>
+              <select id="analytics-type" className="form-select" value={participantType} onChange={(event) => setParticipantType(event.target.value)}>
+                <option value="all">All participants</option>
+                <option value="sponsored_child">Sponsored children</option>
+                <option value="goer">Church goers</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div className="analytics-stat-grid">
+          <div className="analytics-stat-card">
+            <span className="analytics-stat-label">Total participants</span>
+            <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? formatCount(overview.totalParticipants) : "0")}</strong>
+            <span className="analytics-stat-sub">Active in the selected scope</span>
+          </div>
+          <div className="analytics-stat-card">
+            <span className="analytics-stat-label">Attendance rate</span>
+            <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? `${Number(overview.attendanceRate) || 0}%` : "0%")}</strong>
+            <span className="analytics-stat-sub">Unique participants who attended</span>
+          </div>
+          <div className="analytics-stat-card">
+            <span className="analytics-stat-label">Recorded check-ins</span>
+            <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? formatCount(overview.totalCheckIns) : "0")}</strong>
+            <span className="analytics-stat-sub">In the selected range</span>
+          </div>
+          <div className="analytics-stat-card analytics-stat-alert">
+            <span className="analytics-stat-label">At-risk sponsored children</span>
+            <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? formatCount(overview.atRiskChildren) : "0")}</strong>
+            <span className="analytics-stat-sub">Medium or high predictive risk</span>
+          </div>
+        </div>
+        {overview && (
+          <div className="analytics-split">
+            <div className="analytics-split-item">
+              <strong>{formatCount(overview?.sponsored?.checkIns)}</strong>
+              <span>Sponsored-child check-ins ({formatCount(overview?.sponsored?.uniqueParticipants)} unique)</span>
+            </div>
+            <div className="analytics-split-item">
+              <strong>{formatCount(overview?.goers?.checkIns)}</strong>
+              <span>Church goer check-ins ({formatCount(overview?.goers?.uniqueParticipants)} unique)</span>
+            </div>
+          </div>
         )}
       </section>
-      <div className="filter-bar btn-group">
-        {["all", "high", "medium", "low"].map((x) => (
-          <button
-            key={x}
-            className={`btn ${filter === x ? "btn-dark" : "btn-outline-secondary"}`}
-            onClick={() => setFilter(x)}
-          >
-            {x}
-          </button>
-        ))}
-      </div>
-      <div className="row g-4">
-        <div className="col-12 col-lg-7">
-          <div className="surface chart-surface">
-            <canvas ref={canvas} />
+
+      <section className="surface analytics-section">
+        <div className="analytics-section-heading">
+          <div>
+            <h2>Attendance trends</h2>
+            <p className="analytics-section-sub">Daily, weekly, monthly, and yearly attendance comparing sponsored children and church goers.</p>
+          </div>
+          <div className="analytics-filters">
+            <div className="analytics-filter-field">
+              <label className="form-label" htmlFor="analytics-interval">Interval</label>
+              <select id="analytics-interval" className="form-select" value={trendInterval} onChange={(event) => setTrendInterval(event.target.value)}>
+                <option value="day">Daily</option>
+                <option value="week">Weekly</option>
+                <option value="month">Monthly</option>
+                <option value="year">Yearly</option>
+              </select>
+            </div>
+            <div className="analytics-filter-field">
+              <label className="form-label" htmlFor="analytics-event">Event</label>
+              <select id="analytics-event" className="form-select" value={trendEvent} onChange={(event) => setTrendEvent(event.target.value)}>
+                <option value="">All events</option>
+                {trendEvents.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
+            </div>
           </div>
         </div>
-        <div className="col-12 col-lg-5">
-          <div className="surface table-surface">
-            <h2>Attendance indicator register</h2>
-            {data.map((r, i) => (
-              <div className="risk-row" key={i}>
-                <div>
-                  <strong>Participant #{r.participant_id}</strong>
-                  <small>{r.model_version}</small>
-                </div>
-                <Badge level={r.risk_level} />
-                <strong className="risk-score">
-                  {Number(r.risk_score).toFixed(0)}
-                </strong>
+        {trendsLoading ? (
+          <div className="analytics-empty">Loading attendance trends…</div>
+        ) : trends.length === 0 ? (
+          <div className="analytics-empty">No attendance records found for the selected filters.</div>
+        ) : (
+          <>
+            <div className="analytics-trend-summary">
+              <div><strong>{formatCount(trendTotals.totalCheckIns)}</strong><span>Total attendance</span></div>
+              <div><strong>{overview ? formatCount(overview.uniqueParticipants) : "—"}</strong><span>Unique participants</span></div>
+              <div><strong>{formatCount(trendTotals.sponsoredCheckIns)}</strong><span>Sponsored-child check-ins</span></div>
+              <div><strong>{formatCount(trendTotals.goerCheckIns)}</strong><span>Church goer check-ins</span></div>
+            </div>
+            <div className="analytics-chart-wrap">
+              <canvas ref={trendCanvas} />
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="surface analytics-section">
+        <div className="analytics-section-heading">
+          <div>
+            <h2>Predictive participation</h2>
+            <p className="analytics-section-sub">Risk scores from attendance frequency, regularity, and recency. Decision-support only — never a sole basis for decisions about a child.</p>
+          </div>
+          <div className="analytics-filters">
+            <div className="analytics-filter-field">
+              <label className="form-label" htmlFor="analytics-risk-level">Risk level</label>
+              <select id="analytics-risk-level" className="form-select" value={riskLevel} onChange={(event) => setRiskLevel(event.target.value)}>
+                {riskFilterOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </div>
+            <button className="btn btn-dark" type="button" disabled={refreshing} onClick={refreshModel}>
+              {refreshing ? "Evaluating history…" : "Evaluate and refresh scores"}
+            </button>
+          </div>
+        </div>
+        <section className={`alert ${validation?.status === "validated" ? "alert-success" : "alert-warning"}`} role="status">
+          <div className="d-flex flex-wrap justify-content-between align-items-start gap-3">
+            <div>
+              <strong>
+                {validation?.status === "validated"
+                  ? "Temporal evaluation passed"
+                  : validation?.status === "insufficient_or_failed"
+                    ? "Predictions are not validated"
+                    : "No evaluation has been recorded"}
+              </strong>
+              <p className="mb-1 mt-2">{validation?.target || "Outcome: no attendance check-in in the 30 days after a score date."}</p>
+              {validation?.evaluatedAt && (
+                <small>Last evaluated {new Date(validation.evaluatedAt).toLocaleString()}</small>
+              )}
+            </div>
+          </div>
+          {validation?.metrics && validation?.baseline && validation?.counts && (
+            <div className="mt-3">
+              <strong>Held-out results</strong>
+              <p className="mb-1">
+                Training: {validation.counts.trainingExamples} snapshots from {validation.counts.trainingParticipants} participants · test: {validation.counts.testExamples} snapshots from {validation.counts.testParticipants} participants
+                ({validation.counts.testPositive} inactive, {validation.counts.testNegative} attended).
+              </p>
+              <p className="mb-1">
+                PR-AUC {validation.metrics.prAuc} vs prevalence baseline {validation.baseline.prevalence} ·
+                Brier {validation.metrics.brierScore} vs baseline {validation.baseline.brierScore} ·
+                calibration error {validation.metrics.expectedCalibrationError} vs baseline {validation.baseline.expectedCalibrationError}.
+              </p>
+              <small>
+                {validation.evaluationMethod}. A passing retrospective evaluation is not a guarantee of future accuracy; review results with staff and never use scores as the sole basis for decisions about a child.
+              </small>
+            </div>
+          )}
+          {validation?.reasons?.length > 0 && (
+            <ul className="mb-0 mt-3">
+              {validation.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+            </ul>
+          )}
+        </section>
+        {riskLoading ? (
+          <div className="analytics-empty">Loading risk scores…</div>
+        ) : riskRows.length === 0 ? (
+          <div className="analytics-empty">No predictive risk records found for the selected level. Evaluate and refresh scores to generate them.</div>
+        ) : (
+          <div className="analytics-table-wrap">
+            <table className="analytics-table">
+              <thead>
+                <tr>
+                  <th>Participant</th>
+                  <th>Type</th>
+                  <th>Score</th>
+                  <th>Level</th>
+                  <th>Trend</th>
+                  <th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {riskRows.map((row) => (
+                  <tr key={row.participantId}>
+                    <td>
+                      <strong>{row.participantCode}</strong>
+                      {row.gradeLevel && <small>{row.gradeLevel}</small>}
+                    </td>
+                    <td>{row.participantType === "sponsored_child" ? "Sponsored child" : "Church goer"}</td>
+                    <td><strong>{Number(row.riskScore).toFixed(0)}</strong></td>
+                    <td><Badge level={row.riskLevel} /></td>
+                    <td>
+                      <span className={`trend-badge trend-${row.trend}`}>{row.trend === "unknown" ? "Unknown" : row.trend}</span>
+                    </td>
+                    <td>
+                      {row.insufficientData ? (
+                        <span className="insufficient-badge">Insufficient data</span>
+                      ) : (
+                        <span className="evidence-text" title={row.summary}>{row.summary}</span>
+                      )}
+                      {!row.insufficientData && (
+                        <small className="evidence-meta">
+                          {row.checkInsPerWeek}/week · {row.regularity}% regularity · last check-in {row.recencyDays}d ago · {row.modelVersion}
+                        </small>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {canViewSponsorship && (
+        <section className="surface analytics-section">
+          <div className="analytics-section-heading">
+            <div>
+              <h2>Sponsored-child analytics</h2>
+              <p className="analytics-section-sub">Participation trends and attendance summaries for each sponsored child, with education-year, grade-level, and sponsorship filters.</p>
+            </div>
+            <div className="analytics-filters">
+              <div className="analytics-filter-field">
+                <label className="form-label" htmlFor="sponsored-education">Education year</label>
+                <select id="sponsored-education" className="form-select" value={sponsoredFilters.educationLevel} onChange={(event) => setSponsoredFilters({ ...sponsoredFilters, educationLevel: event.target.value })}>
+                  <option value="">All education years</option>
+                  {educationOptions.map((level) => <option key={level} value={level}>{level}</option>)}
+                </select>
               </div>
-            ))}
+              <div className="analytics-filter-field">
+                <label className="form-label" htmlFor="sponsored-grade">Grade level</label>
+                <select id="sponsored-grade" className="form-select" value={sponsoredFilters.gradeLevel} onChange={(event) => setSponsoredFilters({ ...sponsoredFilters, gradeLevel: event.target.value })}>
+                  <option value="">All grade levels</option>
+                  {gradeOptions.map((grade) => <option key={grade} value={grade}>{grade}</option>)}
+                </select>
+              </div>
+              <div className="analytics-filter-field">
+                <label className="form-label" htmlFor="sponsored-status">Sponsorship status</label>
+                <select id="sponsored-status" className="form-select" value={sponsoredFilters.sponsorshipStatus} onChange={(event) => setSponsoredFilters({ ...sponsoredFilters, sponsorshipStatus: event.target.value })}>
+                  {sponsorshipStatusOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              </div>
+              <div className="analytics-filter-field">
+                <label className="form-label" htmlFor="sponsored-risk">Risk level</label>
+                <select id="sponsored-risk" className="form-select" value={sponsoredFilters.riskLevel} onChange={(event) => setSponsoredFilters({ ...sponsoredFilters, riskLevel: event.target.value })}>
+                  {riskFilterOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
+          {sponsoredLoading ? (
+            <div className="analytics-empty">Loading sponsored-child analytics…</div>
+          ) : sponsoredRows.length === 0 ? (
+            <div className="analytics-empty">No sponsored children match the selected filters.</div>
+          ) : (
+            <div className="analytics-table-wrap">
+              <table className="analytics-table">
+                <thead>
+                  <tr>
+                    <th>Child</th>
+                    <th>Education</th>
+                    <th>Grade</th>
+                    <th>Sponsorship</th>
+                    <th>Check-ins</th>
+                    <th>Last attended</th>
+                    <th>Risk</th>
+                    <th aria-label="Actions" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {sponsoredRows.map((row) => (
+                    <tr key={row.id}>
+                      <td>
+                        <strong>{row.name}</strong>
+                        <small>{row.participantCode}</small>
+                      </td>
+                      <td>{row.educationLevel || "—"}</td>
+                      <td>{row.gradeLevel || "—"}</td>
+                      <td><span className="status-pill">{row.sponsorshipLifecycle}</span></td>
+                      <td>{formatCount(row.checkInCount)}</td>
+                      <td>{row.lastCheckIn ? new Date(row.lastCheckIn).toLocaleDateString() : "Never"}</td>
+                      <td>{row.riskScore === null ? <span className="insufficient-badge">Not scored</span> : <Badge level={row.riskLevel} />}</td>
+                      <td>
+                        <button className="btn btn-sm btn-outline-dark" type="button" onClick={() => openHistory(row.id)}>History</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {canExportReports && (
+        <section className="surface analytics-section">
+          <div className="analytics-section-heading">
+            <div>
+              <h2>Reports and export</h2>
+              <p className="analytics-section-sub">Download attendance summaries, participation histories, at-risk lists, and the system audit trail. Exports respect role-based permissions and can be password-encrypted.</p>
+            </div>
+            <div className="analytics-filters">
+              <div className="analytics-filter-field">
+                <label className="form-label" htmlFor="report-type">Report</label>
+                <select id="report-type" className="form-select" value={reportType} onChange={(event) => setReportType(event.target.value)}>
+                  <option value="attendance">Attendance summary</option>
+                  <option value="at-risk">At-risk participant list</option>
+                  <option value="participant-history">Individual participation history</option>
+                  {isSystemAdmin && <option value="audit-trail">System audit trail</option>}
+                </select>
+              </div>
+              <div className="analytics-filter-field">
+                <label className="form-label" htmlFor="report-format">Format</label>
+                <select id="report-format" className="form-select" value={reportFormat} onChange={(event) => setReportFormat(event.target.value)}>
+                  <option value="csv">CSV</option>
+                  <option value="pdf">PDF</option>
+                </select>
+              </div>
+              {reportType === "participant-history" && (
+                <div className="analytics-filter-field">
+                  <label className="form-label" htmlFor="report-participant">Participant</label>
+                  {canViewSponsorship && sponsoredRows.length > 0 ? (
+                    <select id="report-participant" className="form-select" value={exportParticipantId} onChange={(event) => setExportParticipantId(event.target.value)}>
+                      <option value="">Select a child</option>
+                      {sponsoredRows.map((row) => <option key={row.id} value={row.id}>{row.name} ({row.participantCode})</option>)}
+                    </select>
+                  ) : (
+                    <input id="report-participant" className="form-control" type="number" min="1" value={exportParticipantId} onChange={(event) => setExportParticipantId(event.target.value)} placeholder="Participant ID" />
+                  )}
+                </div>
+              )}
+              <div className="analytics-filter-field">
+                <label className="form-label" htmlFor="report-password">Password (optional)</label>
+                <input id="report-password" className="form-control" type="password" value={reportPassword} onChange={(event) => setReportPassword(event.target.value)} placeholder="Encrypt the export" />
+              </div>
+              <div className="analytics-filter-field analytics-filter-action">
+                <label className="form-label" aria-hidden="true">Download</label>
+                <button className="btn btn-dark" type="button" disabled={exportBusy} onClick={downloadReport}>
+                  {exportBusy ? "Preparing…" : `Download ${reportFormat.toUpperCase()}`}
+                </button>
+              </div>
+            </div>
+          </div>
+          {exportError && <div className="alert alert-danger" role="alert">{exportError}</div>}
+          <div className="analytics-export-note">
+            {reportType === "attendance" && `Uses the selected range (${from} to ${to}), participant type, interval, and event filters.`}
+            {reportType === "at-risk" && `Includes participant codes, risk scores, and supporting evidence for ${riskLevel === "all" ? "all risk levels" : `${riskLevel} risk`}.`}
+            {reportType === "participant-history" && "Includes one participant's complete check-in history with names, events, locations, and check-out times."}
+            {reportType === "audit-trail" && "System audit trail is restricted to System Administrators and includes the 5,000 most recent entries."}
+            {reportPassword ? "This export will be encrypted with AES-256-GCM (PBKDF2-derived key) and downloaded as a .enc file." : "Leave the password blank to download an unencrypted file."}
+          </div>
+          <div className="analytics-decrypt">
+            <div className="analytics-decrypt-copy">
+              <h3>Decrypt an encrypted export</h3>
+              <p>Choose a .enc file and enter the password used to encrypt it. The decrypted report downloads as a text file.</p>
+            </div>
+            <div className="analytics-decrypt-controls">
+              <input className="form-control" type="file" accept=".enc,application/json" onChange={(event) => setDecryptFile(event.target.files?.[0] || null)} />
+              <input className="form-control" type="password" value={decryptPassword} onChange={(event) => setDecryptPassword(event.target.value)} placeholder="Export password" />
+              <button className="btn btn-outline-dark" type="button" disabled={decryptBusy || !decryptFile || !decryptPassword} onClick={decryptExport}>
+                {decryptBusy ? "Decrypting…" : "Decrypt export"}
+              </button>
+            </div>
+            {decryptError && <div className="alert alert-danger mt-2 mb-0" role="alert">{decryptError}</div>}
+            {decryptMessage && <div className="alert alert-success mt-2 mb-0" role="status">{decryptMessage}</div>}
+          </div>
+        </section>
+      )}
+
+      {(history || historyLoading) && createPortal(
+        <div className="participant-modal-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setHistory(null);
+            setHistoryLoading(false);
+          }
+        }}>
+          <section className="participant-modal history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title">
+            <header className="participant-modal-header">
+              <div>
+                <span className="eyebrow">PARTICIPANT / ATTENDANCE HISTORY</span>
+                <h2 id="history-title">{history ? history.participant.name : "Attendance history"}</h2>
+                <p>{history ? `${history.participant.participantCode} · ${history.participant.participantType === "sponsored_child" ? "Sponsored child" : "Church goer"}${history.participant.gradeLevel ? ` · ${history.participant.gradeLevel}` : ""}` : "Loading attendance history…"}</p>
+              </div>
+              <button type="button" className="btn-close" aria-label="Close attendance history" onClick={() => { setHistory(null); setHistoryLoading(false); }} />
+            </header>
+            {historyLoading ? (
+              <div className="analytics-empty">Loading attendance history…</div>
+            ) : history && (
+              <>
+                <div className="analytics-trend-summary">
+                  <div><strong>{formatCount(history?.summary?.totalCheckIns)}</strong><span>Total check-ins</span></div>
+                  <div><strong>{formatCount(history?.summary?.uniqueEvents)}</strong><span>Unique events</span></div>
+                  <div><strong>{history.summary.lastCheckIn ? new Date(history.summary.lastCheckIn).toLocaleDateString() : "—"}</strong><span>Last check-in</span></div>
+                  <div><strong>{history.summary.firstCheckIn ? new Date(history.summary.firstCheckIn).toLocaleDateString() : "—"}</strong><span>First check-in</span></div>
+                </div>
+                <div className="analytics-table-wrap analytics-history-table">
+                  <table className="analytics-table">
+                    <thead>
+                      <tr>
+                        <th>Checked in</th>
+                        <th>Event</th>
+                        <th>Location</th>
+                        <th>Checked out</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {history.attendance.map((row, index) => (
+                        <tr key={`${row.checkedInAt}-${index}`}>
+                          <td>{row.checkedInAt ? new Date(row.checkedInAt).toLocaleString() : "—"}</td>
+                          <td>{row.eventName}</td>
+                          <td>{row.location || "—"}</td>
+                          <td>{row.checkedOutAt ? new Date(row.checkedOutAt).toLocaleString() : <span className="text-secondary">Not checked out</span>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </section>
+        </div>,
+        document.body,
+      )}
     </>
   );
 }
@@ -2908,7 +3953,6 @@ function AuditHistory() {
     </>
   );
 }
-const SPONSOR_LIFECYCLE = ["new", "active", "deceased", "graduated"];
 const formatCurrency = (value) => new Intl.NumberFormat(undefined, {
   style: "currency",
   currency: "PHP",
@@ -2922,14 +3966,23 @@ function SponsoredCare({ user }) {
   const canViewUpdates = !isGoer && canAccessPermission("sponsorship:view", user);
   const [children, setChildren] = useState([]);
   const [letters, setLetters] = useState([]);
+  const [sponsors, setSponsors] = useState([]);
+  const [showCreateSponsor, setShowCreateSponsor] = useState(false);
+  const [sponsorForm, setSponsorForm] = useState({ familyName: "", sex: "", sponsorType: "" });
+  const [sponsorFormError, setSponsorFormError] = useState("");
+  const [sponsorFieldErrors, setSponsorFieldErrors] = useState({});
+  const [creatingSponsor, setCreatingSponsor] = useState(false);
   const [selectedChildId, setSelectedChildId] = useState(null);
+  const disbursementRequestRef = useRef(null);
+  const disbursementSubmissionRef = useRef(false);
+  const [savingDisbursement, setSavingDisbursement] = useState(false);
   const [disbursements, setDisbursements] = useState([]);
+  const [allowanceTransactions, setAllowanceTransactions] = useState([]);
+  const [allowanceAmount, setAllowanceAmount] = useState("");
+  const [allowanceAction, setAllowanceAction] = useState("add");
   const [childUpdates, setChildUpdates] = useState([]);
   const [staffProof, setStaffProof] = useState(null);
-  const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("active");
-  const [monthlyAllowance, setMonthlyAllowance] = useState("0");
   const [gift, setGift] = useState({ careType: "allowance", amount: "", disbursedOn: new Date().toISOString().slice(0, 10), description: "", receiptData: "" });
   const [childUpdate, setChildUpdate] = useState({
     type: "growth",
@@ -2947,14 +4000,24 @@ function SponsoredCare({ user }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [showChildModal, setShowChildModal] = useState(false);
+  const [activeAction, setActiveAction] = useState(null);
+  const [showAllowanceEditor, setShowAllowanceEditor] = useState(false);
+  const [monthlyAllowanceDraft, setMonthlyAllowanceDraft] = useState("");
+  const [savingAllowance, setSavingAllowance] = useState(false);
 
   useEffect(() => {
     let mounted = true;
-    Promise.all([apiCall("/sponsorship/children"), apiCall("/sponsorship/letters")])
-      .then(([childRows, letterRows]) => {
+    Promise.all([
+      apiCall("/sponsorship/children"),
+      apiCall("/sponsorship/letters"),
+      canManage ? apiCall("/sponsorship/sponsors") : Promise.resolve([]),
+    ])
+      .then(([childRows, letterRows, sponsorRows]) => {
         if (!mounted) return;
         setChildren(childRows);
         setLetters(letterRows);
+        setSponsors(sponsorRows);
       })
       .catch((loadError) => {
         if (mounted) setError(loadError.message);
@@ -2963,30 +4026,112 @@ function SponsoredCare({ user }) {
         if (mounted) setLoading(false);
       });
     return () => { mounted = false; };
-  }, []);
+  }, [canManage]);
+
+  const createSponsor = async (event) => {
+    event.preventDefault();
+    setSponsorFieldErrors({});
+    setSponsorFormError("");
+    setError("");
+    setCreatingSponsor(true);
+    try {
+      const { sponsor } = await apiCall("/sponsorship/sponsors", {
+        method: "POST",
+        body: JSON.stringify(sponsorForm),
+      });
+      setSponsors((current) => [sponsor, ...current]);
+      setSponsorForm({ familyName: "", sex: "", sponsorType: "" });
+      setShowCreateSponsor(false);
+      setMessage("Sponsor created.");
+    } catch (saveError) {
+      setError(saveError.message);
+      setSponsorFormError(saveError.message);
+      setSponsorFieldErrors(saveError.errors || {});
+    } finally {
+      setCreatingSponsor(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!showCreateSponsor) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape" && !creatingSponsor) setShowCreateSponsor(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [creatingSponsor, showCreateSponsor]);
 
   const selectChild = async (child) => {
     setSelectedChildId(child.id);
-    setStatus(child.lifecycle);
-    setMonthlyAllowance(String(child.monthlyAllowance));
+    setShowChildModal(true);
+    setActiveAction(null);
+    setShowAllowanceEditor(false);
+    setMonthlyAllowanceDraft(String(child.monthlyAllowance ?? 0));
     setDisbursements([]);
+    setAllowanceTransactions([]);
     setChildUpdates([]);
     setStaffProof(null);
     setSelectedThreadId(null);
     setError("");
     try {
-      const [records, updates] = await Promise.all([
+      const [records, updates, transactions] = await Promise.all([
         apiCall(`/sponsorship/children/${child.id}/disbursements`),
         canViewUpdates
           ? apiCall(`/sponsorship/children/${child.id}/updates`)
           : Promise.resolve([]),
+        canViewUpdates
+          ? apiCall(`/sponsorship/children/${child.id}/allowance-transactions`)
+          : Promise.resolve([]),
       ]);
       setDisbursements(records);
       setChildUpdates(updates);
+      setAllowanceTransactions(transactions);
     } catch (loadError) {
       setError(loadError.message);
     }
   };
+
+  const saveMonthlyAllowance = async (event) => {
+    event.preventDefault();
+    if (!selectedChildId) return;
+    const amount = Number(monthlyAllowanceDraft);
+    if (!Number.isFinite(amount) || amount < 0 || amount > 1000000) {
+      setError("Monthly allowance must be between 0 and 1,000,000.");
+      return;
+    }
+    setSavingAllowance(true);
+    setError("");
+    setMessage("");
+    try {
+      await apiCall(`/sponsorship/children/${selectedChildId}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          lifecycle: normalizeSponsorLifecycle(selectedChild?.lifecycle) || "active",
+          monthlyAllowance: amount,
+        }),
+      });
+      setChildren((current) => current.map((child) => (child.id === selectedChildId
+        ? { ...child, monthlyAllowance: amount }
+        : child)));
+      setMessage(`Monthly allowance set to ${formatCurrency(amount)}.`);
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setSavingAllowance(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!showChildModal && !activeAction) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") {
+        if (activeAction) setActiveAction(null);
+        else setShowChildModal(false);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [showChildModal, activeAction]);
 
   const addChildUpdate = async (event) => {
     event.preventDefault();
@@ -3006,51 +4151,86 @@ function SponsoredCare({ user }) {
         note: "",
       });
       setChildUpdates(await apiCall(`/sponsorship/children/${selectedChildId}/updates`));
+      setActiveAction(null);
       setMessage("Sponsored child update recorded.");
     } catch (saveError) {
       setError(saveError.message);
     }
   };
 
-  const saveChild = async (event) => {
+  const recordDisbursement = async (event) => {
     event.preventDefault();
+    if (!selectedChildId) return;
+    if (allowanceAction === "deduct" && !window.confirm("Confirm deducting this amount from the child’s available balance?")) return;
+    if (disbursementSubmissionRef.current) return;
+    disbursementSubmissionRef.current = true;
+    setSavingDisbursement(true);
     setError("");
     setMessage("");
     try {
-      const saved = await apiCall(`/sponsorship/children/${selectedChildId}`, {
-        method: "PUT",
-        body: JSON.stringify({ lifecycle: status, monthlyAllowance }),
-      });
-      setChildren((previous) => previous.map((child) => child.id === selectedChildId
-        ? { ...child, lifecycle: saved.lifecycle, monthlyAllowance: saved.monthlyAllowance }
-        : child));
-      setMessage("Sponsored child details updated.");
-    } catch (saveError) {
-      setError(saveError.message);
-    }
-  };
-
-  const addGift = async (event) => {
-    event.preventDefault();
-    setError("");
-    setMessage("");
-    try {
-      await apiCall(`/sponsorship/children/${selectedChildId}/${isGoer ? "care-records" : "disbursements"}`, {
-        method: "POST",
-        body: JSON.stringify(isGoer
-          ? {
-            careType: gift.careType,
-            amount: gift.amount,
-            recordedOn: gift.disbursedOn,
-            description: gift.description,
-            receiptData: gift.receiptData,
-          }
-          : gift),
-      });
+      let result;
+      if (allowanceAction === "add") {
+        result = await apiCall(`/sponsorship/children/${selectedChildId}/allowance-transactions`, {
+          method: "POST",
+          body: JSON.stringify({ type: "add", amount: allowanceAmount }),
+        });
+        setChildren((current) => current.map((child) => child.id === selectedChildId
+          ? { ...child, availableBalance: result.transaction.updatedBalance }
+          : child));
+      } else {
+        const requestFingerprint = JSON.stringify([
+          selectedChildId,
+          allowanceAmount,
+          gift.disbursedOn,
+          gift.receiptData,
+        ]);
+        let idempotencyKey;
+        if (disbursementRequestRef.current?.fingerprint === requestFingerprint) {
+          idempotencyKey = disbursementRequestRef.current.key;
+        } else {
+          idempotencyKey = window.crypto.randomUUID();
+          disbursementRequestRef.current = { fingerprint: requestFingerprint, key: idempotencyKey };
+        }
+        result = await apiCall(`/sponsorship/children/${selectedChildId}/disbursements`, {
+          method: "POST",
+          body: JSON.stringify({ amount: allowanceAmount, disbursedOn: gift.disbursedOn, receiptData: gift.receiptData, idempotencyKey }),
+        });
+        setChildren((current) => current.map((child) => child.id === selectedChildId
+          ? { ...child, availableBalance: result.updatedBalance }
+          : child));
+        setDisbursements(await apiCall(`/sponsorship/children/${selectedChildId}/disbursements`));
+        disbursementRequestRef.current = null;
+      }
+      setAllowanceTransactions(await apiCall(`/sponsorship/children/${selectedChildId}/allowance-transactions`));
+      setAllowanceAmount("");
+      setAllowanceAction("add");
       setGift({ careType: "allowance", amount: "", disbursedOn: new Date().toISOString().slice(0, 10), description: "", receiptData: "" });
       setReceiptName("");
-      setDisbursements(await apiCall(`/sponsorship/children/${selectedChildId}/disbursements`));
-      setMessage(isGoer ? "Received gift or allowance recorded." : "Allowance/gift and receipt proof recorded.");
+      setActiveAction(null);
+      setMessage(allowanceAction === "add"
+        ? `Allowance added. Updated balance: ${formatCurrency(result.transaction.updatedBalance)}.`
+        : `Sponsorship disbursement of ${formatCurrency(result.amount)} recorded. Updated balance: ${formatCurrency(result.updatedBalance)}.`);
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      disbursementSubmissionRef.current = false;
+      setSavingDisbursement(false);
+    }
+  };
+  const reverseAllowanceTransaction = async (transaction) => {
+    if (!window.confirm("Create a reversal transaction? The original transaction will remain in the audit history.")) return;
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiCall(
+        `/sponsorship/children/${selectedChildId}/allowance-transactions/${transaction.id}/reverse`,
+        { method: "POST" },
+      );
+      setChildren((current) => current.map((child) => child.id === selectedChildId
+        ? { ...child, availableBalance: result.transaction.updatedBalance }
+        : child));
+      setAllowanceTransactions(await apiCall(`/sponsorship/children/${selectedChildId}/allowance-transactions`));
+      setMessage(`Reversal recorded. Updated balance: ${formatCurrency(result.transaction.updatedBalance)}.`);
     } catch (saveError) {
       setError(saveError.message);
     }
@@ -3081,6 +4261,7 @@ function SponsoredCare({ user }) {
       });
       setReply("");
       await refreshLetters();
+      setActiveAction(null);
       setMessage(isGoer ? "Reply sent to the sponsor." : "Reply sent to the guardian.");
     } catch (replyError) {
       setError(replyError.message);
@@ -3100,6 +4281,7 @@ function SponsoredCare({ user }) {
       setLetterMessage("");
       await refreshLetters();
       setSelectedThreadId(result.threadId);
+      setActiveAction(null);
       setMessage("Letter sent to the sponsor.");
     } catch (letterError) {
       setError(letterError.message);
@@ -3117,7 +4299,6 @@ function SponsoredCare({ user }) {
     }
   };
   const visibleChildren = children.filter((child) =>
-    (filter === "all" || child.lifecycle === filter) &&
     `${child.name} ${child.participantCode}`.toLowerCase().includes(query.toLowerCase()),
   );
   const selectedChild = children.find((child) => child.id === selectedChildId);
@@ -3125,10 +4306,6 @@ function SponsoredCare({ user }) {
     Number(thread.id) === Number(selectedThreadId) &&
     Number(thread.participantId) === Number(selectedChildId),
   );
-  const lifecycleCounts = SPONSOR_LIFECYCLE.reduce((counts, lifecycle) => {
-    counts[lifecycle] = children.filter((child) => child.lifecycle === lifecycle).length;
-    return counts;
-  }, {});
   const selectedChildInitials = selectedChild?.name
     .split(/\s+/)
     .filter(Boolean)
@@ -3156,17 +4333,108 @@ function SponsoredCare({ user }) {
       </section>
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
       {message && <div className="alert alert-success" role="status">{message}</div>}
-      {!isGoer && <div className="sponsorship-summary-grid">
-        <button className={`sponsorship-summary-card summary-all${filter === "all" ? " selected" : ""}`} onClick={() => setFilter("all")}>
-          <span><i aria-hidden="true">♡</i><span>All children</span></span><strong>{children.length}</strong>
-        </button>
-        {SPONSOR_LIFECYCLE.map((lifecycle) => (
-          <button key={lifecycle} className={`sponsorship-summary-card summary-${lifecycle}${filter === lifecycle ? " selected" : ""}`} onClick={() => setFilter(filter === lifecycle ? "all" : lifecycle)}>
-            <span><i aria-hidden="true">{lifecycle === "active" ? "●" : lifecycle === "new" ? "✦" : lifecycle === "graduated" ? "↗" : "♡"}</i><span>{lifecycle}</span></span>
-            <strong>{lifecycleCounts[lifecycle]}</strong>
-          </button>
-        ))}
-      </div>}
+      {canManage && (
+        <section className="surface sponsorship-directory-panel">
+          <div className="sponsorship-list-heading">
+            <div>
+              <span className="sponsorship-section-eyebrow">SPONSOR DIRECTORY</span>
+              <h2>Sponsors</h2>
+            </div>
+            <button type="button" className="btn btn-dark" onClick={() => {
+              setError("");
+              setSponsorFormError("");
+              setSponsorFieldErrors({});
+              setShowCreateSponsor(true);
+            }}>+ Create sponsor</button>
+          </div>
+          {sponsors.length ? (
+            <div className="sponsorship-sponsor-list">
+              {sponsors.map((sponsor) => (
+                <article className="sponsorship-sponsor-card" key={sponsor.id}>
+                  <span className="sponsorship-child-avatar" aria-hidden="true">
+                    {sponsor.familyName.trim().slice(0, 1).toUpperCase()}
+                  </span>
+                  <div>
+                    <strong>{sponsor.familyName}</strong>
+                    <small>{sponsor.sponsorType} · {sponsor.sex}</small>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="text-secondary mb-0">No sponsors have been created yet.</p>
+          )}
+        </section>
+      )}
+      {showCreateSponsor && createPortal((
+        <div className="participant-modal-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !creatingSponsor) setShowCreateSponsor(false);
+        }}>
+          <section className="participant-modal sponsor-create-modal" role="dialog" aria-modal="true" aria-labelledby="create-sponsor-title">
+            <header className="participant-modal-header">
+              <div>
+                <span className="eyebrow">SPONSOR DIRECTORY / NEW RECORD</span>
+                <h2 id="create-sponsor-title">Create a sponsor</h2>
+                <p>Add a sponsor profile to the care directory.</p>
+              </div>
+              <button type="button" className="btn-close" aria-label="Close sponsor form" disabled={creatingSponsor} onClick={() => setShowCreateSponsor(false)} />
+            </header>
+            <form className="sponsor-create-form" onSubmit={createSponsor}>
+              {sponsorFormError && <div className="alert alert-danger mb-0" role="alert">{sponsorFormError}</div>}
+              <div>
+                <label className="form-label" htmlFor="sponsor-family-name">Family name <span aria-hidden="true">*</span></label>
+                <input
+                  id="sponsor-family-name"
+                  className={`form-control${sponsorFieldErrors.familyName ? " is-invalid" : ""}`}
+                  value={sponsorForm.familyName}
+                  onChange={(event) => setSponsorForm((current) => ({ ...current, familyName: event.target.value }))}
+                  maxLength={100}
+                  required
+                  aria-invalid={sponsorFieldErrors.familyName ? "true" : undefined}
+                />
+                {sponsorFieldErrors.familyName && <div className="invalid-feedback d-block">{sponsorFieldErrors.familyName}</div>}
+              </div>
+              <div>
+                <label className="form-label" htmlFor="sponsor-sex">Sex <span aria-hidden="true">*</span></label>
+                <select
+                  id="sponsor-sex"
+                  className={`form-select${sponsorFieldErrors.sex ? " is-invalid" : ""}`}
+                  value={sponsorForm.sex}
+                  onChange={(event) => setSponsorForm((current) => ({ ...current, sex: event.target.value }))}
+                  required
+                  aria-invalid={sponsorFieldErrors.sex ? "true" : undefined}
+                >
+                  <option value="">Select sex</option>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                </select>
+                {sponsorFieldErrors.sex && <div className="invalid-feedback d-block">{sponsorFieldErrors.sex}</div>}
+              </div>
+              <div>
+                <label className="form-label" htmlFor="sponsor-type">Type of sponsor <span aria-hidden="true">*</span></label>
+                <select
+                  id="sponsor-type"
+                  className={`form-select${sponsorFieldErrors.sponsorType ? " is-invalid" : ""}`}
+                  value={sponsorForm.sponsorType}
+                  onChange={(event) => setSponsorForm((current) => ({ ...current, sponsorType: event.target.value }))}
+                  required
+                  aria-invalid={sponsorFieldErrors.sponsorType ? "true" : undefined}
+                >
+                  <option value="">Select sponsor type</option>
+                  <option value="Individual">Individual</option>
+                  <option value="Family">Family</option>
+                  <option value="Couple">Couple</option>
+                </select>
+                {sponsorFieldErrors.sponsorType && <div className="invalid-feedback d-block">{sponsorFieldErrors.sponsorType}</div>}
+              </div>
+              <footer className="sponsor-create-footer">
+                <button type="button" className="btn btn-outline-secondary" disabled={creatingSponsor} onClick={() => setShowCreateSponsor(false)}>Cancel</button>
+                <button type="submit" className="btn btn-dark" disabled={creatingSponsor}>{creatingSponsor ? "Creating…" : "Create sponsor"}</button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      ), document.body)}
       <div className="sponsorship-workspace">
         <section className="surface sponsorship-child-list">
           <div className="sponsorship-list-heading">
@@ -3177,218 +4445,168 @@ function SponsoredCare({ user }) {
             <span aria-hidden="true">⌕</span>
             <input className="form-control" aria-label="Search sponsored children" placeholder="Find a child by name or ID" value={query} onChange={(event) => setQuery(event.target.value)} />
           </div>
-          {!isGoer && <select className="form-select mb-3" aria-label="Filter by lifecycle status" value={filter} onChange={(event) => setFilter(event.target.value)}>
-            <option value="all">All lifecycle statuses</option>
-            {SPONSOR_LIFECYCLE.map((lifecycle) => <option value={lifecycle} key={lifecycle}>{lifecycle}</option>)}
-          </select>}
           {loading ? <div className="sponsorship-loading" role="status"><span /> Loading your children...</div> : visibleChildren.map((child) => (
             <button className={`sponsorship-child-row ${Number(selectedChildId) === Number(child.id) ? "selected" : ""}`} key={child.id} onClick={() => selectChild(child)}>
               <span className="sponsorship-child-avatar" aria-hidden="true">{child.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
               <span className="sponsorship-child-copy"><strong>{child.name}</strong><small>{child.participantCode || `Child #${child.id}`}</small></span>
-              {!isGoer && <span className={`lifecycle-pill ${child.lifecycle}`}>{child.lifecycle}</span>}
               <span className="sponsorship-child-arrow" aria-hidden="true">›</span>
             </button>
           ))}
-          {!loading && !visibleChildren.length && <div className="sponsorship-no-results"><span aria-hidden="true">⌕</span><strong>No children found</strong><p>Try a different name or lifecycle filter.</p></div>}
+          {!loading && !visibleChildren.length && <div className="sponsorship-no-results"><span aria-hidden="true">⌕</span><strong>No children found</strong><p>Try a different name search.</p></div>}
         </section>
-        <section className="surface sponsorship-child-detail">
-          {!selectedChild ? (
-            <div className="sponsorship-empty">
-              <div className="sponsorship-empty-art" aria-hidden="true"><span>♡</span><i>✦</i><b>+</b></div>
-              <span className="sponsorship-section-eyebrow">A LITTLE CARE GOES A LONG WAY</span>
-              <h2>Select a child</h2>
-              <p>{isGoer ? "Choose a child in your assigned group to record a gift or allowance, or write to their sponsor." : "Choose a child to explore their school details, care history, and sponsorship journey."}</p>
-            </div>
-          ) : (
-            <>
-              <div className="sponsorship-detail-heading">
-                <div className="sponsorship-profile-summary">
-                  <span className="sponsorship-profile-avatar">{selectedChildInitials}</span>
-                  <div><span className="sponsorship-section-eyebrow">{selectedChild.participantCode || `CHILD #${selectedChild.id}`}</span><h2>{selectedChild.name}</h2><span className="sponsorship-profile-caption">{isGoer ? `Care group · ${user.goerEducationLevel}` : "Growing with a community behind them"}</span></div>
+      </div>
+      {showChildModal && selectedChild && createPortal((
+        <div className="participant-modal-backdrop child-profile-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !activeAction) setShowChildModal(false);
+        }}>
+          <section className="participant-modal child-profile-modal" role="dialog" aria-modal="true" aria-labelledby="child-profile-title">
+            <header className="participant-modal-header">
+              <div className="sponsorship-profile-summary">
+                <span className="sponsorship-profile-avatar">{selectedChildInitials}</span>
+                <div>
+                  <span className="sponsorship-section-eyebrow">{selectedChild.participantCode || `CHILD #${selectedChild.id}`}</span>
+                  <h2 id="child-profile-title">{selectedChild.name}</h2>
+                  <span className="sponsorship-profile-caption">{isGoer ? `Care group · ${user.goerEducationLevel}` : "Growing with a community behind them"}</span>
                 </div>
-                {!isGoer && <span className={`lifecycle-pill ${selectedChild.lifecycle}`}><i aria-hidden="true">●</i> {selectedChild.lifecycle}</span>}
               </div>
-                {!isGoer && <section className="sponsorship-detail-section sponsorship-school-section">
-                  <h3>School details</h3>
-                  <div className="sponsorship-school-readonly">
-                    <p><strong>School name:</strong> {selectedChild.schoolName || "Not provided"}</p>
-                    <p><strong>School address:</strong> {selectedChild.schoolAddress || "Not provided"}</p>
-                  </div>
-                </section>}
-                {canViewUpdates && <section className="sponsorship-detail-section">
-                <div className="sponsorship-list-heading">
-                  <div>
-                    <h3>Growth and activity history</h3>
-                    <span>Private notes and physical measurements are encrypted at rest.</span>
-                  </div>
-                  <span>{childUpdates.length} updates</span>
+              <button type="button" className="btn-close" aria-label="Close child profile" onClick={() => (activeAction ? setActiveAction(null) : setShowChildModal(false))} />
+            </header>
+            {!isGoer && (
+              <div className="child-profile-stats">
+                <div className="child-profile-stat">
+                  <small>Available balance</small>
+                  <strong>{formatCurrency(selectedChild.availableBalance)}</strong>
                 </div>
-                {canManage && (
-                  <form className="child-update-form" onSubmit={addChildUpdate}>
-                    <div className="row g-3">
-                      <div className="col-12 col-md-4">
-                        <label className="form-label" htmlFor="child-update-type">Update type</label>
-                        <select
-                          id="child-update-type"
-                          className="form-select"
-                          value={childUpdate.type}
-                          onChange={(event) => setChildUpdate({ ...childUpdate, type: event.target.value })}
-                        >
-                          <option value="growth">Growth measurement</option>
-                          <option value="activity">Activity attended</option>
-                          <option value="note">Care note</option>
-                        </select>
-                      </div>
-                      <div className="col-12 col-md-4">
-                        <label className="form-label" htmlFor="child-update-date">Date</label>
-                        <input
-                          id="child-update-date"
-                          className="form-control"
-                          type="date"
-                          max={new Date().toISOString().slice(0, 10)}
-                          required
-                          value={childUpdate.recordedOn}
-                          onChange={(event) => setChildUpdate({ ...childUpdate, recordedOn: event.target.value })}
-                        />
-                      </div>
-                      {childUpdate.type === "growth" && (
-                        <>
-                          <div className="col-12 col-md-4">
-                            <label className="form-label" htmlFor="child-update-height">Height (cm)</label>
-                            <input
-                              id="child-update-height"
-                              className="form-control"
-                              type="number"
-                              min="30"
-                              max="260"
-                              step="0.1"
-                              value={childUpdate.heightCm}
-                              onChange={(event) => setChildUpdate({ ...childUpdate, heightCm: event.target.value })}
-                            />
-                          </div>
-                          <div className="col-12 col-md-4">
-                            <label className="form-label" htmlFor="child-update-weight">Weight (kg)</label>
-                            <input
-                              id="child-update-weight"
-                              className="form-control"
-                              type="number"
-                              min="1"
-                              max="300"
-                              step="0.1"
-                              value={childUpdate.weightKg}
-                              onChange={(event) => setChildUpdate({ ...childUpdate, weightKg: event.target.value })}
-                            />
-                          </div>
-                        </>
-                      )}
-                      {childUpdate.type === "activity" && (
-                        <div className="col-12 col-md-8">
-                          <label className="form-label" htmlFor="child-update-activity">Activity</label>
-                          <input
-                            id="child-update-activity"
-                            className="form-control"
-                            maxLength={120}
-                            required
-                            value={childUpdate.activity}
-                            onChange={(event) => setChildUpdate({ ...childUpdate, activity: event.target.value })}
-                            placeholder="Activity or program attended"
-                          />
-                        </div>
-                      )}
-                      <div className="col-12">
-                        <label className="form-label" htmlFor="child-update-note">
-                          {childUpdate.type === "note" ? "Care note" : "Additional notes (optional)"}
-                        </label>
-                        <textarea
-                          id="child-update-note"
-                          className="form-control"
-                          rows="2"
-                          maxLength={2000}
-                          required={childUpdate.type === "note"}
-                          value={childUpdate.note}
-                          onChange={(event) => setChildUpdate({ ...childUpdate, note: event.target.value })}
-                        />
-                      </div>
-                      <div className="col-12">
-                        <button className="btn btn-dark" type="submit">Record update</button>
-                      </div>
+                <div className="child-profile-stat">
+                  <small>Monthly allowance</small>
+                  <strong>{formatCurrency(selectedChild.monthlyAllowance)}</strong>
+                </div>
+                <div className="child-profile-stat">
+                  <small>Child status</small>
+                  <strong>{sponsorLifecycleLabel(selectedChild.lifecycle)}</strong>
+                </div>
+              </div>
+            )}
+            {canManage && (
+              <div className="child-allowance-set">
+                {showAllowanceEditor ? (
+                  <form className="child-allowance-form" onSubmit={saveMonthlyAllowance}>
+                    <div className="child-allowance-field">
+                      <label className="form-label" htmlFor="child-monthly-allowance">Monthly allowance (PHP)</label>
+                      <input id="child-monthly-allowance" className="form-control" type="number" min="0" max="1000000" step="0.01" required autoFocus value={monthlyAllowanceDraft} onChange={(event) => setMonthlyAllowanceDraft(event.target.value)} />
+                    </div>
+                    <div className="child-allowance-actions">
+                      <button className="btn child-allowance-save" type="submit" disabled={savingAllowance}>{savingAllowance ? "Saving…" : "Save allowance"}</button>
+                      <button className="btn btn-outline-secondary" type="button" onClick={() => setShowAllowanceEditor(false)}>Cancel</button>
                     </div>
                   </form>
+                ) : (
+                  <button type="button" className="btn child-allowance-toggle" onClick={() => {
+                    setMonthlyAllowanceDraft(String(selectedChild.monthlyAllowance ?? 0));
+                    setShowAllowanceEditor(true);
+                  }}>
+                    <span aria-hidden="true">₱</span> Set monthly allowance
+                  </button>
                 )}
-                {childUpdates.length ? (
-                  <div className="child-update-history">
-                    {childUpdates.map((update) => (
-                      <article className="child-update-row" key={update.id}>
-                        <div>
-                          <strong>{update.type === "growth" ? "Growth measurement" : update.type === "activity" ? update.activity : "Care note"}</strong>
-                          <small>{new Date(`${update.recordedOn}T00:00:00`).toLocaleDateString()}</small>
-                        </div>
-                        {update.type === "growth" && (
-                          <span>
-                            {update.heightCm ? `${update.heightCm} cm` : ""}
-                            {update.heightCm && update.weightKg ? " · " : ""}
-                            {update.weightKg ? `${update.weightKg} kg` : ""}
-                          </span>
-                        )}
-                        {update.note && <p>{update.note}</p>}
-                      </article>
-                    ))}
+              </div>
+            )}
+            {!isGoer && (
+              <div className="sponsorship-school-readonly child-school">
+                <p><strong>School name:</strong> {selectedChild.schoolName || "Not provided"}</p>
+                <p><strong>School address:</strong> {selectedChild.schoolAddress || "Not provided"}</p>
+              </div>
+            )}
+            <div className="child-action-grid">
+              {canManage && (
+                <button type="button" className="child-action-card card-growth" onClick={() => setActiveAction("growth")}>
+                  <span className="action-icon" aria-hidden="true">✦</span>
+                  <strong>Growth &amp; activity</strong>
+                  <small>Record growth measurements, activities attended, and care notes.</small>
+                </button>
+              )}
+              {canManage && (
+                <button type="button" className="child-action-card card-disbursement" onClick={() => setActiveAction("disbursement")}>
+                  <span className="action-icon" aria-hidden="true">₱</span>
+                  <strong>Disbursement</strong>
+                  <small>Add to or deduct from the child's available balance.</small>
+                </button>
+              )}
+              {canRecordCare && (
+                <button type="button" className="child-action-card card-letter" onClick={() => setActiveAction("letter")}>
+                  <span className="action-icon" aria-hidden="true">✉</span>
+                  <strong>Letter</strong>
+                  <small>{isGoer ? "Write a new letter to the sponsor." : "Reply to the sponsor’s letter thread."}</small>
+                </button>
+              )}
+            </div>
+            <div className="child-modal-history">
+              {canViewUpdates && (
+                <div className="sponsorship-detail-section">
+                  <div className="sponsorship-list-heading">
+                    <div>
+                      <h3>Growth and activity history</h3>
+                      <span>Private notes and physical measurements are encrypted at rest.</span>
+                    </div>
+                    <span>{childUpdates.length} updates</span>
                   </div>
-                ) : <p className="text-secondary mt-3 mb-0">No growth, activity, or care updates recorded.</p>}
-              </section>}
-              <section className="sponsorship-detail-section">
-                <h3>Sponsorship and allowance</h3>
-                {canManage ? (
-                  <form className="sponsorship-settings-form" onSubmit={saveChild}>
-                    <div>
-                      <label className="form-label" htmlFor="child-lifecycle">Child status</label>
-                      <select id="child-lifecycle" className="form-select" value={status} onChange={(event) => setStatus(event.target.value)}>
-                        {SPONSOR_LIFECYCLE.map((lifecycle) => <option value={lifecycle} key={lifecycle}>{lifecycle}</option>)}
-                      </select>
+                  {childUpdates.length ? (
+                    <div className="child-update-history">
+                      {childUpdates.map((update) => (
+                        <article className="child-update-row" key={update.id}>
+                          <div>
+                            <strong>{update.type === "growth" ? "Growth measurement" : update.type === "activity" ? update.activity : "Care note"}</strong>
+                            <small>{new Date(`${update.recordedOn}T00:00:00`).toLocaleDateString()}</small>
+                          </div>
+                          {update.type === "growth" && (
+                            <span>
+                              {update.heightCm ? `${update.heightCm} cm` : ""}
+                              {update.heightCm && update.weightKg ? " · " : ""}
+                              {update.weightKg ? `${update.weightKg} kg` : ""}
+                            </span>
+                          )}
+                          {update.note && <p>{update.note}</p>}
+                        </article>
+                      ))}
                     </div>
-                    <div>
-                      <label className="form-label" htmlFor="child-allowance">Monthly allowance (PHP)</label>
-                      <input id="child-allowance" className="form-control" type="number" min="0" max="1000000" step="0.01" required value={monthlyAllowance} onChange={(event) => setMonthlyAllowance(event.target.value)} />
-                    </div>
-                    <button className="btn btn-dark align-self-end" type="submit">Save details</button>
-                  </form>
-                ) : <p>Monthly allowance: <strong>{formatCurrency(selectedChild.monthlyAllowance)}</strong></p>}
-                <h4 className="sponsorship-subheading">Record allowance or gift</h4>
-                {canRecordCare ? (
-                  <form className="sponsorship-gift-form" onSubmit={addGift}>
-                    {isGoer && <div><label className="form-label" htmlFor="gift-care-type">Received</label><select id="gift-care-type" className="form-select" value={gift.careType} onChange={(event) => setGift({ ...gift, careType: event.target.value })}><option value="allowance">Allowance</option><option value="gift">Gift</option></select></div>}
-                    <div><label className="form-label" htmlFor="gift-amount">Amount (PHP)</label><input id="gift-amount" className="form-control" type="number" min="0.01" max="1000000" step="0.01" required value={gift.amount} onChange={(event) => setGift({ ...gift, amount: event.target.value })} /></div>
-                    <div><label className="form-label" htmlFor="gift-date">Date</label><input id="gift-date" className="form-control" type="date" required value={gift.disbursedOn} onChange={(event) => setGift({ ...gift, disbursedOn: event.target.value })} /></div>
-                    <div className="sponsorship-gift-description"><label className="form-label" htmlFor="gift-description">{isGoer ? "Gift / allowance note" : "Description"}</label><input id="gift-description" className="form-control" maxLength={255} value={gift.description} onChange={(event) => setGift({ ...gift, description: event.target.value })} placeholder="e.g. Monthly school allowance" /></div>
-                    <div className="sponsorship-gift-description"><label className="form-label" htmlFor="gift-receipt">Receipt proof (JPG, PNG, PDF; max 4 MB)</label><input id="gift-receipt" className="form-control" type="file" accept="image/jpeg,image/png,application/pdf" required onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (!file) return;
-                      if (file.size > 4 * 1024 * 1024) {
-                        setGift((previous) => ({ ...previous, receiptData: "" }));
-                        setReceiptName("");
-                        setError("Receipt must be no larger than 4 MB.");
-                        event.target.value = "";
-                        return;
-                      }
-                      setGift((previous) => ({ ...previous, receiptData: "" }));
-                      setReceiptName("");
-                      const reader = new FileReader();
-                      reader.onload = () => {
-                        setGift((previous) => ({ ...previous, receiptData: String(reader.result || "") }));
-                        setReceiptName(file.name);
-                        setError("");
-                      };
-                      reader.onerror = () => setError("Unable to read the receipt file. Try a different file.");
-                      reader.readAsDataURL(file);
-                    }} />{receiptName && <small className="text-secondary">{receiptName}</small>}</div>
-                    <button className="btn btn-outline-dark" type="submit" disabled={!gift.receiptData}>{isGoer ? "Record received gift / allowance" : "Save disbursement and proof"}</button>
-                  </form>
-                ) : <p className="text-secondary">You can view the records, but do not have permission to manage allowances.</p>}
+                  ) : <p className="text-secondary mt-3 mb-0">No growth, activity, or care updates recorded.</p>}
+                </div>
+              )}
+              {!isGoer && (
+                <div className="sponsorship-detail-section">
+                  <h3>Available sponsorship allowance</h3>
+                  <div className="allowance-balance-card">
+                    <span>Available balance</span>
+                    <strong>{formatCurrency(selectedChild.availableBalance)}</strong>
+                  </div>
+                  <h4 className="sponsorship-subheading">Allowance transaction history</h4>
+                  <div className="table-responsive">
+                    <table className="table align-middle">
+                      <thead><tr><th>Date</th><th>Transaction ID</th><th>Transaction</th><th>Amount</th><th>Previous balance</th><th>Balance after</th><th>Recorded by</th><th /></tr></thead>
+                      <tbody>{allowanceTransactions.map((transaction) => (
+                        <tr key={transaction.id}>
+                          <td>{new Date(transaction.createdAt).toLocaleString()}</td>
+                          <td>{transaction.id}</td>
+                          <td>{transaction.type === "reversal" ? "Reversal" : transaction.type === "add" ? "Addition" : transaction.disbursementId ? `Disbursement #${transaction.disbursementId}` : "Deduction"}</td>
+                          <td>{formatCurrency(transaction.amount)}</td>
+                          <td>{formatCurrency(transaction.previousBalance)}</td>
+                          <td>{formatCurrency(transaction.updatedBalance)}</td>
+                          <td>{transaction.createdByName || (transaction.createdBy ? `Staff #${transaction.createdBy}` : "System")}{transaction.createdByRole ? ` · ${transaction.createdByRole}` : ""}</td>
+                          <td>{canManage && transaction.type !== "reversal" && !transaction.relatedTransactionId && (
+                            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => reverseAllowanceTransaction(transaction)}>Reverse</button>
+                          )}</td>
+                        </tr>
+                      ))}{!allowanceTransactions.length && <tr><td colSpan="8" className="text-secondary">No balance transactions recorded.</td></tr>}</tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              <div className="sponsorship-detail-section">
+                <h4 className="sponsorship-subheading">{isGoer ? "Received allowance and gifts" : "Sponsorship disbursements"}</h4>
                 <div className="table-responsive mt-3">
                   <table className="table align-middle">
                     <thead><tr><th>Date</th><th>Record</th><th>Amount</th><th>Note</th><th>Proof</th></tr></thead>
                     <tbody>{disbursements.map((record) => (
-                      <tr key={record.id}><td>{new Date(record.recorded_on).toLocaleDateString()}</td><td>{record.recordType === "received" ? `${record.care_type[0].toUpperCase()}${record.care_type.slice(1)} received` : "Sponsor disbursement"}</td><td>{formatCurrency(record.amount)}</td><td>{record.description || "—"}</td><td>{record.hasReceipt ? (isGoer ? "Receipt on file" : <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => openStaffReceipt(record.id)}>View proof</button>) : "—"}</td></tr>
+                      <tr key={record.id}><td>{new Date(record.recorded_on).toLocaleDateString()}</td><td>{record.recordType === "received" ? `${record.care_type[0].toUpperCase()}${record.care_type.slice(1)} received` : "Sponsor disbursement"}</td><td>{formatCurrency(record.amount)}</td><td>{record.recordType === "received" ? record.description || "—" : "—"}</td>                      <td>{record.hasReceipt ? (isGoer ? "Receipt on file" : <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => openStaffReceipt(String(record.id).replace(/^disbursement-/, ""))}>View proof</button>) : "—"}</td></tr>
                     ))}{!disbursements.length && <tr><td colSpan="5" className="text-secondary">No allowance or gift records.</td></tr>}</tbody>
                   </table>
                 </div>
@@ -3400,46 +4618,215 @@ function SponsoredCare({ user }) {
                       : <a href={`data:${staffProof.mimeType};base64,${staffProof.data}`} target="_blank" rel="noreferrer">Open PDF receipt proof ↗</a>}
                   </div>
                 )}
-              </section>
-              <section className="sponsorship-detail-section">
-                <div className="sponsorship-list-heading"><h3>Letters</h3><span>{letters.filter((thread) => Number(thread.participantId) === Number(selectedChild.id)).length}</span></div>
-                <div className="sponsorship-letter-layout">
-                  <div className="sponsorship-thread-list">
-                    {letters.filter((thread) => Number(thread.participantId) === Number(selectedChild.id)).map((thread) => (
-                      <button className={`sponsorship-thread-row ${Number(selectedThreadId) === Number(thread.id) ? "selected" : ""}`} key={thread.id} onClick={() => setSelectedThreadId(thread.id)}>
-                        <strong>{thread.subject}</strong><span>{thread.status}</span><small>{new Date(thread.updatedAt).toLocaleDateString()}</small>
-                      </button>
-                    ))}
-                    {!letters.some((thread) => Number(thread.participantId) === Number(selectedChild.id)) && <p className="text-secondary">No letters yet.</p>}
-                  </div>
-                  {selectedThread && Number(selectedThread.participantId) === Number(selectedChild.id) && (
-                    <div className="sponsorship-thread-detail">
-                      <div className="sponsorship-thread-title"><h4>{selectedThread.subject}</h4>
-                        {canManage && <select className="form-select form-select-sm" aria-label="Update letter status" value={selectedThread.status} onChange={(event) => updateThreadStatus(selectedThread.id, event.target.value)}><option value="open">Open</option><option value="replied">Replied</option><option value="closed">Closed</option></select>}
-                      </div>
-                      <div className="sponsorship-messages">{selectedThread.messages.map((entry) => <div className={`sponsorship-message ${entry.sender_type}`} key={entry.id}><span>{entry.sender_type === "staff" ? "Staff" : "Guardian"} · {new Date(entry.created_at).toLocaleString()}</span><p>{entry.message}</p></div>)}</div>
-                      {canRecordCare && selectedThread.status !== "closed" && <form onSubmit={sendStaffReply}><label className="visually-hidden" htmlFor="staff-letter-reply">Reply to sponsor</label><textarea id="staff-letter-reply" className="form-control mb-2" rows="3" maxLength={5000} required value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply to the sponsor" /><button className="btn btn-sm btn-dark">Send reply</button></form>}
-                    </div>
-                  )}
-                  {isGoer && (!selectedThread || selectedThread.status === "closed") && (
-                    <form className="guardian-letter-form" onSubmit={sendGoerLetter}>
-                      <div>
-                        <label className="form-label" htmlFor="goer-letter-subject">Subject</label>
-                        <input id="goer-letter-subject" className="form-control" maxLength={160} required value={letterSubject} onChange={(event) => setLetterSubject(event.target.value)} placeholder="A short subject for the sponsor" />
-                      </div>
-                      <div>
-                        <label className="form-label" htmlFor="goer-letter-message">Letter to sponsor</label>
-                        <textarea id="goer-letter-message" className="form-control" rows="5" maxLength={5000} required value={letterMessage} onChange={(event) => setLetterMessage(event.target.value)} placeholder="Write an update or message to the sponsor" />
-                      </div>
-                      <button className="btn btn-dark" type="submit">Send letter</button>
-                    </form>
-                  )}
+              </div>
+            </div>
+            <div className="child-history-strip" role="status">
+              {!isGoer && <span>{childUpdates.length} growth updates</span>}
+              {!isGoer && <span>{allowanceTransactions.length} balance transactions</span>}
+              <span>{disbursements.length} {isGoer ? "care records" : "disbursements"}</span>
+              <span>{letters.filter((thread) => Number(thread.participantId) === Number(selectedChild.id)).length} letters</span>
+            </div>
+          </section>
+        </div>
+      ), document.body)}
+      {activeAction === "growth" && canManage && createPortal((
+        <div className="participant-modal-backdrop action-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setActiveAction(null);
+        }}>
+          <section className="participant-modal action-modal" role="dialog" aria-modal="true" aria-labelledby="growth-action-title">
+            <header className="participant-modal-header">
+              <div>
+                <span className="eyebrow">CARE ACTIONS / GROWTH</span>
+                <h2 id="growth-action-title">Growth &amp; activity</h2>
+                <p>Record a measurement, activity, or care note for {selectedChild.name}.</p>
+              </div>
+              <button type="button" className="btn-close" aria-label="Close growth form" onClick={() => setActiveAction(null)} />
+            </header>
+            <form className="child-update-form" onSubmit={addChildUpdate}>
+              <div className="row g-3">
+                <div className="col-12 col-md-4">
+                  <label className="form-label" htmlFor="child-update-type">Update type</label>
+                  <select
+                    id="child-update-type"
+                    className="form-select"
+                    value={childUpdate.type}
+                    onChange={(event) => setChildUpdate({ ...childUpdate, type: event.target.value })}
+                  >
+                    <option value="growth">Growth measurement</option>
+                    <option value="activity">Activity attended</option>
+                    <option value="note">Care note</option>
+                  </select>
                 </div>
-              </section>
-            </>
-          )}
-        </section>
-      </div>
+                <div className="col-12 col-md-4">
+                  <label className="form-label" htmlFor="child-update-date">Date</label>
+                  <input
+                    id="child-update-date"
+                    className="form-control"
+                    type="date"
+                    max={new Date().toISOString().slice(0, 10)}
+                    required
+                    value={childUpdate.recordedOn}
+                    onChange={(event) => setChildUpdate({ ...childUpdate, recordedOn: event.target.value })}
+                  />
+                </div>
+                {childUpdate.type === "growth" && (
+                  <>
+                    <div className="col-12 col-md-4">
+                      <label className="form-label" htmlFor="child-update-height">Height (cm)</label>
+                      <input
+                        id="child-update-height"
+                        className="form-control"
+                        type="number"
+                        min="30"
+                        max="260"
+                        step="0.1"
+                        value={childUpdate.heightCm}
+                        onChange={(event) => setChildUpdate({ ...childUpdate, heightCm: event.target.value })}
+                      />
+                    </div>
+                    <div className="col-12 col-md-4">
+                      <label className="form-label" htmlFor="child-update-weight">Weight (kg)</label>
+                      <input
+                        id="child-update-weight"
+                        className="form-control"
+                        type="number"
+                        min="1"
+                        max="300"
+                        step="0.1"
+                        value={childUpdate.weightKg}
+                        onChange={(event) => setChildUpdate({ ...childUpdate, weightKg: event.target.value })}
+                      />
+                    </div>
+                  </>
+                )}
+                {childUpdate.type === "activity" && (
+                  <div className="col-12 col-md-8">
+                    <label className="form-label" htmlFor="child-update-activity">Activity</label>
+                    <input
+                      id="child-update-activity"
+                      className="form-control"
+                      maxLength={120}
+                      required
+                      value={childUpdate.activity}
+                      onChange={(event) => setChildUpdate({ ...childUpdate, activity: event.target.value })}
+                      placeholder="Activity or program attended"
+                    />
+                  </div>
+                )}
+                <div className="col-12">
+                  <label className="form-label" htmlFor="child-update-note">
+                    {childUpdate.type === "note" ? "Care note" : "Additional notes (optional)"}
+                  </label>
+                  <textarea
+                    id="child-update-note"
+                    className="form-control"
+                    rows="2"
+                    maxLength={2000}
+                    required={childUpdate.type === "note"}
+                    value={childUpdate.note}
+                    onChange={(event) => setChildUpdate({ ...childUpdate, note: event.target.value })}
+                  />
+                </div>
+                <div className="col-12">
+                  <button className="btn btn-dark" type="submit">Record update</button>
+                </div>
+              </div>
+            </form>
+          </section>
+        </div>
+      ), document.body)}
+      {activeAction === "disbursement" && canManage && createPortal((
+        <div className="participant-modal-backdrop action-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setActiveAction(null);
+        }}>
+          <section className="participant-modal action-modal" role="dialog" aria-modal="true" aria-labelledby="disbursement-action-title">
+            <header className="participant-modal-header">
+              <div>
+                <span className="eyebrow">CARE ACTIONS / DISBURSEMENT</span>
+                <h2 id="disbursement-action-title">Disbursement</h2>
+                <p>Add to or deduct from {selectedChild.name}'s available balance. Deductions require a receipt or proof.</p>
+              </div>
+              <button type="button" className="btn-close" aria-label="Close disbursement form" onClick={() => setActiveAction(null)} />
+            </header>
+            <form className="sponsorship-gift-form" onSubmit={recordDisbursement}>
+              <div><label className="form-label" htmlFor="disbursement-type">Transaction</label><select id="disbursement-type" className="form-select" value={allowanceAction} onChange={(event) => setAllowanceAction(event.target.value)}><option value="add">Add to balance</option><option value="deduct">Deduct from balance</option></select></div>
+              <div><label className="form-label" htmlFor="disbursement-amount">Amount (PHP)</label><input id="disbursement-amount" className="form-control" type="number" min="0.01" max="1000000" step="0.01" required value={allowanceAmount} onChange={(event) => setAllowanceAmount(event.target.value)} /></div>
+              {allowanceAction === "deduct" && <div><label className="form-label" htmlFor="disbursement-date">Date</label><input id="disbursement-date" className="form-control" type="date" required value={gift.disbursedOn} onChange={(event) => setGift({ ...gift, disbursedOn: event.target.value })} /></div>}
+              {allowanceAction === "deduct" && <div className="sponsorship-gift-description"><label className="form-label" htmlFor="disbursement-receipt">Receipt proof (JPG, PNG, PDF; max 4 MB)</label><input id="disbursement-receipt" className="form-control" type="file" accept="image/jpeg,image/png,application/pdf" required onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (!file) return;
+                if (file.size > 4 * 1024 * 1024) {
+                  setGift((previous) => ({ ...previous, receiptData: "" }));
+                  setReceiptName("");
+                  setError("Receipt must be no larger than 4 MB.");
+                  event.target.value = "";
+                  return;
+                }
+                setGift((previous) => ({ ...previous, receiptData: "" }));
+                setReceiptName("");
+                const reader = new FileReader();
+                reader.onload = () => {
+                  setGift((previous) => ({ ...previous, receiptData: String(reader.result || "") }));
+                  setReceiptName(file.name);
+                  setError("");
+                };
+                reader.onerror = () => setError("Unable to read the receipt file. Try a different file.");
+                reader.readAsDataURL(file);
+              }} />{receiptName && <small className="text-secondary">{receiptName}</small>}</div>}
+              <button className="btn btn-outline-dark" type="submit" disabled={(allowanceAction === "deduct" && !gift.receiptData) || savingDisbursement}>{savingDisbursement ? "Saving…" : allowanceAction === "add" ? "Add to balance" : "Record disbursement"}</button>
+            </form>
+            <p className="text-secondary">Current available balance: {formatCurrency(selectedChild.availableBalance)}. Deductions require a receipt or proof before they are recorded.</p>
+          </section>
+        </div>
+      ), document.body)}
+      {activeAction === "letter" && canRecordCare && createPortal((
+        <div className="participant-modal-backdrop action-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setActiveAction(null);
+        }}>
+          <section className="participant-modal action-modal action-modal-letter" role="dialog" aria-modal="true" aria-labelledby="letter-action-title">
+            <header className="participant-modal-header">
+              <div>
+                <span className="eyebrow">CARE ACTIONS / LETTERS</span>
+                <h2 id="letter-action-title">Letters</h2>
+                <p>{isGoer ? `Write to the sponsor of ${selectedChild.name}.` : `Reply to the sponsor of ${selectedChild.name}.`}</p>
+              </div>
+              <button type="button" className="btn-close" aria-label="Close letters" onClick={() => setActiveAction(null)} />
+            </header>
+            <div className="sponsorship-letter-layout">
+              <div className="sponsorship-thread-list">
+                {letters.filter((thread) => Number(thread.participantId) === Number(selectedChild.id)).map((thread) => (
+                  <button className={`sponsorship-thread-row ${Number(selectedThreadId) === Number(thread.id) ? "selected" : ""}`} key={thread.id} onClick={() => setSelectedThreadId(thread.id)}>
+                    <strong>{thread.subject}</strong><span>{thread.status}</span><small>{new Date(thread.updatedAt).toLocaleDateString()}</small>
+                  </button>
+                ))}
+                {!letters.some((thread) => Number(thread.participantId) === Number(selectedChild.id)) && <p className="text-secondary">No letters yet.</p>}
+              </div>
+              {selectedThread && Number(selectedThread.participantId) === Number(selectedChild.id) && (
+                <div className="sponsorship-thread-detail">
+                  <div className="sponsorship-thread-title"><h4>{selectedThread.subject}</h4>
+                    {canManage && <select className="form-select form-select-sm" aria-label="Update letter status" value={selectedThread.status} onChange={(event) => updateThreadStatus(selectedThread.id, event.target.value)}><option value="open">Open</option><option value="replied">Replied</option><option value="closed">Closed</option></select>}
+                  </div>
+                  <div className="sponsorship-messages">{selectedThread.messages.map((entry) => <div className={`sponsorship-message ${entry.sender_type}`} key={entry.id}><span>{entry.sender_type === "staff" ? "Staff" : "Guardian"} · {new Date(entry.created_at).toLocaleString()}</span><p>{entry.message}</p></div>)}</div>
+                  {canRecordCare && selectedThread.status !== "closed" && <form onSubmit={sendStaffReply}><label className="visually-hidden" htmlFor="staff-letter-reply">Reply to sponsor</label><textarea id="staff-letter-reply" className="form-control mb-2" rows="3" maxLength={5000} required value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply to the sponsor" /><button className="btn btn-sm btn-dark">Send reply</button></form>}
+                </div>
+              )}
+              {isGoer && (!selectedThread || selectedThread.status === "closed") && (
+                <form className="guardian-letter-form" onSubmit={sendGoerLetter}>
+                  <div>
+                    <label className="form-label" htmlFor="goer-letter-subject">Subject</label>
+                    <input id="goer-letter-subject" className="form-control" maxLength={160} required value={letterSubject} onChange={(event) => setLetterSubject(event.target.value)} placeholder="A short subject for the sponsor" />
+                  </div>
+                  <div>
+                    <label className="form-label" htmlFor="goer-letter-message">Letter to sponsor</label>
+                    <textarea id="goer-letter-message" className="form-control" rows="5" maxLength={5000} required value={letterMessage} onChange={(event) => setLetterMessage(event.target.value)} placeholder="Write an update or message to the sponsor" />
+                  </div>
+                  <button className="btn btn-dark" type="submit">Send letter</button>
+                </form>
+              )}
+            </div>
+          </section>
+        </div>
+      ), document.body)}
     </>
   );
 }
@@ -4033,7 +5420,7 @@ function App() {
     scanner: <Scanner user={user} />,
     portal: <Scanner portal />,
     sponsorship: <SponsoredCare user={user} />,
-    analytics: <Analytics />,
+    analytics: <Analytics user={user} />,
     reports: <Reports user={user} />,
   };
   if (canAccessPage("account", user)) {

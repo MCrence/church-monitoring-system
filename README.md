@@ -9,9 +9,9 @@ schedules, check-in records, and attendance reports.
 ## How the system works
 
 1. Staff register a participant in the web application.
-2. The system creates a participant record and a unique QR code.
+2. The system creates a participant record; sponsored children receive a unique QR code.
 3. Staff create an event schedule, such as a Sunday service.
-4. The participant's QR code is scanned at the event.
+4. The sponsored child's QR code is scanned at the event.
 5. Staff choose **Check in** or **Check out** before scanning. The server
    verifies the QR code and records the selected action for the selected event.
 6. Check-out records a departure time only when an active check-in exists for
@@ -142,6 +142,43 @@ publishing/verification steps for a durable production setup. Keep existing
 SMTP variables only if you still use SMTP locally or explicitly set
 `EMAIL_PROVIDER=smtp`.
 
+### Guardian SMS notifications (Semaphore)
+
+Sponsored-child registration requires the guardian/emergency-contact name and
+a valid Philippine mobile number. The number is normalized to E.164 and saved
+in the existing encrypted emergency-contact phone field. After registration,
+the server sends a brief profile-created notice through the Semaphore v4
+Messages API; it does not include the child's name, passcode, or other profile
+details. The registration response and audit log distinguish an SMS accepted
+for processing, one Semaphore reports sent to the carrier network, and a
+failed or unconfigured send. A carrier-network status does not guarantee that
+the guardian received or read the message. Other participant-related SMS
+events are not sent because the application currently has no other notification
+workflow.
+
+Configure these variables on the backend service (for example, Render), then
+restart/redeploy it:
+
+```env
+SEMAPHORE_API_KEY=your-semaphore-api-key
+# Optional when the Semaphore account already has a default sender name.
+SEMAPHORE_SENDER_NAME=your-approved-sender-name
+```
+
+Keep the API key in the hosting provider's secret environment-variable settings;
+do not commit it or put it in the client. The Semaphore account must have an
+active sender name. Without `SEMAPHORE_API_KEY`, registration still succeeds
+and the interface reports SMS as not configured. SMS delivery failure likewise
+does not undo a saved participant record.
+
+Participant sex is stored in the existing `gender` database column for
+compatibility and the interface only offers Male and Female. Age is calculated
+from the encrypted date of birth whenever a participant profile is read, so it
+does not require a stored age or database migration. The Participants search
+uses authorized participant-list data to match full names. Registration no
+longer asks for sponsor fields; existing sponsor information
+and its other workflows remain unchanged.
+
 Sensitive profile fields continue to decrypt using `AES_KEY`. New encrypted
 values use the active key in `AES_KEYRING`, selected by `AES_KEY_ID`; retain old
 keys in the keyring until all data encrypted with them has been migrated. Use
@@ -250,9 +287,10 @@ security boundary.
 | Church Administrator | Personal account settings and the modules individually assigned by a System Administrator, including optional sponsored-child care access |
 | Goer | Check-in, group-scoped care records, and sponsor letters for active sponsored children in one assigned education group |
 
-Sponsored Child is a participant type. Goer is a separate staff login role and
-is not assigned through participant registration. Only a System Administrator
-can register accounts through the Manage Accounts page. Staff and Goer
+Sponsored Child and Goer are participant types managed from the Participants
+directory. Goer participant records are not created from that directory. A Goer
+participant record is separate from a Goer staff login account. Only a System Administrator can register Goer login accounts through
+the Manage Accounts page. Staff and Goer
 registration collects first, middle, and last names, an email address used for
 sign-in, and a temporary password. Church Administrator accounts receive
 individually selected access to the dashboard, participants, events, check-in,
@@ -276,20 +314,52 @@ the server as well as reflected in the navigation.
 
 ## Sponsored-child care
 
-The Sponsored care staff module organizes registered Sponsored Children by
-lifecycle: New, Active, Deceased, or Graduated. Newly registered children start
-as New; existing records are preserved as Active unless staff updates them.
-Graduated marks a child who has exited sponsorship. These lifecycle changes do
-not delete the participant or revoke their QR code.
+The Participants directory lets authorized staff register Sponsored Children,
+search by name, and filter by education type (Elementary, Junior High
+School, Senior High School, or College) and, with sponsored-care access,
+by child status (Active, On Hold, Withdrawn, Deceased, or Sponsorship
+Completed). Existing Goer participant
+records remain available in the directory for viewing and management. Goer
+participant records do not use QR codes; any previously issued Goer QR codes
+are revoked on server startup while their historical records remain stored.
 
-Staff with View sponsored care permission can review lifecycle, monthly
-allowance, past disbursements, received-care records, receipt proofs, and child
-letter threads. Staff with Manage sponsored care permission can also update
-lifecycle and allowance, record a sponsor disbursement, reply to letters, and
-update letter status. Goers record a received gift or allowance separately
-from a sponsor disbursement. Receipt proofs accept JPG, PNG, or PDF files (up
-to 4 MB); proof files are stored in the database and are not served from the
-public uploads directory.
+Child status and monthly allowance are edited from the child’s Participants
+profile modal. Authorized staff with Manage sponsored care permission can set
+the sponsorship status to Active, On Hold, Withdrawn, Deceased, or Sponsorship
+Completed. The Participants directory uses search, education-type and child-status
+filters, and sorting instead of the former participant-type dropdown. In the Sponsored Care
+module, the page lists the children in care; selecting a child opens a profile
+modal with a set-monthly-allowance button and action cards for growth and
+activity updates, allowance transactions, sponsorship disbursements, and
+letters. The modal also shows the child’s growth history, allowance
+transaction history, and disbursement records. The Sponsored Care module
+maintains a separate available sponsorship allowance balance and append-only
+transaction history. Staff with Manage
+sponsored care permission can add or deduct an amount; deductions require
+confirmation and cannot exceed the current balance. Recording a sponsor
+disbursement also deducts its amount from the available balance in the same
+database transaction. A unique request key prevents retries from creating a
+second disbursement or deduction. Corrections use a compensating reversal,
+preserving the original record. Balance history records transaction and
+disbursement IDs, the actor, amount, before/after balances, and time. The
+monthly allowance is a scheduled amount and does not change the available
+balance automatically.
+
+Staff with View sponsored care permission can review transaction history, past
+disbursements, received-care records, receipt proofs, and child letter threads.
+Staff with Manage sponsored care permission can also record a sponsor
+disbursement, reply to letters, and update letter status. Goers record a
+received gift or allowance separately from staff account-balance transactions.
+The sponsor disbursement form no longer asks for a description; legacy
+descriptions remain stored but are not returned for those records. Receipt
+proofs accept JPG, PNG, or PDF files (up to 4 MB); proof files are stored in
+the database and are not served from the public uploads directory.
+
+Staff with Manage sponsored care permission can create sponsor directory
+records using a family name, sex, and sponsor type (Individual, Family, or
+Couple). Family names are encrypted in the existing sponsors table; sex and
+sponsor type use additional nullable columns added at server startup. Existing
+sponsor records are preserved.
 
 Guardians scan the child's active QR code, then enter the child's
 6-digit numeric passcode in the verification dialog to view that child's
@@ -303,20 +373,20 @@ passcode set by an administrator. Administrators can replace a passcode from
 the participant record, leaving it blank to retain the current one. Guardians
 can create letter
 threads and reply to open threads; staff replies and status updates appear in
-the same thread. Public APIs re-verify the QR/passcode for each request and
+the same thread. Guardians also see growth measurements, activities attended,
+and care notes recorded for their child through the public updates API, which
+returns the three update types for the verified child. Public APIs re-verify the QR/passcode for each request and
 guardians cannot access another child's records. Public proof uploads accept
 only JPG, PNG, or PDF files, limited to 4 MB.
 
 ## Public participant portals
 
-The public home page provides separate entry points for staff sign-in, Sponsored
-Child guardian sponsorship-status checks, and Goer profile/attendance access.
+The public home page provides separate entry points for staff sign-in and
+Sponsored Child guardian sponsorship-status checks.
 Guardian checks require both an active Sponsored Child QR code and the child's
 passcode; failed attempts for a QR code are temporarily locked after five
-failures. Goers use their own active QR code to view only their name, participant
-ID, and up to 20 recent attendance entries. These public responses do not
-include contact, medical, or sponsor details. Treat participant QR codes as
-private credentials and revoke a code if it is lost or shared.
+failures. Child participant QR codes remain private credentials and require the
+appropriate passcode or authenticated permissions for profile access.
 
 On server startup, legacy Admin accounts are changed to System Administrator.
 Program Coordinator and Check-in Volunteer accounts are retained but changed

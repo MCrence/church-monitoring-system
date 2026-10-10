@@ -189,6 +189,7 @@ CREATE TABLE `participants` (
   `last_name_encrypted` text DEFAULT NULL,
   `sponsorship_lifecycle` varchar(24) NOT NULL DEFAULT 'active',
   `monthly_allowance` decimal(10,2) NOT NULL DEFAULT 0.00,
+  `available_allowance_balance` decimal(10,2) NOT NULL DEFAULT 0.00,
   `letters_sent_encrypted` longtext DEFAULT NULL,
   `letters_received_encrypted` longtext DEFAULT NULL,
   `last_letter_date` date DEFAULT NULL
@@ -353,6 +354,8 @@ CREATE TABLE `sponsors` (
   `name_encrypted` text DEFAULT NULL,
   `phone_encrypted` text DEFAULT NULL,
   `email_encrypted` text DEFAULT NULL,
+  `sponsor_type` varchar(20) DEFAULT NULL,
+  `sex` varchar(10) DEFAULT NULL,
   `created_at` datetime DEFAULT NULL,
   `updated_at` datetime DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -1529,11 +1532,32 @@ CREATE TABLE `sponsorship_disbursements` (
   `description` varchar(255) DEFAULT NULL,
   `receipt_mime` varchar(100) DEFAULT NULL,
   `receipt_data` longblob DEFAULT NULL,
+  `idempotency_key` char(36) DEFAULT NULL,
   `created_by` int(11) UNSIGNED DEFAULT NULL,
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_sponsorship_disbursement_idempotency` (`idempotency_key`),
   KEY `idx_sponsorship_disbursements_participant` (`participant_id`,`disbursed_on`),
   CONSTRAINT `fk_sponsorship_disbursements_participant`
+    FOREIGN KEY (`participant_id`) REFERENCES `participants` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `sponsorship_allowance_transactions` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `participant_id` int(11) unsigned NOT NULL,
+  `transaction_type` varchar(16) NOT NULL,
+  `amount` decimal(10,2) NOT NULL,
+  `previous_balance` decimal(10,2) NOT NULL,
+  `updated_balance` decimal(10,2) NOT NULL,
+  `disbursement_id` bigint(20) unsigned DEFAULT NULL,
+  `related_transaction_id` bigint(20) unsigned DEFAULT NULL,
+  `created_by` int(11) unsigned DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_allowance_disbursement` (`disbursement_id`),
+  UNIQUE KEY `uq_allowance_related_transaction` (`related_transaction_id`),
+  KEY `idx_allowance_transactions_participant` (`participant_id`,`created_at`,`id`),
+  CONSTRAINT `fk_allowance_transaction_participant`
     FOREIGN KEY (`participant_id`) REFERENCES `participants` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 

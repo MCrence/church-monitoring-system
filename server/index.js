@@ -22,7 +22,21 @@ const { getAttendanceTransition } = require('./utils/attendance-transition');
 const { createParticipantPasscode, isValidParticipantPasscode } = require('./utils/participant-passcode');
 const { createPersistentRateLimiter } = require('./utils/persistent-rate-limit');
 const { initializeSponsorshipTables } = require('./utils/sponsorship-tables');
+const { sponsorshipLifecycleStatuses } = require('./utils/sponsorship-lifecycle');
 const { sendEmailWithGmailApi } = require('./utils/gmail-api');
+const {
+  calculateAge,
+  findPotentialParticipantDuplicates,
+  normalizePhilippineMobile,
+  participantRegistrationErrors,
+} = require('./utils/participant-utils');
+const { sendSemaphoreSms } = require('./utils/semaphore-sms');
+const { validateSponsor } = require('./utils/sponsor-utils');
+const {
+  calculateAllowanceBalance,
+  calculateReversalBalance,
+  parsePositiveAmountCents,
+} = require('./utils/allowance-utils');
 const {
   GOER_EDUCATION_LEVELS,
   canGoerAccessParticipant,
@@ -117,7 +131,8 @@ const participantProfileColumnsReady = (async () => {
          'education_level', 'grade_level', 'program_course_encrypted',
          'first_name_encrypted', 'middle_name_encrypted', 'last_name_encrypted',
          'sponsorship_lifecycle', 'monthly_allowance', 'passcode_encrypted',
-         'school_name_encrypted', 'school_address_encrypted'
+         'school_name_encrypted', 'school_address_encrypted',
+         'available_allowance_balance'
        )`,
   );
   const existing = new Set(columns.map((column) => column.COLUMN_NAME));
@@ -130,6 +145,7 @@ const participantProfileColumnsReady = (async () => {
     ['last_name_encrypted', 'TEXT DEFAULT NULL'],
     ['sponsorship_lifecycle', "VARCHAR(24) NOT NULL DEFAULT 'active'"],
     ['monthly_allowance', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00'],
+    ['available_allowance_balance', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00'],
     ['passcode_encrypted', 'TEXT DEFAULT NULL'],
     ['school_name_encrypted', 'TEXT DEFAULT NULL'],
     ['school_address_encrypted', 'TEXT DEFAULT NULL'],
@@ -144,6 +160,12 @@ const participantProfileColumnsReady = (async () => {
     }
   }
 })();
+const goerQrRevocationReady = participantProfileColumnsReady.then(() => pool.query(`
+  UPDATE qr_codes q
+  JOIN participants p ON p.id = q.participant_id
+  SET q.status = 'revoked', q.revoked_at = COALESCE(q.revoked_at, NOW())
+  WHERE p.participant_type = 'goer' AND q.status = 'active'
+`));
 const sponsorshipTablesReady = initializeSponsorshipTables(pool);
 const sponsoredChildUpdatesReady = eventsTableReady.then(() => pool.query(`
   CREATE TABLE IF NOT EXISTS sponsored_child_updates (
@@ -428,7 +450,7 @@ function checkSponsorshipRecord(req, res, next) {
 const educationLevels = new Set([
   ...GOER_EDUCATION_LEVELS,
 ]);
-const genderOptions = new Set(['Male', 'Female', 'Prefer not to say']);
+const genderOptions = new Set(['Male', 'Female']);
 const gradeLevelsByEducation = {
   Elementary: new Set(['Grade 1', 'Grade 2', 'Grade 3', 'Grade 4', 'Grade 5', 'Grade 6']),
   'Junior High School': new Set(['Grade 7', 'Grade 8', 'Grade 9', 'Grade 10']),
@@ -566,6 +588,7 @@ function participantView(row) {
   }
   result.fullName = [result.firstName, result.middleName, result.lastName].filter(Boolean).join(' ')
     || result.fullName;
+  result.age = calculateAge(result.dateOfBirth);
   result.participantType = result.participant_type;
   result.sponsorshipType = result.sponsorship_type;
   result.educationLevel = result.education_level;
@@ -631,18 +654,96 @@ app.get('/api/audit-logs', authenticate, checkRole(['System Administrator']), as
 
 app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async (req, res, next) => {
   try {
-    const [[counts]] = await pool.query("SELECT COUNT(*) AS participants, SUM(status = 'active') AS activeParticipants FROM participants");
-    const [[checkins]] = await pool.query(
-      "SELECT COUNT(*) AS totalCheckins, COALESCE(SUM(p.participant_type = 'goer'),0) AS goerCheckins, COALESCE(SUM(p.participant_type = 'sponsored_child'),0) AS sponsoredCheckins FROM check_in_logs c JOIN participants p ON p.id = c.participant_id WHERE c.checked_in_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND c.status = 'checked_in'"
+    const [[counts]] = await pool.execute(
+      `SELECT COUNT(*) AS participants,
+              COALESCE(SUM(status = 'active'), 0) AS activeParticipants,
+              COALESCE(SUM(participant_type = 'goer' AND COALESCE(status, '') <> 'deleted'), 0) AS totalGoers
+       FROM participants`,
     );
-    const [recentCheckins] = await pool.query("SELECT c.participant_id, p.participant_type, c.event_name, c.location, c.checked_in_at, c.status FROM check_in_logs c JOIN participants p ON p.id = c.participant_id ORDER BY c.checked_in_at DESC LIMIT 8");
-    const [atRisk] = await pool.query("SELECT p.id, p.participant_code, r.risk_score, r.risk_level, r.model_version, r.computed_at FROM predictive_risk_scores r JOIN participants p ON p.id = r.participant_id JOIN (SELECT participant_id, MAX(computed_at) AS latest FROM predictive_risk_scores GROUP BY participant_id) latest ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at WHERE r.risk_level IN ('high', 'medium') ORDER BY r.risk_score DESC LIMIT 8");
-    res.json({ counts: { ...counts, totalCheckins: checkins.totalCheckins, goerCheckins: checkins.goerCheckins, sponsoredCheckins: checkins.sponsoredCheckins }, recentCheckins, atRisk });
+    const [[staff]] = await pool.execute(
+      `SELECT COUNT(*) AS totalStaff FROM users
+       WHERE role IN ('System Administrator', 'Church Administrator') AND status = 'active'`,
+    );
+    const [[events]] = await pool.execute(
+      'SELECT COUNT(*) AS totalEvents FROM events',
+    );
+    const [[checkins]] = await pool.query(
+      `SELECT COUNT(*) AS totalCheckins,
+              COALESCE(SUM(p.participant_type = 'goer'), 0) AS goerCheckins,
+              COALESCE(SUM(p.participant_type = 'sponsored_child'), 0) AS sponsoredCheckins
+       FROM check_in_logs c JOIN participants p ON p.id = c.participant_id
+       WHERE c.checked_in_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+         AND c.status = 'checked_in'`,
+    );
+    const [recentCheckins] = await pool.execute(
+      `SELECT c.participant_id, p.participant_type, c.event_name, c.location, c.checked_in_at, c.status
+       FROM check_in_logs c JOIN participants p ON p.id = c.participant_id
+       ORDER BY c.checked_in_at DESC LIMIT 8`,
+    );
+    const [atRisk] = await pool.execute(
+      `SELECT p.id, p.participant_code, r.risk_score, r.risk_level, r.model_version, r.computed_at
+       FROM predictive_risk_scores r JOIN participants p ON p.id = r.participant_id
+       JOIN (SELECT participant_id, MAX(computed_at) AS latest
+             FROM predictive_risk_scores GROUP BY participant_id) latest
+         ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at
+       WHERE r.risk_level IN ('high', 'medium')
+       ORDER BY r.risk_score DESC LIMIT 8`,
+    );
+    res.json({
+      counts: {
+        ...counts,
+        totalStaff: staff.totalStaff,
+        totalEvents: events.totalEvents,
+        totalCheckins: checkins.totalCheckins,
+        goerCheckins: checkins.goerCheckins,
+        sponsoredCheckins: checkins.sponsoredCheckins,
+      },
+      recentCheckins,
+      atRisk,
+    });
   } catch (error) { next(error); }
 });
 
 app.get('/api/participants', authenticate, checkPermission('participants:view'), async (req, res, next) => {
-  try { const [rows] = await pool.query("SELECT p.id, p.participant_code, p.participant_type, p.gender, p.status, p.created_at, (SELECT q.qr_code_image FROM qr_codes q WHERE q.participant_id = p.id AND q.status = 'active' ORDER BY q.id DESC LIMIT 1) AS qr_code_image FROM participants p ORDER BY p.id DESC"); res.json(rows); } catch (error) { next(error); }
+  try {
+    await Promise.all([participantProfileColumnsReady, goerQrRevocationReady]);
+    const canViewSponsorship = hasPermission(req.user, 'sponsorship:view');
+    const allowanceFields = canViewSponsorship
+      ? 'p.sponsorship_lifecycle, p.monthly_allowance, p.available_allowance_balance,'
+      : '';
+    const [rows] = await pool.query(
+      `SELECT p.id, p.participant_code, p.participant_type, p.gender, p.status, p.created_at,
+              ${allowanceFields}
+              p.full_name_encrypted, p.first_name_encrypted, p.middle_name_encrypted,
+              p.last_name_encrypted, p.date_of_birth_encrypted, p.education_level, p.grade_level,
+              (SELECT q.qr_code_image FROM qr_codes q
+               WHERE q.participant_id = p.id AND q.status = 'active'
+                 AND p.participant_type = 'sponsored_child'
+               ORDER BY q.id DESC LIMIT 1) AS qr_code_image
+       FROM participants p ORDER BY p.id DESC`,
+    );
+    res.json(rows.map((row) => {
+      const participant = participantView(row);
+      return {
+        id: participant.id,
+        participant_code: participant.participant_code,
+        participant_type: participant.participant_type,
+        gender: participant.gender,
+        status: participant.status,
+        created_at: participant.created_at,
+        fullName: participant.fullName,
+        age: participant.age,
+        ...(canViewSponsorship ? {
+          sponsorship_lifecycle: participant.sponsorship_lifecycle,
+          monthly_allowance: Number(participant.monthly_allowance || 0),
+          available_allowance_balance: Number(participant.available_allowance_balance || 0),
+        } : {}),
+        education_level: participant.education_level,
+        grade_level: participant.grade_level,
+        qr_code_image: participant.qr_code_image,
+      };
+    }));
+  } catch (error) { next(error); }
 });
 
 app.get('/api/events', authenticate, checkPermission('events:view'), async (req, res, next) => {
@@ -856,14 +957,22 @@ app.get('/api/events/:id/attendance', authenticate, checkPermission('events:view
 
 app.get('/api/participants/:id', authenticate, checkPermission('participants:view'), async (req, res, next) => {
   try {
-    const [rows] = await pool.execute("SELECT p.*, q.qr_code_image, q.qr_uid FROM participants p LEFT JOIN qr_codes q ON q.id = (SELECT q2.id FROM qr_codes q2 WHERE q2.participant_id = p.id AND q2.status = 'active' ORDER BY q2.id DESC LIMIT 1) WHERE p.id = ? LIMIT 1", [req.params.id]);
+    await Promise.all([participantProfileColumnsReady, goerQrRevocationReady]);
+    const [rows] = await pool.execute("SELECT p.*, q.qr_code_image, q.qr_uid FROM participants p LEFT JOIN qr_codes q ON q.id = (SELECT q2.id FROM qr_codes q2 WHERE q2.participant_id = p.id AND q2.status = 'active' AND p.participant_type = 'sponsored_child' ORDER BY q2.id DESC LIMIT 1) WHERE p.id = ? LIMIT 1", [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Participant not found' });
-    if (rows[0].qr_code_image && rows[0].qr_uid) {
+    if (rows[0].participant_type !== 'goer' && rows[0].qr_code_image && rows[0].qr_uid) {
       const qrFile = path.join(__dirname, rows[0].qr_code_image);
-      if (!fs.existsSync(qrFile)) await QRCode.toFile(qrFile, rows[0].qr_uid);
+      if (!fs.existsSync(qrFile)) {
+        await QRCode.toFile(qrFile, rows[0].qr_uid);
+      }
     }
     const participant = participantView(rows[0]);
     delete participant.qr_uid;
+    if (!hasPermission(req.user, 'sponsorship:view')) {
+      delete participant.sponsorship_lifecycle;
+      delete participant.monthly_allowance;
+      delete participant.available_allowance_balance;
+    }
     res.json({ participant });
   } catch (error) { next(error); }
 });
@@ -1385,6 +1494,7 @@ app.post('/api/account/email/verify', authenticate, checkRole(accountRoles), asy
 
 app.post('/api/participants', authenticate, checkPermission('participants:manage'), async (req, res, next) => {
   const connection = await pool.getConnection();
+  let duplicateLockName = null;
   try {
     await participantProfileColumnsReady;
     await connection.beginTransaction();
@@ -1393,40 +1503,66 @@ app.post('/api/participants', authenticate, checkPermission('participants:manage
       await connection.rollback();
       return res.status(400).json({ error: 'Participant registration is for sponsored children. Create Goer staff accounts under Manage Accounts.' });
     }
-    const nameError = participantNameError(req.body);
-    if (nameError) {
+    const validationErrors = participantRegistrationErrors(
+      req.body,
+      educationLevels,
+      gradeLevelsByEducation,
+    );
+    if (Object.keys(validationErrors).length) {
       await connection.rollback();
-      return res.status(400).json({ error: nameError });
+      return res.status(400).json({
+        error: 'Please correct the highlighted registration fields.',
+        errors: validationErrors,
+      });
     }
     const gender = String(req.body.gender || '').trim();
-    if (gender && !genderOptions.has(gender)) {
-      await connection.rollback();
-      return res.status(400).json({ error: 'Select a valid gender option' });
-    }
-    const eligibilityError = sponsoredChildEligibilityError(req.body);
-    if (eligibilityError) {
-      await connection.rollback();
-      return res.status(400).json({ error: eligibilityError });
-    }
     const schoolAddress = String(req.body.schoolAddress || '').trim();
     const schoolName = String(req.body.schoolName || '').trim();
-    if (schoolName.length > 200) {
-      await connection.rollback();
-      return res.status(400).json({ error: 'School name must be 200 characters or fewer' });
-    }
-    if (schoolAddress.length > 500) {
-      await connection.rollback();
-      return res.status(400).json({ error: 'School address must be 500 characters or fewer' });
-    }
     const fullName = [req.body.firstName, req.body.middleName, req.body.lastName]
       .map((part) => String(part || '').trim())
       .filter(Boolean)
       .join(' ');
+    // Serialize checks because encrypted names and dates have no searchable index.
+    duplicateLockName = 'participant-registration-duplicates';
+    const [[lock]] = await connection.execute('SELECT GET_LOCK(?, 10) AS acquired', [duplicateLockName]);
+    if (Number(lock?.acquired) !== 1) {
+      duplicateLockName = null;
+      await connection.rollback();
+      return res.status(503).json({ error: 'Participant duplicate check is temporarily unavailable. Please try again.' });
+    }
+    const [existingRows] = await connection.execute(
+      `SELECT id, participant_code, full_name_encrypted, first_name_encrypted,
+              middle_name_encrypted, last_name_encrypted, date_of_birth_encrypted
+       FROM participants
+       WHERE participant_type = 'sponsored_child' AND COALESCE(status, '') <> 'deleted'`,
+    );
+    const duplicates = findPotentialParticipantDuplicates(
+      {
+        fullName,
+        firstName: req.body.firstName,
+        lastName: req.body.lastName,
+        dateOfBirth: req.body.dateOfBirth,
+      },
+      existingRows.map((row) => participantView(row)),
+    );
+    const exactDuplicates = duplicates.filter((match) => match.exact);
+    const potentialDuplicates = duplicates.filter((match) => !match.exact);
+    if (exactDuplicates.length || (potentialDuplicates.length && req.body.confirmPotentialDuplicate !== true)) {
+      await connection.rollback();
+      const blockedByExactMatch = exactDuplicates.length > 0;
+      return res.status(409).json({
+        code: blockedByExactMatch ? 'DUPLICATE_PARTICIPANT' : 'POTENTIAL_DUPLICATE_REVIEW_REQUIRED',
+        error: blockedByExactMatch
+          ? 'A participant with the same full name and date of birth is already registered.'
+          : 'Possible matching participants were found. Review the records before confirming registration.',
+        duplicates,
+      });
+    }
     const passcode = createParticipantPasscode();
     const participantCode = `FMC-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
     const [result] = await connection.execute(
       'INSERT INTO participants (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted, last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted, passcode_hash, passcode_encrypted, medical_conditions_encrypted, weight_encrypted, height_encrypted, emergency_contact_name_encrypted, emergency_contact_phone_encrypted, sponsor_name_encrypted, sponsor_contact_encrypted, sponsorship_type, enrollment_date, program_affiliation_encrypted, education_level, grade_level, program_course_encrypted, school_name_encrypted, school_address_encrypted, status, participant_code, sponsorship_lifecycle, monthly_allowance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NOW(), NOW())',
-      [participantType, encrypt(fullName), encrypt(String(req.body.firstName).trim()), encrypt(String(req.body.middleName || '').trim() || null), encrypt(String(req.body.lastName).trim()), encrypt(req.body.dateOfBirth), gender || null, encrypt(req.body.phone), encrypt(req.body.address), await bcrypt.hash(passcode, 12), encrypt(passcode), encrypt(req.body.medicalConditions), encrypt(req.body.weight), encrypt(req.body.height), encrypt(req.body.emergencyContactName), encrypt(req.body.emergencyContactPhone), encrypt(req.body.sponsorName), encrypt(req.body.sponsorContact), req.body.sponsorshipType || null, req.body.enrollmentDate || null, encrypt(req.body.programAffiliation), req.body.educationLevel, req.body.gradeLevel, encrypt(req.body.programCourse), encrypt(schoolName || null), encrypt(schoolAddress || null), 'active', participantCode, 'new'],
+      [participantType, encrypt(fullName), encrypt(String(req.body.firstName).trim()), encrypt(String(req.body.middleName || '').trim() || null), encrypt(String(req.body.lastName).trim()), encrypt(req.body.dateOfBirth), gender, encrypt(req.body.phone), encrypt(req.body.address), await bcrypt.hash(passcode, 12), encrypt(passcode), encrypt(req.body.medicalConditions), encrypt(req.body.weight), encrypt(req.body.height), encrypt(String(req.body.emergencyContactName).trim()), encrypt(normalizePhilippineMobile(req.body.emergencyContactPhone)), null, null, null, null, null, req.body.educationLevel, req.body.gradeLevel, encrypt(req.body.programCourse), encrypt(schoolName || null), encrypt(schoolAddress || null), 'active', participantCode, 'new'],
     );
     const uid = crypto.randomUUID();
     const qrPayload = encrypt(uid);
@@ -1434,22 +1570,52 @@ app.post('/api/participants', authenticate, checkPermission('participants:manage
     await QRCode.toFile(path.join(uploadsDir, filename), qrPayload);
     await connection.execute('INSERT INTO qr_codes (participant_id, qr_uid, qr_code_image, status, assigned_at, created_by, created_at) VALUES (?, ?, ?, ?, NOW(), ?, NOW())', [result.insertId, qrPayload, `uploads/qr_codes/${filename}`, 'active', req.user.id]);
     await connection.commit();
+    await connection.execute('SELECT RELEASE_LOCK(?)', [duplicateLockName]);
+    duplicateLockName = null;
     await writeAuditLog(req.user, 'participant.created', 'participant', result.insertId);
+    let notification;
+    try {
+      notification = await sendSemaphoreSms({
+        apiKey: process.env.SEMAPHORE_API_KEY,
+        senderName: process.env.SEMAPHORE_SENDER_NAME,
+        number: normalizePhilippineMobile(req.body.emergencyContactPhone),
+        message: 'A participant profile has been registered for the child in your care. Contact FMC Field Care if you have questions.',
+      });
+    } catch (error) {
+      console.error('Semaphore SMS delivery failed:', error.name || 'Unknown error');
+      notification = { status: 'failed' };
+    }
+    await writeAuditLog(req.user, 'participant.guardian_sms', 'participant', result.insertId, {
+      status: notification.status,
+      ...(notification.providerStatus ? { providerStatus: notification.providerStatus } : {}),
+    });
     res.status(201).json({
       id: result.insertId,
       participantCode,
       qrPayload,
       qrCodeImage: `/uploads/qr_codes/${filename}`,
+      age: calculateAge(req.body.dateOfBirth),
+      notification,
       ...(passcode ? { passcode } : {}),
     });
-  } catch (error) { await connection.rollback(); next(error); } finally { connection.release(); }
+  } catch (error) {
+    await connection.rollback();
+    next(error);
+  } finally {
+    try {
+      if (duplicateLockName) await connection.execute('SELECT RELEASE_LOCK(?)', [duplicateLockName]);
+    } finally {
+      connection.release();
+    }
+  }
 });
 
 app.put('/api/participants/:id', authenticate, checkPermission('participants:manage'), async (req, res, next) => {
   try {
     await participantProfileColumnsReady;
     const [existingRows] = await pool.execute(
-      'SELECT gender, participant_type FROM participants WHERE id = ? LIMIT 1',
+      `SELECT gender, participant_type, sponsorship_lifecycle, monthly_allowance
+       FROM participants WHERE id = ? LIMIT 1`,
       [req.params.id],
     );
     if (!existingRows[0]) return res.status(404).json({ error: 'Participant not found' });
@@ -1480,6 +1646,32 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
     if (schoolAddress.length > 500) {
       return res.status(400).json({ error: 'School address must be 500 characters or fewer' });
     }
+    let monthlyAllowance = existingRows[0].monthly_allowance;
+    let lifecycle = existingRows[0].sponsorship_lifecycle;
+    if (
+      participantType === 'sponsored_child' &&
+      (
+        Object.prototype.hasOwnProperty.call(req.body, 'monthlyAllowance') ||
+        Object.prototype.hasOwnProperty.call(req.body, 'lifecycle')
+      ) &&
+      !hasPermission(req.user, 'sponsorship:manage')
+    ) {
+      return res.status(403).json({ error: 'Manage sponsored care permission is required to update child status or monthly allowance' });
+    }
+    if (participantType === 'sponsored_child') {
+      if (Object.prototype.hasOwnProperty.call(req.body, 'monthlyAllowance')) {
+        monthlyAllowance = Number(req.body.monthlyAllowance);
+        if (!Number.isFinite(monthlyAllowance) || monthlyAllowance < 0 || monthlyAllowance > 1000000) {
+          return res.status(400).json({ error: 'Monthly allowance must be between 0 and 1,000,000' });
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(req.body, 'lifecycle')) {
+        lifecycle = String(req.body.lifecycle || '');
+        if (!sponsorshipLifecycleStatuses.has(lifecycle)) {
+          return res.status(400).json({ error: 'Select a valid child lifecycle status' });
+        }
+      }
+    }
     if (
       Object.prototype.hasOwnProperty.call(req.body, 'passcode') &&
       req.body.passcode !== '' &&
@@ -1499,18 +1691,13 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
       last_name_encrypted: encrypt(lastName),
       date_of_birth_encrypted: encrypt(req.body.dateOfBirth),
       gender: gender || null,
-      phone_encrypted: encrypt(req.body.phone),
       address_encrypted: encrypt(req.body.address),
       medical_conditions_encrypted: encrypt(req.body.medicalConditions),
       weight_encrypted: encrypt(req.body.weight),
       height_encrypted: encrypt(req.body.height),
       emergency_contact_name_encrypted: encrypt(req.body.emergencyContactName),
       emergency_contact_phone_encrypted: encrypt(req.body.emergencyContactPhone),
-      sponsor_name_encrypted: encrypt(req.body.sponsorName),
-      sponsor_contact_encrypted: encrypt(req.body.sponsorContact),
-      sponsorship_type: req.body.sponsorshipType || null,
       enrollment_date: req.body.enrollmentDate || null,
-      program_affiliation_encrypted: encrypt(req.body.programAffiliation),
       education_level: participantType === 'sponsored_child' ? req.body.educationLevel : null,
       grade_level: participantType === 'sponsored_child' ? req.body.gradeLevel : null,
       program_course_encrypted: participantType === 'sponsored_child' ? encrypt(req.body.programCourse) : null,
@@ -1518,6 +1705,10 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
       school_address_encrypted: participantType === 'sponsored_child' ? encrypt(schoolAddress || null) : null,
       status: req.body.status || 'active',
     };
+    if (participantType === 'sponsored_child') {
+      fields.monthly_allowance = monthlyAllowance;
+      fields.sponsorship_lifecycle = lifecycle;
+    }
     if (isValidParticipantPasscode(req.body.passcode)) {
       fields.passcode_hash = await bcrypt.hash(req.body.passcode, 12);
       fields.passcode_encrypted = encrypt(req.body.passcode);
@@ -1529,7 +1720,13 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
       changedFields: Object.keys(req.body),
     });
     const [rows] = await pool.execute('SELECT * FROM participants WHERE id = ? LIMIT 1', [req.params.id]);
-    res.json({ participant: participantView(rows[0]) });
+    const participant = participantView(rows[0]);
+    if (!hasPermission(req.user, 'sponsorship:view')) {
+      delete participant.sponsorship_lifecycle;
+      delete participant.monthly_allowance;
+      delete participant.available_allowance_balance;
+    }
+    res.json({ participant });
   } catch (error) { next(error); }
 });
 
@@ -1550,7 +1747,7 @@ app.delete('/api/participants/:id', authenticate, checkPermission('participants:
 app.post('/api/checkin', authenticate, checkPermission('checkin:record'), async (req, res, next) => {
   let connection;
   try {
-    await participantProfileColumnsReady;
+    await Promise.all([participantProfileColumnsReady, goerQrRevocationReady]);
     const payload = String(req.body.qrPayload || '');
     try {
       decrypt(payload);
@@ -1672,7 +1869,6 @@ app.post('/api/portal/profile', authenticate, checkPermission('portal:view'), as
   } catch (error) { next(error); }
 });
 
-const sponsorshipLifecycleStatuses = new Set(['new', 'active', 'deceased', 'graduated']);
 const sponsorshipLetterStatuses = new Set(['open', 'replied', 'closed']);
 const receiptMimeTypes = new Set(['image/jpeg', 'image/png', 'application/pdf']);
 const receiptMaxBytes = 4 * 1024 * 1024;
@@ -1835,6 +2031,50 @@ async function getAccessibleSponsorshipChild(user, participantId) {
   return child;
 }
 
+app.get('/api/sponsorship/sponsors', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  try {
+    await sponsorshipTablesReady;
+    const [rows] = await pool.query(
+      `SELECT id, name_encrypted, sex, sponsor_type, created_at
+       FROM sponsors ORDER BY id DESC`,
+    );
+    res.json(rows.map((row) => ({
+      id: row.id,
+      familyName: row.name_encrypted ? decrypt(row.name_encrypted) : '',
+      sex: row.sex || '',
+      sponsorType: row.sponsor_type || '',
+      createdAt: row.created_at,
+    })));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/sponsorship/sponsors', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  try {
+    await sponsorshipTablesReady;
+    const { familyName, sex, sponsorType, errors } = validateSponsor(req.body);
+    if (Object.keys(errors).length) {
+      return res.status(400).json({ error: 'Please correct the highlighted sponsor fields.', errors });
+    }
+    const [result] = await pool.execute(
+      `INSERT INTO sponsors (name_encrypted, sex, sponsor_type, created_at, updated_at)
+       VALUES (?, ?, ?, NOW(), NOW())`,
+      [encrypt(familyName), sex, sponsorType],
+    );
+    await writeAuditLog(req.user, 'sponsor.created', 'sponsor', result.insertId, {
+      sex,
+      sponsorType,
+    });
+    res.status(201).json({
+      sponsor: {
+        id: result.insertId,
+        familyName,
+        sex,
+        sponsorType,
+      },
+    });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (req, res, next) => {
   try {
     await participantProfileColumnsReady;
@@ -1847,17 +2087,21 @@ app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (
       : `, school_name_encrypted, school_address_encrypted,
          sponsorship_lifecycle, sponsorship_status`;
     const [rows] = await pool.execute(
-      `SELECT id, full_name_encrypted, participant_code, monthly_allowance ${adminFields}
+      `SELECT id, full_name_encrypted, participant_code, monthly_allowance,
+              available_allowance_balance ${adminFields}
        FROM participants
        WHERE participant_type = 'sponsored_child' AND status <> 'deleted' ${groupScope}
-       ORDER BY FIELD(sponsorship_lifecycle, 'new', 'active', 'deceased', 'graduated'), full_name_encrypted`,
+       ORDER BY FIELD(sponsorship_lifecycle, 'active', 'on_hold', 'withdrawn', 'deceased', 'completed', 'new', 'graduated'), full_name_encrypted`,
       isGoer ? [req.user.goerEducationLevel] : [],
     );
     const children = rows.map((row) => ({
       id: row.id,
       name: decrypt(row.full_name_encrypted) || 'Unnamed child',
       participantCode: row.participant_code,
-      monthlyAllowance: Number(row.monthly_allowance || 0),
+      ...(!isGoer ? {
+        monthlyAllowance: Number(row.monthly_allowance || 0),
+        availableBalance: Number(row.available_allowance_balance || 0),
+      } : {}),
       ...(!isGoer ? {
         schoolName: row.school_name_encrypted ? decrypt(row.school_name_encrypted) : '',
         schoolAddress: row.school_address_encrypted ? decrypt(row.school_address_encrypted) : '',
@@ -1868,6 +2112,214 @@ app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (
     children.sort((left, right) => left.name.localeCompare(right.name));
     res.json(children);
   } catch (error) { next(error); }
+});
+
+app.get('/api/sponsorship/children/:id/allowance-transactions', authenticate, checkPermission('sponsorship:view'), async (req, res, next) => {
+  try {
+    await sponsorshipTablesReady;
+    const [[child]] = await pool.execute(
+      `SELECT id FROM participants
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+       LIMIT 1`,
+      [req.params.id],
+    );
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    const [rows] = await pool.execute(
+      `SELECT t.id, t.transaction_type, t.amount, t.previous_balance, t.updated_balance,
+              t.disbursement_id,
+              t.related_transaction_id, t.created_by, t.created_at,
+              u.username AS created_by_username,
+              CONCAT_WS(' ', u.first_name, u.middle_name, u.last_name) AS created_by_name,
+              u.role AS created_by_role
+       FROM sponsorship_allowance_transactions t
+       LEFT JOIN users u ON u.id = t.created_by
+       WHERE t.participant_id = ?
+       ORDER BY t.created_at DESC, t.id DESC
+       LIMIT 200`,
+      [child.id],
+    );
+    res.json(rows.map((row) => ({
+      id: row.id,
+      type: row.transaction_type,
+      amount: Number(row.amount),
+      previousBalance: Number(row.previous_balance),
+      updatedBalance: Number(row.updated_balance),
+      disbursementId: row.disbursement_id,
+      relatedTransactionId: row.related_transaction_id,
+      createdBy: row.created_by,
+      createdByName: row.created_by_name || row.created_by_username || null,
+      createdByRole: row.created_by_role,
+      createdAt: row.created_at,
+    })));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/sponsorship/children/:id/allowance-transactions', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  let connection;
+  try {
+    await Promise.all([participantProfileColumnsReady, sponsorshipTablesReady]);
+    const type = String(req.body.type || '');
+    const amountCents = parsePositiveAmountCents(req.body.amount);
+    if (amountCents === null) {
+      return res.status(400).json({ error: 'Enter a positive amount up to 1,000,000.00 with no more than two decimal places' });
+    }
+    if (!['add', 'deduct'].includes(type)) {
+      return res.status(400).json({ error: 'Select whether to add or deduct an allowance amount' });
+    }
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [[child]] = await connection.execute(
+      `SELECT id, available_allowance_balance
+       FROM participants
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+       LIMIT 1 FOR UPDATE`,
+      [req.params.id],
+    );
+    if (!child) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Sponsored child not found' });
+    }
+    const balance = calculateAllowanceBalance(
+      child.available_allowance_balance,
+      amountCents,
+      type,
+    );
+    if (balance.error) {
+      await connection.rollback();
+      return res.status(400).json({ error: balance.error });
+    }
+    const amount = (amountCents / 100).toFixed(2);
+    const [result] = await connection.execute(
+      `INSERT INTO sponsorship_allowance_transactions
+         (participant_id, transaction_type, amount, previous_balance, updated_balance, created_by)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [child.id, type, amount, balance.previousBalance, balance.updatedBalance, req.user.id],
+    );
+    await connection.execute(
+      'UPDATE participants SET available_allowance_balance = ?, updated_at = NOW() WHERE id = ?',
+      [balance.updatedBalance, child.id],
+    );
+    await connection.commit();
+    await writeAuditLog(req.user, `sponsorship.allowance.${type}`, 'participant', child.id, {
+      transactionId: result.insertId,
+      amount,
+      previousBalance: balance.previousBalance,
+      updatedBalance: balance.updatedBalance,
+    });
+    res.status(201).json({
+      transaction: {
+        id: result.insertId,
+        type,
+        amount: Number(amount),
+        previousBalance: Number(balance.previousBalance),
+        updatedBalance: Number(balance.updatedBalance),
+        createdBy: req.user.id,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+app.post('/api/sponsorship/children/:id/allowance-transactions/:transactionId/reverse', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  let connection;
+  try {
+    await Promise.all([participantProfileColumnsReady, sponsorshipTablesReady]);
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [[child]] = await connection.execute(
+      `SELECT id, available_allowance_balance
+       FROM participants
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+       LIMIT 1 FOR UPDATE`,
+      [req.params.id],
+    );
+    if (!child) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Sponsored child not found' });
+    }
+    const [[original]] = await connection.execute(
+      `SELECT id, transaction_type, amount, related_transaction_id
+       FROM sponsorship_allowance_transactions
+       WHERE id = ? AND participant_id = ? LIMIT 1`,
+      [req.params.transactionId, child.id],
+    );
+    if (!original) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Allowance transaction not found' });
+    }
+    if (!['add', 'deduct'].includes(original.transaction_type)) {
+      await connection.rollback();
+      return res.status(400).json({ error: 'Only an addition or deduction can be reversed' });
+    }
+    if (original.related_transaction_id !== null) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'This transaction cannot be reversed again' });
+    }
+    const [[existingReversal]] = await connection.execute(
+      `SELECT id FROM sponsorship_allowance_transactions
+       WHERE related_transaction_id = ? LIMIT 1`,
+      [original.id],
+    );
+    if (existingReversal) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'This transaction has already been reversed' });
+    }
+    const amountCents = parsePositiveAmountCents(String(original.amount));
+    const balance = calculateReversalBalance(
+      child.available_allowance_balance,
+      amountCents,
+      original.transaction_type,
+    );
+    if (balance.error) {
+      await connection.rollback();
+      return res.status(400).json({ error: balance.error });
+    }
+    const amount = Number(original.amount).toFixed(2);
+    const [result] = await connection.execute(
+      `INSERT INTO sponsorship_allowance_transactions
+         (participant_id, transaction_type, amount, previous_balance, updated_balance,
+          related_transaction_id, created_by)
+       VALUES (?, 'reversal', ?, ?, ?, ?, ?)`,
+      [child.id, amount, balance.previousBalance, balance.updatedBalance, original.id, req.user.id],
+    );
+    await connection.execute(
+      'UPDATE participants SET available_allowance_balance = ?, updated_at = NOW() WHERE id = ?',
+      [balance.updatedBalance, child.id],
+    );
+    await connection.commit();
+    await writeAuditLog(req.user, 'sponsorship.allowance.reversed', 'participant', child.id, {
+      transactionId: result.insertId,
+      relatedTransactionId: original.id,
+      amount,
+      previousBalance: balance.previousBalance,
+      updatedBalance: balance.updatedBalance,
+    });
+    res.status(201).json({
+      transaction: {
+        id: result.insertId,
+        type: 'reversal',
+        amount: Number(amount),
+        previousBalance: Number(balance.previousBalance),
+        updatedBalance: Number(balance.updatedBalance),
+        relatedTransactionId: original.id,
+        createdBy: req.user.id,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    if (error.code === 'ER_DUP_ENTRY' && connection) {
+      return res.status(409).json({ error: 'This transaction has already been reversed' });
+    }
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
 });
 
 app.get('/api/sponsorship/children/:id/updates', authenticate, checkPermission('sponsorship:view'), async (req, res, next) => {
@@ -2056,7 +2508,7 @@ app.get('/api/sponsorship/children/:id/disbursements', authenticate, checkSponso
       : await Promise.all([
         pool.execute(
           `SELECT id, amount, DATE_FORMAT(disbursed_on, '%Y-%m-%d') AS recorded_on,
-                  description, receipt_mime, created_at
+                  receipt_mime, created_at
            FROM sponsorship_disbursements
            WHERE participant_id = ?
            ORDER BY disbursed_on DESC, id DESC`,
@@ -2073,10 +2525,12 @@ app.get('/api/sponsorship/children/:id/disbursements', authenticate, checkSponso
       ]);
     const records = [
       ...disbursementRows.map((row) => ({
-        ...row,
         id: `disbursement-${row.id}`,
         recordType: 'disbursement',
         amount: Number(row.amount),
+        recorded_on: row.recorded_on,
+        created_at: row.created_at,
+        receipt_mime: row.receipt_mime,
         hasReceipt: Boolean(row.receipt_mime),
       })),
       ...careRows.map((row) => ({
@@ -2096,34 +2550,186 @@ app.get('/api/sponsorship/children/:id/disbursements', authenticate, checkSponso
 });
 
 app.post('/api/sponsorship/children/:id/disbursements', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  let connection;
+  let transactionActive = false;
+  let amountCents = null;
+  let disbursedOn = '';
+  const idempotencyKey = String(req.body.idempotencyKey || '').trim();
   try {
-    const amount = Number(req.body.amount);
-    const disbursedOn = String(req.body.disbursedOn || '');
-    const description = String(req.body.description || '').trim();
+    amountCents = parsePositiveAmountCents(req.body.amount);
+    disbursedOn = String(req.body.disbursedOn || '');
     const receipt = parseReceipt(req.body.receiptData);
-    if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) {
-      return res.status(400).json({ error: 'Enter an allowance or gift amount above 0 and no more than 1,000,000' });
+    if (amountCents === null) {
+      return res.status(400).json({ error: 'Enter a positive disbursement amount up to 1,000,000.00 with no more than two decimal places' });
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
+      return res.status(400).json({ error: 'A valid disbursement request key is required. Please try again.' });
     }
     if (!validDate(disbursedOn)) return res.status(400).json({ error: 'Enter a valid disbursement date' });
-    if (description.length > 255) return res.status(400).json({ error: 'Description must be 255 characters or fewer' });
     if (receipt.error) return res.status(400).json({ error: receipt.error });
     if (!receipt.data) return res.status(400).json({ error: 'A receipt proof is required for each allowance or gift record' });
     await sponsorshipTablesReady;
-    const child = await getAccessibleSponsorshipChild(req.user, req.params.id);
-    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
-    const [result] = await pool.execute(
-      `INSERT INTO sponsorship_disbursements
-         (participant_id, amount, disbursed_on, description, receipt_mime, receipt_data, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [child.id, amount.toFixed(2), disbursedOn, description || null, receipt.mime, encryptBytes(receipt.data), req.user.id],
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionActive = true;
+    const [[child]] = await connection.execute(
+      `SELECT id, available_allowance_balance
+       FROM participants
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+       LIMIT 1 FOR UPDATE`,
+      [req.params.id],
     );
+    if (!child) {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(404).json({ error: 'Sponsored child not found' });
+    }
+
+    const [[existing]] = await connection.execute(
+      `SELECT d.id, d.participant_id, d.amount, DATE_FORMAT(d.disbursed_on, '%Y-%m-%d') AS disbursed_on,
+              d.receipt_mime, d.created_by, d.created_at,
+              t.id AS transaction_id, t.previous_balance, t.updated_balance
+       FROM sponsorship_disbursements d
+       LEFT JOIN sponsorship_allowance_transactions t ON t.disbursement_id = d.id
+       WHERE d.idempotency_key = ?
+       LIMIT 1`,
+      [idempotencyKey],
+    );
+    if (existing) {
+      await connection.rollback();
+      transactionActive = false;
+      if (
+        String(existing.created_by) !== String(req.user.id) ||
+        String(existing.participant_id) !== String(child.id) ||
+        parsePositiveAmountCents(existing.amount) !== amountCents ||
+        existing.disbursed_on !== disbursedOn
+      ) {
+        return res.status(409).json({ error: 'This request key was already used for a different disbursement.' });
+      }
+      if (!existing.transaction_id) {
+        return res.status(500).json({ error: 'The saved disbursement is missing its allowance transaction. Contact an administrator.' });
+      }
+      return res.status(200).json({
+        id: existing.id,
+        transactionId: existing.transaction_id,
+        childId: existing.participant_id,
+        amount: Number(existing.amount),
+        previousBalance: Number(existing.previous_balance),
+        updatedBalance: Number(existing.updated_balance),
+        disbursedOn: existing.disbursed_on,
+        createdBy: existing.created_by,
+        createdAt: existing.created_at,
+        hasReceipt: Boolean(existing.receipt_mime),
+        duplicate: true,
+      });
+    }
+
+    const balance = calculateAllowanceBalance(
+      child.available_allowance_balance,
+      amountCents,
+      'deduct',
+    );
+    if (balance.error) {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(400).json({ error: balance.error });
+    }
+    const amount = (amountCents / 100).toFixed(2);
+    const [disbursementResult] = await connection.execute(
+      `INSERT INTO sponsorship_disbursements
+         (participant_id, amount, disbursed_on, description, receipt_mime, receipt_data, idempotency_key, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [child.id, amount, disbursedOn, null, receipt.mime, encryptBytes(receipt.data), idempotencyKey, req.user.id],
+    );
+    const [transactionResult] = await connection.execute(
+      `INSERT INTO sponsorship_allowance_transactions
+         (participant_id, transaction_type, amount, previous_balance, updated_balance,
+          disbursement_id, created_by)
+       VALUES (?, 'deduct', ?, ?, ?, ?, ?)`,
+      [
+        child.id,
+        amount,
+        balance.previousBalance,
+        balance.updatedBalance,
+        disbursementResult.insertId,
+        req.user.id,
+      ],
+    );
+    await connection.execute(
+      'UPDATE participants SET available_allowance_balance = ?, updated_at = NOW() WHERE id = ?',
+      [balance.updatedBalance, child.id],
+    );
+    const [[savedDisbursement]] = await connection.execute(
+      'SELECT created_at FROM sponsorship_disbursements WHERE id = ?',
+      [disbursementResult.insertId],
+    );
+    await connection.commit();
+    transactionActive = false;
     await writeAuditLog(req.user, 'sponsorship.disbursement.created', 'participant', child.id, {
-      amount: amount.toFixed(2),
+      disbursementId: disbursementResult.insertId,
+      transactionId: transactionResult.insertId,
+      amount,
       disbursedOn,
+      previousBalance: balance.previousBalance,
+      updatedBalance: balance.updatedBalance,
       hasReceipt: Boolean(receipt.data),
     });
-    res.status(201).json({ id: result.insertId, amount: Number(amount.toFixed(2)), disbursedOn, hasReceipt: Boolean(receipt.data) });
-  } catch (error) { next(error); }
+    res.status(201).json({
+      id: disbursementResult.insertId,
+      transactionId: transactionResult.insertId,
+      childId: child.id,
+      amount: Number(amount),
+      previousBalance: Number(balance.previousBalance),
+      updatedBalance: Number(balance.updatedBalance),
+      disbursedOn,
+      createdBy: req.user.id,
+      createdAt: savedDisbursement.created_at,
+      hasReceipt: Boolean(receipt.data),
+      duplicate: false,
+    });
+  } catch (error) {
+    if (connection && transactionActive) await connection.rollback();
+    if (error.code === 'ER_DUP_ENTRY') {
+      const [[existing]] = await connection.execute(
+        `SELECT d.id, d.participant_id, d.amount, DATE_FORMAT(d.disbursed_on, '%Y-%m-%d') AS disbursed_on,
+                d.receipt_mime, d.created_by, d.created_at,
+                t.id AS transaction_id, t.previous_balance, t.updated_balance
+         FROM sponsorship_disbursements d
+         LEFT JOIN sponsorship_allowance_transactions t ON t.disbursement_id = d.id
+         WHERE d.idempotency_key = ?
+         LIMIT 1`,
+        [idempotencyKey],
+      );
+      if (
+        existing &&
+        String(existing.created_by) === String(req.user.id) &&
+        String(existing.participant_id) === String(req.params.id) &&
+        parsePositiveAmountCents(existing.amount) === amountCents &&
+        existing.disbursed_on === disbursedOn &&
+        existing.transaction_id
+      ) {
+        return res.status(200).json({
+          id: existing.id,
+          transactionId: existing.transaction_id,
+          childId: existing.participant_id,
+          amount: Number(existing.amount),
+          previousBalance: Number(existing.previous_balance),
+          updatedBalance: Number(existing.updated_balance),
+          disbursedOn: existing.disbursed_on,
+          createdBy: existing.created_by,
+          createdAt: existing.created_at,
+          hasReceipt: Boolean(existing.receipt_mime),
+          duplicate: true,
+        });
+      }
+      if (existing) {
+        return res.status(409).json({ error: 'This request key was already used for a different disbursement.' });
+      }
+    }
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
 });
 
 app.post('/api/sponsorship/children/:id/care-records', authenticate, checkSponsorshipRecord, async (req, res, next) => {
@@ -2346,7 +2952,7 @@ app.post('/api/public/sponsor-status', guardianRateLimit, async (req, res, next)
     await sponsorshipTablesReady;
     const [disbursements] = await pool.execute(
       `SELECT id, amount, DATE_FORMAT(disbursed_on, '%Y-%m-%d') AS disbursed_on,
-              description, receipt_mime
+              receipt_mime
        FROM sponsorship_disbursements
        WHERE participant_id = ?
        ORDER BY disbursed_on DESC, id DESC
@@ -2364,14 +2970,10 @@ app.post('/api/public/sponsor-status', guardianRateLimit, async (req, res, next)
         schoolAddress: child.school_address_encrypted
           ? decrypt(child.school_address_encrypted)
           : '',
-        sponsorStatus: child.sponsorship_status || 'unknown',
-        lifecycle: child.sponsorship_lifecycle || 'active',
-        monthlyAllowance: Number(child.monthly_allowance || 0),
         disbursements: disbursements.map((record) => ({
           id: record.id,
           amount: Number(record.amount),
           disbursedOn: record.disbursed_on,
-          description: record.description,
           hasReceipt: Boolean(record.receipt_mime),
         })),
       },
@@ -2441,6 +3043,42 @@ app.post('/api/public/sponsor-letters', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.post('/api/public/sponsor-updates', guardianRateLimit, async (req, res, next) => {
+  try {
+    const qrPayload = String(req.body.qrPayload || '');
+    const passcode = String(req.body.passcode || '');
+    if (!qrPayload || qrPayload.length > 4096 || !passcode) {
+      return res.status(400).json({ error: 'Scan the child QR code and enter the passcode' });
+    }
+    const verification = await verifyPublicSponsoredChild(qrPayload, passcode);
+    if (verification.error) return res.status(verification.status).json({ error: verification.error });
+    await sponsoredChildUpdatesReady;
+    const [rows] = await pool.execute(
+      `SELECT id, update_type, recorded_on, activity_encrypted, height_encrypted,
+              weight_encrypted, note_encrypted, created_at
+       FROM sponsored_child_updates
+       WHERE participant_id = ?
+       ORDER BY recorded_on DESC, id DESC
+       LIMIT 100`,
+      [verification.child.id],
+    );
+    res.json({
+      updates: rows.map((row) => ({
+        id: row.id,
+        type: row.update_type,
+        recordedOn: row.recorded_on instanceof Date
+          ? row.recorded_on.toISOString().slice(0, 10)
+          : String(row.recorded_on).slice(0, 10),
+        activity: decrypt(row.activity_encrypted),
+        heightCm: decrypt(row.height_encrypted),
+        weightKg: decrypt(row.weight_encrypted),
+        note: decrypt(row.note_encrypted),
+        createdAt: row.created_at,
+      })),
+    });
+  } catch (error) { next(error); }
+});
+
 app.post('/api/public/sponsor-receipt', async (req, res, next) => {
   try {
     const qrPayload = String(req.body.qrPayload || '');
@@ -2462,43 +3100,16 @@ app.post('/api/public/sponsor-receipt', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post('/api/public/goer-profile', async (req, res, next) => {
-  try {
-    const qrPayload = String(req.body.qrPayload || '');
-    if (!qrPayload || qrPayload.length > 4096) {
-      return res.status(400).json({ error: 'Scan or enter your Goer QR code' });
-    }
-    const [rows] = await pool.execute(
-      `SELECT p.id, p.full_name_encrypted, p.participant_code
-       FROM participants p
-       JOIN qr_codes q ON q.participant_id = p.id
-       WHERE q.qr_uid = ? AND q.status = 'active'
-         AND p.participant_type = 'goer' AND p.status <> 'deleted'
-       LIMIT 1`,
-      [qrPayload],
-    );
-    if (!rows[0]) return res.status(404).json({ error: 'Active Goer QR code not found' });
-
-    const [attendance] = await pool.execute(
-      `SELECT event_name, checked_in_at, location, status
-       FROM check_in_logs
-       WHERE participant_id = ?
-       ORDER BY checked_in_at DESC
-       LIMIT 20`,
-      [rows[0].id],
-    );
-    res.json({
-      goer: {
-        name: decrypt(rows[0].full_name_encrypted),
-        participantCode: rows[0].participant_code,
-      },
-      attendance,
-    });
-  } catch (error) { next(error); }
-});
-
 app.post('/api/participants/:id/profile', authenticate, checkPermission('portal:view'), async (req, res, next) => {
   try {
+    await goerQrRevocationReady;
+    const [[participantType]] = await pool.execute(
+      'SELECT participant_type FROM participants WHERE id = ? LIMIT 1',
+      [req.params.id],
+    );
+    if (participantType?.participant_type !== 'sponsored_child') {
+      return res.status(404).json({ error: 'Sponsored child participant not found' });
+    }
     const [qrRows] = await pool.execute('SELECT id FROM qr_codes WHERE participant_id = ? AND qr_uid = ? AND status = \'active\' LIMIT 1', [req.params.id, req.body.qrPayload]);
     const [rows] = await pool.execute('SELECT * FROM participants WHERE id = ? LIMIT 1', [req.params.id]);
     if (!qrRows[0] || !rows[0] || !rows[0].passcode_hash || !(await bcrypt.compare(req.body.passcode || '', rows[0].passcode_hash))) return res.status(403).json({ error: 'QR code and passcode verification failed' });
@@ -2589,6 +3200,662 @@ app.get('/api/risk-scores/validation', authenticate, checkPermission('analytics:
 app.post('/api/risk-scores/refresh', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
   try {
     res.json(await refreshRiskScores());
+  } catch (error) { next(error); }
+});
+
+const ANALYTICS_INTERVALS = new Set(['day', 'week', 'month', 'year']);
+const PARTICIPANT_TYPE_FILTERS = new Set(['all', 'sponsored_child', 'goer']);
+const RISK_LEVEL_FILTERS = new Set(['all', 'high', 'medium', 'low']);
+const ENCRYPTED_EXPORT_FORMAT = 'church-analytics-encrypted-export';
+
+function parseAnalyticsDate(value) {
+  const raw = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const parsed = new Date(`${raw}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function analyticsDateRange(req) {
+  const defaultFrom = new Date();
+  defaultFrom.setDate(defaultFrom.getDate() - 89);
+  const start = parseAnalyticsDate(req.query.from) || defaultFrom;
+  const end = parseAnalyticsDate(req.query.to) || new Date();
+  if (end.getTime() < start.getTime()) return null;
+  return { start, end, endExclusive: new Date(end.getTime() + 24 * 60 * 60 * 1000) };
+}
+
+function normalizeInterval(value) {
+  return ANALYTICS_INTERVALS.has(value) ? value : 'week';
+}
+
+function normalizeTypeFilter(value) {
+  return PARTICIPANT_TYPE_FILTERS.has(value) ? value : 'all';
+}
+
+function normalizeRiskFilter(value) {
+  return RISK_LEVEL_FILTERS.has(value) ? value : 'all';
+}
+
+function roundRate(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function localDayKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function localMonthKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function weekStart(date) {
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  start.setDate(start.getDate() - start.getDay());
+  return start;
+}
+
+function bucketLabel(key, interval) {
+  const parts = key.split('-').map(Number);
+  if (interval === 'year') return key;
+  if (interval === 'month') {
+    return new Date(parts[0], parts[1] - 1).toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+  }
+  const label = new Date(parts[0], parts[1] - 1, parts[2]).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return interval === 'week' ? `Week of ${label}` : label;
+}
+
+function buildRiskEvidence(dates, now) {
+  if (dates.length < 2) {
+    return {
+      checkIns180Days: dates.length,
+      checkInsPerWeek: 0,
+      regularity: 0,
+      recencyDays: dates.length ? Math.floor((now - dates[dates.length - 1].getTime()) / 86400000) : null,
+      trend: 'unknown',
+      insufficientData: true,
+      summary: dates.length
+        ? `Insufficient data: only ${dates.length} recorded check-in${dates.length === 1 ? '' : 's'} in the last 180 days.`
+        : 'Insufficient data: no recorded check-ins in the last 180 days.',
+    };
+  }
+  const last90 = dates.filter((date) => now - date.getTime() <= 90 * 86400000);
+  const last30 = last90.filter((date) => now - date.getTime() <= 30 * 86400000);
+  const prior30 = last90.filter((date) => {
+    const age = now - date.getTime();
+    return age > 30 * 86400000 && age <= 60 * 86400000;
+  });
+  const weeks = new Set(last90.map((date) => weekStart(date).getTime()));
+  const recencyDays = Math.floor((now - dates[dates.length - 1].getTime()) / 86400000);
+  const checkInsPerWeek = Math.round((last90.length / 13) * 10) / 10;
+  const regularity = Math.round(Math.min(weeks.size / 13, 1) * 100);
+  let trend = 'stable';
+  if (last30.length < prior30.length - 1) trend = 'declining';
+  else if (last30.length > prior30.length + 1) trend = 'improving';
+  const reasons = [];
+  if (trend === 'declining') reasons.push(`attendance declined (${last30.length} check-ins in the last 30 days vs ${prior30.length} in the prior 30 days)`);
+  if (trend === 'improving') reasons.push(`attendance improved (${last30.length} check-ins in the last 30 days vs ${prior30.length} in the prior 30 days)`);
+  if (recencyDays >= 30) reasons.push(`no check-in for ${recencyDays} days`);
+  else if (recencyDays >= 14) reasons.push(`last check-in ${recencyDays} days ago`);
+  if (regularity < 30) reasons.push(`attended only ${weeks.size} of the last 13 weeks`);
+  const summary = reasons.length
+    ? `${reasons.map((reason, index) => (index === 0 ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}` : reason)).join('; ')}.`
+    : 'Attendance is steady with no recent decline.';
+  return {
+    checkIns180Days: dates.length,
+    checkIns90Days: last90.length,
+    checkInsPerWeek,
+    regularity,
+    recencyDays,
+    trend,
+    insufficientData: false,
+    summary,
+  };
+}
+
+async function computeRiskRecords(riskFilter) {
+  await attendanceModelValidationReady;
+  const levelClause = riskFilter === 'all' ? '' : ' AND r.risk_level = ?';
+  const params = riskFilter === 'all' ? [] : [riskFilter];
+  const [rows] = await pool.execute(
+    `SELECT r.participant_id, r.risk_score, r.risk_level, r.model_version, r.computed_at,
+            p.participant_code, p.participant_type, p.grade_level, p.education_level
+     FROM predictive_risk_scores r
+     JOIN participants p ON p.id = r.participant_id
+     JOIN (SELECT participant_id, MAX(computed_at) AS latest FROM predictive_risk_scores GROUP BY participant_id) latest
+       ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at
+     WHERE p.status = 'active'${levelClause}
+     ORDER BY r.risk_score DESC, p.participant_code ASC`,
+    params,
+  );
+  if (!rows.length) return [];
+  const placeholders = rows.map(() => '?').join(',');
+  const [history] = await pool.execute(
+    `SELECT participant_id, checked_in_at FROM check_in_logs
+     WHERE status = 'checked_in' AND checked_in_at >= DATE_SUB(NOW(), INTERVAL 180 DAY)
+       AND participant_id IN (${placeholders})
+     ORDER BY checked_in_at ASC`,
+    rows.map((row) => row.participant_id),
+  );
+  const byParticipant = new Map();
+  for (const row of history) {
+    const checkedInAt = row.checked_in_at instanceof Date ? row.checked_in_at : new Date(row.checked_in_at);
+    if (!byParticipant.has(row.participant_id)) byParticipant.set(row.participant_id, []);
+    byParticipant.get(row.participant_id).push(checkedInAt);
+  }
+  const now = Date.now();
+  return rows.map((row) => {
+    const dates = (byParticipant.get(row.participant_id) || []).sort((left, right) => left - right);
+    return {
+      participantId: row.participant_id,
+      participantCode: row.participant_code,
+      participantType: row.participant_type,
+      gradeLevel: row.grade_level || '',
+      educationLevel: row.education_level || '',
+      riskScore: Number(row.risk_score),
+      riskLevel: row.risk_level,
+      modelVersion: row.model_version,
+      computedAt: row.computed_at,
+      ...buildRiskEvidence(dates, now),
+    };
+  });
+}
+
+async function computeAttendanceTrends(range, interval, participantType, event) {
+  const typeClause = participantType === 'all' ? '' : ' AND p.participant_type = ?';
+  const eventClause = event ? ' AND c.event_name = ?' : '';
+  const typeParams = participantType === 'all' ? [] : [participantType];
+  const checkinParams = event ? [...typeParams, event] : typeParams;
+  const [rows] = await pool.execute(
+    `SELECT c.participant_id, p.participant_type, c.checked_in_at
+     FROM check_in_logs c
+     JOIN participants p ON p.id = c.participant_id
+     WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?${typeClause}${eventClause}
+     ORDER BY c.checked_in_at ASC`,
+    [...checkinParams, range.start, range.endExclusive],
+  );
+  const [eventRows] = await pool.execute(
+    `SELECT DISTINCT c.event_name AS event_name
+     FROM check_in_logs c
+     JOIN participants p ON p.id = c.participant_id
+     WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?${typeClause}
+     ORDER BY c.event_name ASC`,
+    [...typeParams, range.start, range.endExclusive],
+  );
+  const buckets = new Map();
+  for (const row of rows) {
+    const checkedInAt = row.checked_in_at instanceof Date ? row.checked_in_at : new Date(row.checked_in_at);
+    let key;
+    if (interval === 'day') key = localDayKey(checkedInAt);
+    else if (interval === 'month') key = localMonthKey(checkedInAt);
+    else if (interval === 'year') key = String(checkedInAt.getFullYear());
+    else key = localDayKey(weekStart(checkedInAt));
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        totalCheckIns: 0,
+        participantIds: new Set(),
+        sponsoredCheckIns: 0,
+        goerCheckIns: 0,
+        sponsoredIds: new Set(),
+        goerIds: new Set(),
+      });
+    }
+    const bucket = buckets.get(key);
+    bucket.totalCheckIns += 1;
+    bucket.participantIds.add(row.participant_id);
+    if (row.participant_type === 'sponsored_child') {
+      bucket.sponsoredCheckIns += 1;
+      bucket.sponsoredIds.add(row.participant_id);
+    } else {
+      bucket.goerCheckIns += 1;
+      bucket.goerIds.add(row.participant_id);
+    }
+  }
+  const series = [];
+  const cursor = new Date(range.start.getFullYear(), range.start.getMonth(), range.start.getDate());
+  if (interval === 'week') cursor.setDate(cursor.getDate() - cursor.getDay());
+  else if (interval === 'month') cursor.setDate(1);
+  else if (interval === 'year') cursor.setMonth(0, 1);
+  const end = new Date(range.end.getFullYear(), range.end.getMonth(), range.end.getDate());
+  while (cursor <= end && series.length < 400) {
+    let key;
+    if (interval === 'day') key = localDayKey(cursor);
+    else if (interval === 'month') key = localMonthKey(cursor);
+    else if (interval === 'year') key = String(cursor.getFullYear());
+    else key = localDayKey(cursor);
+    const bucket = buckets.get(key);
+    series.push({
+      key,
+      label: bucketLabel(key, interval),
+      totalCheckIns: bucket ? bucket.totalCheckIns : 0,
+      uniqueParticipants: bucket ? bucket.participantIds.size : 0,
+      sponsoredCheckIns: bucket ? bucket.sponsoredCheckIns : 0,
+      goerCheckIns: bucket ? bucket.goerCheckIns : 0,
+      sponsoredUnique: bucket ? bucket.sponsoredIds.size : 0,
+      goerUnique: bucket ? bucket.goerIds.size : 0,
+    });
+    if (interval === 'day') cursor.setDate(cursor.getDate() + 1);
+    else if (interval === 'week') cursor.setDate(cursor.getDate() + 7);
+    else if (interval === 'month') cursor.setMonth(cursor.getMonth() + 1);
+    else cursor.setFullYear(cursor.getFullYear() + 1);
+  }
+  return {
+    interval,
+    participantType,
+    event: event || null,
+    events: eventRows.map((row) => row.event_name),
+    records: series,
+  };
+}
+
+async function computeSponsoredChildren(filters) {
+  await participantProfileColumnsReady;
+  await sponsorshipTablesReady;
+  const clauses = ["p.participant_type = 'sponsored_child'", "p.status <> 'deleted'"];
+  const params = [];
+  if (filters.educationLevel) { clauses.push('p.education_level = ?'); params.push(filters.educationLevel); }
+  if (filters.gradeLevel) { clauses.push('p.grade_level = ?'); params.push(filters.gradeLevel); }
+  if (filters.sponsorshipStatus && filters.sponsorshipStatus !== 'all') { clauses.push('p.sponsorship_lifecycle = ?'); params.push(filters.sponsorshipStatus); }
+  const [rows] = await pool.execute(
+    `SELECT p.id, p.participant_code, p.full_name_encrypted, p.grade_level, p.education_level,
+            p.sponsorship_lifecycle, p.sponsorship_status,
+            (SELECT COUNT(*) FROM check_in_logs c WHERE c.participant_id = p.id AND c.status = 'checked_in') AS checkInCount,
+            (SELECT MAX(c.checked_in_at) FROM check_in_logs c WHERE c.participant_id = p.id AND c.status = 'checked_in') AS lastCheckIn,
+            r.risk_score, r.risk_level, r.computed_at
+     FROM participants p
+     LEFT JOIN (
+       SELECT s.participant_id, s.risk_score, s.risk_level, s.computed_at
+       FROM predictive_risk_scores s
+       JOIN (SELECT participant_id, MAX(computed_at) AS latest FROM predictive_risk_scores GROUP BY participant_id) l
+         ON l.participant_id = s.participant_id AND l.latest = s.computed_at
+     ) r ON r.participant_id = p.id
+     WHERE ${clauses.join(' AND ')}
+     ORDER BY p.participant_code ASC`,
+    params,
+  );
+  return rows
+    .filter((row) => filters.riskLevel === 'all' || String(row.risk_level || '') === filters.riskLevel)
+    .map((row) => ({
+      id: row.id,
+      participantCode: row.participant_code,
+      name: decrypt(row.full_name_encrypted) || 'Unnamed child',
+      gradeLevel: row.grade_level || '',
+      educationLevel: row.education_level || '',
+      sponsorshipLifecycle: row.sponsorship_lifecycle || 'active',
+      sponsorshipStatus: row.sponsorship_status || 'unknown',
+      checkInCount: Number(row.checkInCount) || 0,
+      lastCheckIn: row.lastCheckIn,
+      riskScore: row.risk_score === null ? null : Number(row.risk_score),
+      riskLevel: row.risk_level || 'not_scored',
+      computedAt: row.computed_at,
+    }));
+}
+
+async function computeParticipantHistory(participantId) {
+  const [[participant]] = await pool.execute(
+    `SELECT id, participant_code, full_name_encrypted, participant_type, grade_level, education_level, status
+     FROM participants WHERE id = ? LIMIT 1`,
+    [participantId],
+  );
+  if (!participant) return null;
+  const [attendance] = await pool.execute(
+    `SELECT event_name, location, checked_in_at, checked_out_at, status
+     FROM check_in_logs WHERE participant_id = ?
+     ORDER BY checked_in_at DESC, id DESC LIMIT 200`,
+    [participantId],
+  );
+  const [[summary]] = await pool.execute(
+    `SELECT COUNT(*) AS totalCheckIns, COUNT(DISTINCT event_name) AS uniqueEvents,
+            MAX(checked_in_at) AS lastCheckIn, MIN(checked_in_at) AS firstCheckIn
+     FROM check_in_logs WHERE participant_id = ? AND status = 'checked_in'`,
+    [participantId],
+  );
+  return {
+    participant: {
+      id: participant.id,
+      participantCode: participant.participant_code,
+      name: decrypt(participant.full_name_encrypted) || 'Unnamed participant',
+      participantType: participant.participant_type,
+      gradeLevel: participant.grade_level || '',
+      educationLevel: participant.education_level || '',
+      status: participant.status,
+    },
+    summary: {
+      totalCheckIns: Number(summary.totalCheckIns) || 0,
+      uniqueEvents: Number(summary.uniqueEvents) || 0,
+      lastCheckIn: summary.lastCheckIn,
+      firstCheckIn: summary.firstCheckIn,
+    },
+    attendance: attendance.map((row) => ({
+      eventName: row.event_name,
+      location: row.location,
+      checkedInAt: row.checked_in_at,
+      checkedOutAt: row.checked_out_at,
+      status: row.status,
+    })),
+  };
+}
+
+function encryptExportPayload(content, password) {
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const key = crypto.pbkdf2Sync(String(password), salt, 100000, 32, 'sha256');
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ciphertext = Buffer.concat([cipher.update(String(content), 'utf8'), cipher.final()]);
+  return JSON.stringify({
+    format: ENCRYPTED_EXPORT_FORMAT,
+    version: 1,
+    algorithm: 'aes-256-gcm',
+    kdf: 'pbkdf2-sha256-100000',
+    salt: salt.toString('base64'),
+    iv: iv.toString('base64'),
+    authTag: cipher.getAuthTag().toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+  }, null, 2);
+}
+
+function sendReport(res, filename, content, password) {
+  if (password) {
+    return res.type('application/json').attachment(`${filename}.enc`).send(encryptExportPayload(content, password));
+  }
+  if (filename.endsWith('.pdf')) {
+    return res.type('application/pdf').attachment(filename).send(content);
+  }
+  return res.type('text/csv').attachment(filename).send(content);
+}
+
+function renderPdf(build) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const doc = new PDFDocument();
+    doc.on('data', (chunk) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    build(doc);
+    doc.end();
+  });
+}
+
+function csvPayload(fields, rows) {
+  return new Parser({ fields }).parse(rows);
+}
+
+function formatDateTime(value) {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+app.get('/api/analytics/overview', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    const range = analyticsDateRange(req);
+    if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
+    const participantType = normalizeTypeFilter(req.query.participantType);
+    const typeClause = participantType === 'all' ? '' : ' AND p.participant_type = ?';
+    const typeParams = participantType === 'all' ? [] : [participantType];
+    const [[participants]] = await pool.execute(
+      `SELECT COUNT(*) AS total FROM participants WHERE status = 'active'${typeClause}`,
+      typeParams,
+    );
+    const [checkins] = await pool.execute(
+      `SELECT COUNT(*) AS totalCheckIns,
+              COUNT(DISTINCT c.participant_id) AS uniqueParticipants,
+              COALESCE(SUM(p.participant_type = 'sponsored_child'), 0) AS sponsoredCheckIns,
+              COALESCE(SUM(p.participant_type = 'goer'), 0) AS goerCheckIns,
+              COUNT(DISTINCT CASE WHEN p.participant_type = 'sponsored_child' THEN c.participant_id END) AS sponsoredUnique,
+              COUNT(DISTINCT CASE WHEN p.participant_type = 'goer' THEN c.participant_id END) AS goerUnique
+       FROM check_in_logs c
+       JOIN participants p ON p.id = c.participant_id
+       WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?${typeClause}`,
+      [...typeParams, range.start, range.endExclusive],
+    );
+    const [[atRisk]] = await pool.execute(
+      `SELECT COUNT(*) AS atRiskChildren
+       FROM predictive_risk_scores r
+       JOIN participants p ON p.id = r.participant_id
+       JOIN (SELECT participant_id, MAX(computed_at) AS latest FROM predictive_risk_scores GROUP BY participant_id) latest
+         ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at
+       WHERE p.participant_type = 'sponsored_child' AND p.status = 'active' AND r.risk_level IN ('medium', 'high')`,
+    );
+    const total = Number(participants.total) || 0;
+    const unique = Number(checkins.uniqueParticipants) || 0;
+    res.json({
+      from: localDayKey(range.start),
+      to: localDayKey(range.end),
+      participantType,
+      totalParticipants: total,
+      totalCheckIns: Number(checkins.totalCheckIns) || 0,
+      uniqueParticipants: unique,
+      attendanceRate: total ? roundRate((unique / total) * 100) : 0,
+      atRiskChildren: Number(atRisk.atRiskChildren) || 0,
+      sponsored: {
+        checkIns: Number(checkins.sponsoredCheckIns) || 0,
+        uniqueParticipants: Number(checkins.sponsoredUnique) || 0,
+      },
+      goers: {
+        checkIns: Number(checkins.goerCheckIns) || 0,
+        uniqueParticipants: Number(checkins.goerUnique) || 0,
+      },
+    });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/analytics/trends', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    const range = analyticsDateRange(req);
+    if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
+    res.json(await computeAttendanceTrends(
+      range,
+      normalizeInterval(req.query.interval),
+      normalizeTypeFilter(req.query.participantType),
+      String(req.query.event || '').trim().slice(0, 100),
+    ));
+  } catch (error) { next(error); }
+});
+
+app.get('/api/analytics/risk', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    res.json({ records: await computeRiskRecords(normalizeRiskFilter(req.query.riskLevel)) });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/analytics/sponsored-children', authenticate, checkPermission('analytics:view'), checkPermission('sponsorship:view'), async (req, res, next) => {
+  try {
+    res.json({ records: await computeSponsoredChildren({
+      educationLevel: String(req.query.educationLevel || '').trim(),
+      gradeLevel: String(req.query.gradeLevel || '').trim(),
+      sponsorshipStatus: String(req.query.sponsorshipStatus || '').trim(),
+      riskLevel: normalizeRiskFilter(req.query.riskLevel),
+    }) });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/analytics/participants/:id/history', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    const participantId = Number(req.params.id);
+    if (!Number.isSafeInteger(participantId) || participantId < 1) {
+      return res.status(400).json({ error: 'Select a valid participant' });
+    }
+    const history = await computeParticipantHistory(participantId);
+    if (!history) return res.status(404).json({ error: 'Participant not found' });
+    res.json(history);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/reports/analytics-attendance', authenticate, checkPermission('reports:view'), async (req, res, next) => {
+  try {
+    const range = analyticsDateRange(req);
+    if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
+    const interval = normalizeInterval(req.query.interval);
+    const participantType = normalizeTypeFilter(req.query.participantType);
+    const event = String(req.query.event || '').trim().slice(0, 100);
+    const password = req.query.password ? String(req.query.password) : '';
+    const trends = await computeAttendanceTrends(range, interval, participantType, event);
+    const totalCheckIns = trends.records.reduce((sum, row) => sum + row.totalCheckIns, 0);
+    const uniqueIds = new Set();
+    const stamp = new Date().toISOString().slice(0, 10);
+    const filename = `attendance-summary-${interval}-${stamp}`;
+    if (req.query.format === 'pdf') {
+      const pdf = await renderPdf((doc) => {
+        doc.fontSize(18).text('Attendance Summary Report');
+        doc.fontSize(10).text(`Generated: ${new Date().toLocaleString()}`);
+        doc.text(`Range: ${localDayKey(range.start)} to ${localDayKey(range.end)} · Interval: ${interval} · Participant type: ${participantType}${event ? ` · Event: ${event}` : ''}`);
+        doc.moveDown();
+        doc.fontSize(11).text('Date · Check-ins · Unique participants · Sponsored children · Church goers');
+        trends.records.forEach((row) => {
+          doc.fontSize(9).text(`${row.label} | ${row.totalCheckIns} check-ins | ${row.uniqueParticipants} unique | sponsored ${row.sponsoredCheckIns} | goers ${row.goerCheckIns}`);
+        });
+        doc.moveDown();
+        doc.fontSize(10).text(`Total check-ins in range: ${totalCheckIns}`);
+      });
+      return sendReport(res, `${filename}.pdf`, pdf, password);
+    }
+    return sendReport(
+      res,
+      `${filename}.csv`,
+      csvPayload(
+        ['label', 'totalCheckIns', 'uniqueParticipants', 'sponsoredCheckIns', 'goerCheckIns', 'sponsoredUnique', 'goerUnique'],
+        trends.records,
+      ),
+      password,
+    );
+  } catch (error) { next(error); }
+});
+
+app.get('/api/reports/at-risk', authenticate, checkPermission('reports:view'), checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    const riskLevel = normalizeRiskFilter(req.query.riskLevel);
+    const password = req.query.password ? String(req.query.password) : '';
+    const records = await computeRiskRecords(riskLevel);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const filename = `at-risk-participants-${riskLevel}-${stamp}`;
+    if (req.query.format === 'pdf') {
+      const pdf = await renderPdf((doc) => {
+        doc.fontSize(18).text('At-Risk Participant Report');
+        doc.fontSize(10).text(`Generated: ${new Date().toLocaleString()} · Risk level filter: ${riskLevel}`);
+        doc.moveDown();
+        doc.fontSize(11).text('Participant code · Type · Risk score · Risk level · Evidence');
+        records.forEach((row) => {
+          doc.fontSize(9).text(`${row.participantCode} | ${row.participantType} | ${row.riskScore} | ${row.riskLevel} | ${row.insufficientData ? 'Insufficient data' : row.summary}`);
+        });
+        doc.moveDown();
+        doc.fontSize(10).text('Risk scores are decision-support information and require staff review. They are not a sole basis for decisions about a child.');
+      });
+      return sendReport(res, `${filename}.pdf`, pdf, password);
+    }
+    return sendReport(
+      res,
+      `${filename}.csv`,
+      csvPayload(
+        ['participantCode', 'participantType', 'gradeLevel', 'riskScore', 'riskLevel', 'modelVersion', 'checkInsPerWeek', 'regularity', 'recencyDays', 'trend', 'insufficientData', 'evidence'],
+        records.map((row) => ({
+          participantCode: row.participantCode,
+          participantType: row.participantType,
+          gradeLevel: row.gradeLevel,
+          riskScore: row.riskScore,
+          riskLevel: row.riskLevel,
+          modelVersion: row.modelVersion,
+          checkInsPerWeek: row.checkInsPerWeek,
+          regularity: row.regularity,
+          recencyDays: row.recencyDays,
+          trend: row.trend,
+          insufficientData: row.insufficientData,
+          evidence: row.summary,
+        })),
+      ),
+      password,
+    );
+  } catch (error) { next(error); }
+});
+
+app.get('/api/reports/participant-history', authenticate, checkPermission('reports:view'), checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    const participantId = Number(req.query.participantId);
+    if (!Number.isSafeInteger(participantId) || participantId < 1) {
+      return res.status(400).json({ error: 'Select a valid participant' });
+    }
+    const password = req.query.password ? String(req.query.password) : '';
+    const history = await computeParticipantHistory(participantId);
+    if (!history) return res.status(404).json({ error: 'Participant not found' });
+    const stamp = new Date().toISOString().slice(0, 10);
+    const filename = `participant-history-${history.participant.participantCode}-${stamp}`;
+    if (req.query.format === 'pdf') {
+      const pdf = await renderPdf((doc) => {
+        doc.fontSize(18).text('Participant Attendance History');
+        doc.fontSize(10).text(`Generated: ${new Date().toLocaleString()}`);
+        doc.moveDown();
+        doc.fontSize(11).text(`${history.participant.name} (${history.participant.participantCode})`);
+        doc.fontSize(9).text(`Type: ${history.participant.participantType} · Grade: ${history.participant.gradeLevel || '—'} · Check-ins: ${history.summary.totalCheckIns} across ${history.summary.uniqueEvents} events`);
+        doc.moveDown();
+        doc.fontSize(11).text('Date · Event · Location · Checked in · Checked out');
+        history.attendance.forEach((row) => {
+          doc.fontSize(9).text(`${formatDateTime(row.checkedInAt)} | ${row.eventName} | ${row.location || '—'} | ${formatDateTime(row.checkedInAt)} | ${row.checkedOutAt ? formatDateTime(row.checkedOutAt) : 'Not checked out'}`);
+        });
+      });
+      return sendReport(res, `${filename}.pdf`, pdf, password);
+    }
+    return sendReport(
+      res,
+      `${filename}.csv`,
+      csvPayload(
+        ['participantCode', 'name', 'participantType', 'eventName', 'location', 'checkedInAt', 'checkedOutAt', 'status'],
+        history.attendance.map((row) => ({
+          participantCode: history.participant.participantCode,
+          name: history.participant.name,
+          participantType: history.participant.participantType,
+          eventName: row.eventName,
+          location: row.location || '',
+          checkedInAt: row.checkedInAt,
+          checkedOutAt: row.checkedOutAt || '',
+          status: row.status,
+        })),
+      ),
+      password,
+    );
+  } catch (error) { next(error); }
+});
+
+app.get('/api/reports/audit-trail', authenticate, checkPermission('reports:view'), checkRole(['System Administrator']), async (req, res, next) => {
+  try {
+    await auditTableReady;
+    const from = parseAnalyticsDate(req.query.from);
+    const to = parseAnalyticsDate(req.query.to);
+    const clauses = [];
+    const params = [];
+    if (from) { clauses.push('created_at >= ?'); params.push(from); }
+    if (to) { clauses.push('created_at < ?'); params.push(new Date(to.getTime() + 24 * 60 * 60 * 1000)); }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const [entries] = await pool.execute(
+      `SELECT id, user_id, username, role, action, entity_type, entity_id, details, created_at
+       FROM audit_logs ${where}
+       ORDER BY created_at DESC, id DESC LIMIT 5000`,
+      params,
+    );
+    const password = req.query.password ? String(req.query.password) : '';
+    const stamp = new Date().toISOString().slice(0, 10);
+    const filename = `audit-trail-${stamp}`;
+    const rows = entries.map((entry) => ({
+      id: entry.id,
+      timestamp: entry.created_at,
+      username: entry.username,
+      role: entry.role,
+      action: entry.action,
+      entityType: entry.entity_type,
+      entityId: entry.entity_id,
+      details: entry.details ? JSON.stringify(entry.details) : '',
+    }));
+    if (req.query.format === 'pdf') {
+      const pdf = await renderPdf((doc) => {
+        doc.fontSize(18).text('System Audit Trail');
+        doc.fontSize(10).text(`Generated: ${new Date().toLocaleString()} · Entries: ${rows.length}`);
+        doc.moveDown();
+        doc.fontSize(11).text('Timestamp · User · Role · Action · Entity');
+        rows.forEach((row) => {
+          doc.fontSize(8).text(`${formatDateTime(row.timestamp)} | ${row.username} | ${row.role} | ${row.action} | ${row.entityType} ${row.entityId || ''}`);
+        });
+      });
+      return sendReport(res, `${filename}.pdf`, pdf, password);
+    }
+    return sendReport(res, `${filename}.csv`, csvPayload(['id', 'timestamp', 'username', 'role', 'action', 'entityType', 'entityId', 'details'], rows), password);
   } catch (error) { next(error); }
 });
 
