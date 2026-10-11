@@ -1382,7 +1382,7 @@ function Participants({ canManage, user }) {
                 className="form-control"
                 type="search"
                 aria-label="Search participants by full name"
-                placeholder="Search by full name"
+                placeholder="Search"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
               />
