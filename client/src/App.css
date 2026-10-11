@@ -762,7 +762,7 @@ label.form-label:has(+ textarea[required])::after{
 .participant-profile-card h2{margin:9px 0 5px;color:#102f53;font:700 clamp(24px,4vw,34px) 'Space Grotesk';letter-spacing:-.8px}
 .participant-profile-actions{display:flex;flex-wrap:wrap;gap:9px;margin:18px 0 20px}
 .participant-profile-actions .btn{border-radius:10px}
-.participant-profile-card .participant-qr-image{margin:18px 0;max-width:210px}
+.participant-profile-card .participant-qr-image{display:block;margin:18px auto 22px;max-width:210px}
 .participant-profile-card .profile-grid{gap:12px;padding-top:18px}
 .participant-profile-card .profile-grid>div{min-width:0;padding:15px;border:1px solid #e4ecf4;border-radius:12px;background:#fff}
 .participant-profile-card .profile-grid small{display:block;color:#71849a;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
