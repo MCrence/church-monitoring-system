@@ -152,9 +152,11 @@ Messages API; it does not include the child's name, passcode, or other profile
 details. The registration response and audit log distinguish an SMS accepted
 for processing, one Semaphore reports sent to the carrier network, and a
 failed or unconfigured send. A carrier-network status does not guarantee that
-the guardian received or read the message. Other participant-related SMS
-events are not sent because the application currently has no other notification
-workflow.
+the guardian received or read the message. When authorized staff record a
+growth measurement, attended activity, or care note, the server also sends a
+brief guardian SMS identifying the update type and date, without including
+measurements or private note contents. The saved update remains available if
+SMS is unconfigured or delivery fails, and the page reports the SMS status.
 
 Configure these variables on the backend service (for example, Render), then
 restart/redeploy it:

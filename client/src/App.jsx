@@ -4138,7 +4138,7 @@ function SponsoredCare({ user }) {
     setError("");
     setMessage("");
     try {
-      await apiCall(`/sponsorship/children/${selectedChildId}/updates`, {
+      const result = await apiCall(`/sponsorship/children/${selectedChildId}/updates`, {
         method: "POST",
         body: JSON.stringify(childUpdate),
       });
@@ -4152,7 +4152,14 @@ function SponsoredCare({ user }) {
       });
       setChildUpdates(await apiCall(`/sponsorship/children/${selectedChildId}/updates`));
       setActiveAction(null);
-      setMessage("Sponsored child update recorded.");
+      const smsStatus = {
+        sent: "Guardian SMS sent to the carrier.",
+        accepted: "Guardian SMS accepted for delivery.",
+        failed: "Guardian SMS could not be sent.",
+        not_configured: "Guardian SMS was not sent because SMS is not configured.",
+        invalid_number: "Guardian SMS was not sent because the guardian mobile number is missing or invalid.",
+      }[result.notification?.status] || "Guardian SMS status is unavailable.";
+      setMessage(`Sponsored child update recorded. ${smsStatus}`);
     } catch (saveError) {
       setError(saveError.message);
     }

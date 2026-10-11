@@ -2397,7 +2397,7 @@ app.post('/api/sponsorship/children/:id/updates', authenticate, checkPermission(
       return res.status(400).json({ error: 'Enter a note for this update' });
     }
     const [[child]] = await pool.execute(
-      `SELECT id FROM participants
+      `SELECT id, emergency_contact_phone_encrypted FROM participants
        WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
        LIMIT 1`,
       [req.params.id],
@@ -2419,11 +2419,35 @@ app.post('/api/sponsorship/children/:id/updates', authenticate, checkPermission(
         req.user.id,
       ],
     );
+    const guardianPhone = normalizePhilippineMobile(decrypt(child.emergency_contact_phone_encrypted));
+    let notification;
+    if (!guardianPhone) {
+      notification = { status: 'invalid_number' };
+    } else {
+      try {
+        notification = await sendSemaphoreSms({
+          apiKey: process.env.SEMAPHORE_API_KEY,
+          senderName: process.env.SEMAPHORE_SENDER_NAME,
+          number: guardianPhone,
+          message: `A new ${type === 'growth' ? 'growth measurement' : type === 'activity' ? 'activity' : 'care note'} update was recorded for your child in FMC Field Care on ${recordedOn}. Open the guardian portal to view it.`,
+        });
+      } catch (error) {
+        console.error('Guardian SMS failed for sponsored-child update', {
+          participantId: child.id,
+          updateId: result.insertId,
+          error: error.message,
+        });
+        notification = { status: 'failed' };
+      }
+    }
     await writeAuditLog(req.user, 'sponsorship.child.update.created', 'participant', child.id, {
+      updateId: result.insertId,
       updateType: type,
       recordedOn,
+      guardianSmsStatus: notification.status,
+      ...(notification.providerStatus ? { guardianSmsProviderStatus: notification.providerStatus } : {}),
     });
-    res.status(201).json({ id: result.insertId, type, recordedOn });
+    res.status(201).json({ id: result.insertId, type, recordedOn, notification });
   } catch (error) { next(error); }
 });
 
