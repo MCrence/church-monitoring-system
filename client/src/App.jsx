@@ -728,6 +728,27 @@ function AgeField({ dateOfBirth }) {
     />
   );
 }
+const EditIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+    <path d="m15 5 4 4" />
+  </svg>
+);
+const DeleteIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M3 6h18" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <path d="M10 11v6M14 11v6" />
+  </svg>
+);
+const PrintIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M6 9V3h12v6" />
+    <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+    <path d="M6 14h12v7H6z" />
+  </svg>
+);
 const GenderSelect = ({ id, value, onChange, required = false, error }) => (
   <div className="col-12 col-md-6">
     <label className="form-label" htmlFor={id}>
@@ -1159,6 +1180,16 @@ function Participants({ canManage, user }) {
   const [visiblePasscode, setVisiblePasscode] = useState(null);
   const [passcodeMessage, setPasscodeMessage] = useState("");
   const [loadingPasscode, setLoadingPasscode] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  useEffect(() => {
+    if (!confirmDelete) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape" && !deleting) setConfirmDelete(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [confirmDelete, deleting]);
   const canViewPasscode = ["church administrator", "system administrator"]
     .includes(String(user?.role || "").toLowerCase());
   const refreshParticipants = useCallback(async () => {
@@ -1266,15 +1297,16 @@ function Participants({ canManage, user }) {
   };
   const deleteParticipant = async () => {
     if (!selected) return;
-    if (!window.confirm('Delete participant? This will revoke their QR and mark the participant as deleted.')) return;
+    setConfirmDelete(false);
+    setDeleting(true);
     try {
       const headers = { 'Content-Type': 'application/json', ...(localStorage.token ? { Authorization: `Bearer ${localStorage.token}` } : {}) };
       const resp = await fetch(`${api}/participants/${selected}`, { method: 'DELETE', headers });
       const d = await resp.json().catch(() => ({}));
       if (resp.status === 401) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        window.dispatchEvent(new Event('auth-expired'));
+        localStorage.removeItem("token");
+        localStorage.removeItem("user");
+        window.dispatchEvent(new Event("auth-expired"));
         return;
       }
       if (!resp.ok) throw new Error(d.error || 'Request failed');
@@ -1293,6 +1325,8 @@ function Participants({ canManage, user }) {
       setMessage('Participant deleted.');
     } catch (err) {
       setMessage(err.message);
+    } finally {
+      setDeleting(false);
     }
   };
   const searchQuery = query.trim().toLocaleLowerCase();
@@ -1458,8 +1492,8 @@ function Participants({ canManage, user }) {
             <section className="participant-modal participant-profile-modal" role="dialog" aria-modal="true" aria-labelledby="participant-profile-title">
           {form && !editing ? (
             <div className="participant-qr-card participant-profile-card">
-              <div className="d-flex justify-content-between align-items-start mb-3">
-                <div>
+              <header className="profile-card-header">
+                <div className="profile-card-id">
                   <span className="eyebrow">DIGITAL PARTICIPANT ID</span>
                   <h2 id="participant-profile-title">{form.fullName}</h2>
                   <p className="text-secondary mb-0">
@@ -1469,16 +1503,34 @@ function Participants({ canManage, user }) {
                   </p>
                   <p className="text-secondary mt-2 mb-0">{form.participant_code} · <AgeValue dateOfBirth={form.dateOfBirth} /></p>
                 </div>
-                <button type="button" className="btn-close" aria-label="Close participant profile" onClick={closeProfile} />
-              </div>
-              <div className="participant-profile-actions">
-                {canManage && <button type="button" className="btn btn-dark" onClick={() => { setMessage(""); setEditing(true); }}>Edit details</button>}
-                {canManage && <button type="button" className="btn btn-outline-danger" onClick={deleteParticipant}>Delete participant</button>}
-              </div>
-              {form.participantType === "sponsored_child" && form.qr_code_image ? <img className="participant-qr-image" src={`/${form.qr_code_image}`} alt={`QR code for ${form.participant_code}`} /> : form.participantType === "sponsored_child" ? <p className="text-secondary">No active QR code found.</p> : null}
-              {form.participantType === "sponsored_child" && form.qr_code_image && <div className="d-flex flex-wrap gap-2">
-                <button type="button" className="btn btn-dark" onClick={() => window.print()}>Print QR card</button>
-              </div>}
+                <div className="profile-card-tools">
+                  {canManage && (
+                    <>
+                      <button type="button" className="profile-tool-btn" title="Edit details" aria-label="Edit participant details" onClick={() => { setMessage(""); setEditing(true); }}>
+                        <EditIcon />
+                      </button>
+                      <button type="button" className="profile-tool-btn profile-tool-btn-danger" title="Delete participant" aria-label="Delete participant" onClick={() => setConfirmDelete(true)}>
+                        <DeleteIcon />
+                      </button>
+                    </>
+                  )}
+                  <button type="button" className="btn-close" aria-label="Close participant profile" onClick={closeProfile} />
+                </div>
+              </header>
+              {form.participantType === "sponsored_child" && (
+                <div className="participant-qr-stage">
+                  {form.qr_code_image ? (
+                    <img className="participant-qr-image" src={`/${form.qr_code_image}`} alt={`QR code for ${form.participant_code}`} />
+                  ) : (
+                    <p className="text-secondary mb-0">No active QR code found.</p>
+                  )}
+                  {form.qr_code_image && (
+                    <button type="button" className="btn btn-dark btn-print" onClick={() => window.print()}>
+                      <PrintIcon /> Print QR card
+                    </button>
+                  )}
+                </div>
+              )}
               {message && <div className="alert alert-info mt-3 mb-0" role="status">{message}</div>}
               {canViewSponsorship && form.participantType === "sponsored_child" && (
                 <div className="profile-grid mt-4">
@@ -1731,6 +1783,33 @@ function Participants({ canManage, user }) {
           </div>,
           document.body,
         )}
+      {confirmDelete && createPortal(
+        <div
+          className="participant-modal-backdrop confirm-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deleting) setConfirmDelete(false);
+          }}
+        >
+          <section className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-delete-title" aria-describedby="confirm-delete-desc">
+            <span className="confirm-icon" aria-hidden="true">
+              <DeleteIcon />
+            </span>
+            <h2 id="confirm-delete-title">Delete participant?</h2>
+            <p id="confirm-delete-desc">
+              This will revoke the QR code for <strong>{form?.fullName || form?.participant_code || "this participant"}</strong> and mark the record as deleted. This action cannot be undone.
+            </p>
+            <div className="confirm-actions">
+              <button type="button" className="btn btn-light" onClick={() => setConfirmDelete(false)} disabled={deleting}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-danger" onClick={deleteParticipant} disabled={deleting}>
+                {deleting ? "Deleting…" : "Delete participant"}
+              </button>
+            </div>
+          </section>
+        </div>,
+        document.body,
+      )}
       {showRegistration && (
         <Register
           onClose={() => setShowRegistration(false)}
