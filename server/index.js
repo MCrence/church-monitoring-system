@@ -3484,7 +3484,6 @@ app.post('/api/risk-scores/refresh', authenticate, checkPermission('analytics:vi
 });
 
 const ANALYTICS_INTERVALS = new Set(['day', 'week', 'month', 'year']);
-const PARTICIPANT_TYPE_FILTERS = new Set(['all', 'sponsored_child', 'goer']);
 const RISK_LEVEL_FILTERS = new Set(['all', 'high', 'medium', 'low']);
 const ENCRYPTED_EXPORT_FORMAT = 'church-analytics-encrypted-export';
 
@@ -3508,8 +3507,9 @@ function normalizeInterval(value) {
   return ANALYTICS_INTERVALS.has(value) ? value : 'week';
 }
 
-function normalizeTypeFilter(value) {
-  return PARTICIPANT_TYPE_FILTERS.has(value) ? value : 'all';
+function normalizeEducationLevel(value) {
+  const raw = String(value || '').trim();
+  return raw === 'all' ? '' : raw;
 }
 
 function normalizeRiskFilter(value) {
@@ -3640,28 +3640,27 @@ async function computeRiskRecords(riskFilter) {
   });
 }
 
-async function computeAttendanceTrends(range, interval, participantType, event) {
-  const typeClause = participantType === 'all' ? '' : ' AND p.participant_type = ?';
+async function computeAttendanceTrends(range, interval, event) {
   const eventClause = event ? ' AND c.event_name = ?' : '';
-  const typeParams = participantType === 'all' ? [] : [participantType];
-  const checkinParams = event ? [...typeParams, event] : typeParams;
+  const eventParams = event ? [event] : [];
   const [rows] = await pool.execute(
-    `SELECT c.participant_id, p.participant_type, c.checked_in_at
+    `SELECT c.participant_id, p.participant_type, p.education_level, c.checked_in_at
      FROM check_in_logs c
      JOIN participants p ON p.id = c.participant_id
-     WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?${typeClause}${eventClause}
+     WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?${eventClause}
      ORDER BY c.checked_in_at ASC`,
-    [...checkinParams, range.start, range.endExclusive],
+    [...eventParams, range.start, range.endExclusive],
   );
   const [eventRows] = await pool.execute(
     `SELECT DISTINCT c.event_name AS event_name
      FROM check_in_logs c
      JOIN participants p ON p.id = c.participant_id
-     WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?${typeClause}
+     WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?
      ORDER BY c.event_name ASC`,
-    [...typeParams, range.start, range.endExclusive],
+    [range.start, range.endExclusive],
   );
   const buckets = new Map();
+  const emptyLevels = { Elementary: 0, 'Junior High School': 0, 'Senior High School': 0, College: 0 };
   for (const row of rows) {
     const checkedInAt = row.checked_in_at instanceof Date ? row.checked_in_at : new Date(row.checked_in_at);
     let key;
@@ -3677,6 +3676,7 @@ async function computeAttendanceTrends(range, interval, participantType, event) 
         goerCheckIns: 0,
         sponsoredIds: new Set(),
         goerIds: new Set(),
+        educationLevels: { Elementary: 0, 'Junior High School': 0, 'Senior High School': 0, College: 0 },
       });
     }
     const bucket = buckets.get(key);
@@ -3685,6 +3685,8 @@ async function computeAttendanceTrends(range, interval, participantType, event) 
     if (row.participant_type === 'sponsored_child') {
       bucket.sponsoredCheckIns += 1;
       bucket.sponsoredIds.add(row.participant_id);
+      const level = row.education_level || '';
+      if (Object.prototype.hasOwnProperty.call(emptyLevels, level)) bucket.educationLevels[level] += 1;
     } else {
       bucket.goerCheckIns += 1;
       bucket.goerIds.add(row.participant_id);
@@ -3703,6 +3705,7 @@ async function computeAttendanceTrends(range, interval, participantType, event) 
     else if (interval === 'year') key = String(cursor.getFullYear());
     else key = localDayKey(cursor);
     const bucket = buckets.get(key);
+    const levels = bucket ? bucket.educationLevels : { Elementary: 0, 'Junior High School': 0, 'Senior High School': 0, College: 0 };
     series.push({
       key,
       label: bucketLabel(key, interval),
@@ -3712,6 +3715,10 @@ async function computeAttendanceTrends(range, interval, participantType, event) 
       goerCheckIns: bucket ? bucket.goerCheckIns : 0,
       sponsoredUnique: bucket ? bucket.sponsoredIds.size : 0,
       goerUnique: bucket ? bucket.goerIds.size : 0,
+      elementaryCheckIns: levels.Elementary,
+      juniorHighSchoolCheckIns: levels['Junior High School'],
+      seniorHighSchoolCheckIns: levels['Senior High School'],
+      collegeCheckIns: levels.College,
     });
     if (interval === 'day') cursor.setDate(cursor.getDate() + 1);
     else if (interval === 'week') cursor.setDate(cursor.getDate() + 7);
@@ -3720,7 +3727,6 @@ async function computeAttendanceTrends(range, interval, participantType, event) 
   }
   return {
     interval,
-    participantType,
     event: event || null,
     events: eventRows.map((row) => row.event_name),
     records: series,
@@ -3869,12 +3875,12 @@ app.get('/api/analytics/overview', authenticate, checkPermission('analytics:view
   try {
     const range = analyticsDateRange(req);
     if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
-    const participantType = normalizeTypeFilter(req.query.participantType);
-    const typeClause = participantType === 'all' ? '' : ' AND p.participant_type = ?';
-    const typeParams = participantType === 'all' ? [] : [participantType];
+    const educationLevel = normalizeEducationLevel(req.query.educationLevel);
+    const levelClause = educationLevel ? ' AND p.education_level = ?' : '';
+    const levelParams = educationLevel ? [educationLevel] : [];
     const [[participants]] = await pool.execute(
-      `SELECT COUNT(*) AS total FROM participants WHERE status = 'active'${typeClause}`,
-      typeParams,
+      `SELECT COUNT(*) AS total FROM participants WHERE status = 'active'${levelClause}`,
+      levelParams,
     );
     const [checkins] = await pool.execute(
       `SELECT COUNT(*) AS totalCheckIns,
@@ -3885,8 +3891,8 @@ app.get('/api/analytics/overview', authenticate, checkPermission('analytics:view
               COUNT(DISTINCT CASE WHEN p.participant_type = 'goer' THEN c.participant_id END) AS goerUnique
        FROM check_in_logs c
        JOIN participants p ON p.id = c.participant_id
-       WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?${typeClause}`,
-      [...typeParams, range.start, range.endExclusive],
+       WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?${levelClause}`,
+      [...levelParams, range.start, range.endExclusive],
     );
     const [[atRisk]] = await pool.execute(
       `SELECT COUNT(*) AS atRiskChildren
@@ -3894,14 +3900,15 @@ app.get('/api/analytics/overview', authenticate, checkPermission('analytics:view
        JOIN participants p ON p.id = r.participant_id
        JOIN (SELECT participant_id, MAX(computed_at) AS latest FROM predictive_risk_scores GROUP BY participant_id) latest
          ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at
-       WHERE p.participant_type = 'sponsored_child' AND p.status = 'active' AND r.risk_level IN ('medium', 'high')`,
+       WHERE p.participant_type = 'sponsored_child' AND p.status = 'active'${levelClause} AND r.risk_level IN ('medium', 'high')`,
+      levelParams,
     );
     const total = Number(participants.total) || 0;
     const unique = Number(checkins.uniqueParticipants) || 0;
     res.json({
       from: localDayKey(range.start),
       to: localDayKey(range.end),
-      participantType,
+      educationLevel,
       totalParticipants: total,
       totalCheckIns: Number(checkins.totalCheckIns) || 0,
       uniqueParticipants: unique,
@@ -3926,7 +3933,6 @@ app.get('/api/analytics/trends', authenticate, checkPermission('analytics:view')
     res.json(await computeAttendanceTrends(
       range,
       normalizeInterval(req.query.interval),
-      normalizeTypeFilter(req.query.participantType),
       String(req.query.event || '').trim().slice(0, 100),
     ));
   } catch (error) { next(error); }
@@ -3966,10 +3972,9 @@ app.get('/api/reports/analytics-attendance', authenticate, checkPermission('repo
     const range = analyticsDateRange(req);
     if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
     const interval = normalizeInterval(req.query.interval);
-    const participantType = normalizeTypeFilter(req.query.participantType);
     const event = String(req.query.event || '').trim().slice(0, 100);
     const password = req.query.password ? String(req.query.password) : '';
-    const trends = await computeAttendanceTrends(range, interval, participantType, event);
+    const trends = await computeAttendanceTrends(range, interval, event);
     const totalCheckIns = trends.records.reduce((sum, row) => sum + row.totalCheckIns, 0);
     const uniqueIds = new Set();
     const stamp = new Date().toISOString().slice(0, 10);
@@ -3978,11 +3983,11 @@ app.get('/api/reports/analytics-attendance', authenticate, checkPermission('repo
       const pdf = await renderPdf((doc) => {
         doc.fontSize(18).text('Attendance Summary Report');
         doc.fontSize(10).text(`Generated: ${new Date().toLocaleString()}`);
-        doc.text(`Range: ${localDayKey(range.start)} to ${localDayKey(range.end)} · Interval: ${interval} · Participant type: ${participantType}${event ? ` · Event: ${event}` : ''}`);
+        doc.text(`Range: ${localDayKey(range.start)} to ${localDayKey(range.end)} · Interval: ${interval}${event ? ` · Event: ${event}` : ''}`);
         doc.moveDown();
-        doc.fontSize(11).text('Date · Check-ins · Unique participants · Sponsored children · Church goers');
+        doc.fontSize(11).text('Date · Check-ins · Unique participants · Elementary · Junior High School · Senior High School · College');
         trends.records.forEach((row) => {
-          doc.fontSize(9).text(`${row.label} | ${row.totalCheckIns} check-ins | ${row.uniqueParticipants} unique | sponsored ${row.sponsoredCheckIns} | goers ${row.goerCheckIns}`);
+          doc.fontSize(9).text(`${row.label} | ${row.totalCheckIns} check-ins | ${row.uniqueParticipants} unique | Elementary ${row.elementaryCheckIns} | JHS ${row.juniorHighSchoolCheckIns} | SHS ${row.seniorHighSchoolCheckIns} | College ${row.collegeCheckIns}`);
         });
         doc.moveDown();
         doc.fontSize(10).text(`Total check-ins in range: ${totalCheckIns}`);
@@ -3993,7 +3998,7 @@ app.get('/api/reports/analytics-attendance', authenticate, checkPermission('repo
       res,
       `${filename}.csv`,
       csvPayload(
-        ['label', 'totalCheckIns', 'uniqueParticipants', 'sponsoredCheckIns', 'goerCheckIns', 'sponsoredUnique', 'goerUnique'],
+        ['label', 'totalCheckIns', 'uniqueParticipants', 'elementaryCheckIns', 'juniorHighSchoolCheckIns', 'seniorHighSchoolCheckIns', 'collegeCheckIns'],
         trends.records,
       ),
       password,

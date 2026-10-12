@@ -1112,6 +1112,7 @@ function Register({ onClose, onCreated }) {
                     <Field label="Height" placeholder="e.g. 132 cm" value={f.height} onChange={update("height")} />
                     <Field label="Medical conditions" value={f.medicalConditions} onChange={update("medicalConditions")} />
                     <Field label="Guardian Name" value={f.emergencyContactName} onChange={update("emergencyContactName")} required error={fieldErrors.emergencyContactName} />
+                    <Field label="Guardian contact number" type="tel" placeholder="e.g. +63 912 345 6789" value={f.emergencyContactPhone} onChange={update("emergencyContactPhone")} />
                   </div>
                 </section>
               </>
@@ -3106,7 +3107,7 @@ function Analytics({ user }) {
   defaultRangeStart.setDate(defaultRangeStart.getDate() - 89);
   const [from, setFrom] = useState(dateInput(defaultRangeStart));
   const [to, setTo] = useState(dateInput(new Date()));
-  const [participantType, setParticipantType] = useState("all");
+  const [educationLevel, setEducationLevel] = useState("");
   const [overview, setOverview] = useState(null);
   const [overviewLoading, setOverviewLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -3141,17 +3142,17 @@ function Analytics({ user }) {
   useEffect(() => {
     let mounted = true;
     setOverviewLoading(true);
-    apiCall(`/analytics/overview?from=${from}&to=${to}&participantType=${participantType}`)
+    apiCall(`/analytics/overview?from=${from}&to=${to}&educationLevel=${encodeURIComponent(educationLevel)}`)
       .then((data) => { if (mounted) setOverview(data); })
       .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
       .finally(() => { if (mounted) setOverviewLoading(false); });
     return () => { mounted = false; };
-  }, [from, to, participantType]);
+  }, [from, to, educationLevel]);
 
   useEffect(() => {
     let mounted = true;
     setTrendsLoading(true);
-    apiCall(`/analytics/trends?from=${from}&to=${to}&participantType=${participantType}&interval=${trendInterval}&event=${encodeURIComponent(trendEvent)}`)
+    apiCall(`/analytics/trends?from=${from}&to=${to}&interval=${trendInterval}&event=${encodeURIComponent(trendEvent)}`)
       .then((data) => {
         if (!mounted) return;
         setTrends(data.records || []);
@@ -3160,7 +3161,7 @@ function Analytics({ user }) {
       .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
       .finally(() => { if (mounted) setTrendsLoading(false); });
     return () => { mounted = false; };
-  }, [from, to, participantType, trendInterval, trendEvent]);
+  }, [from, to, trendInterval, trendEvent]);
 
   useEffect(() => {
     let mounted = true;
@@ -3208,24 +3209,10 @@ function Analytics({ user }) {
       data: {
         labels: trends.map((row) => row.label),
         datasets: [
-          {
-            label: "Sponsored children",
-            data: trends.map((row) => row.sponsoredCheckIns),
-            borderColor: "#0d5c9e",
-            backgroundColor: "rgba(13,92,158,.14)",
-            fill: true,
-            tension: 0.3,
-            pointRadius: 2,
-          },
-          {
-            label: "Church goers",
-            data: trends.map((row) => row.goerCheckIns),
-            borderColor: "#75a84c",
-            backgroundColor: "rgba(117,168,76,.14)",
-            fill: true,
-            tension: 0.3,
-            pointRadius: 2,
-          },
+          { label: "Elementary", data: trends.map((row) => row.elementaryCheckIns), borderColor: "#2e7dd5", backgroundColor: "rgba(46,125,213,.12)", fill: false, tension: 0.4, borderWidth: 2, pointRadius: 3 },
+          { label: "Junior High School", data: trends.map((row) => row.juniorHighSchoolCheckIns), borderColor: "#16a34a", backgroundColor: "rgba(22,163,74,.12)", fill: false, tension: 0.4, borderWidth: 2, pointRadius: 3 },
+          { label: "Senior High School", data: trends.map((row) => row.seniorHighSchoolCheckIns), borderColor: "#ca8a04", backgroundColor: "rgba(202,138,4,.12)", fill: false, tension: 0.4, borderWidth: 2, pointRadius: 3 },
+          { label: "College", data: trends.map((row) => row.collegeCheckIns), borderColor: "#9333ea", backgroundColor: "rgba(147,51,234,.12)", fill: false, tension: 0.4, borderWidth: 2, pointRadius: 3 },
         ],
       },
       options: {
@@ -3292,7 +3279,6 @@ function Analytics({ user }) {
       if (reportType === "attendance") {
         params.set("from", from);
         params.set("to", to);
-        params.set("participantType", participantType);
         params.set("interval", trendInterval);
         if (trendEvent) params.set("event", trendEvent);
         path = "analytics-attendance";
@@ -3409,11 +3395,10 @@ function Analytics({ user }) {
               <input id="analytics-to" className="form-control" type="date" value={to} onChange={(event) => handleToChange(event.target.value)} />
             </div>
             <div className="analytics-filter-field">
-              <label className="form-label" htmlFor="analytics-type">Participant type</label>
-              <select id="analytics-type" className="form-select" value={participantType} onChange={(event) => setParticipantType(event.target.value)}>
-                <option value="all">All participants</option>
-                <option value="sponsored_child">Sponsored children</option>
-                <option value="goer">Church goers</option>
+              <label className="form-label" htmlFor="analytics-education">Education level</label>
+              <select id="analytics-education" className="form-select" value={educationLevel} onChange={(event) => setEducationLevel(event.target.value)}>
+                <option value="">All education levels</option>
+                {EDUCATION_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
               </select>
             </div>
           </div>
@@ -3458,7 +3443,7 @@ function Analytics({ user }) {
         <div className="analytics-section-heading">
           <div>
             <h2>Attendance trends</h2>
-            <p className="analytics-section-sub">Daily, weekly, monthly, and yearly attendance comparing sponsored children and church goers.</p>
+            <p className="analytics-section-sub">Daily, weekly, monthly, and yearly attendance broken down by education level.</p>
           </div>
           <div className="analytics-filters">
             <div className="analytics-filter-field">
@@ -3489,7 +3474,6 @@ function Analytics({ user }) {
               <div><strong>{formatCount(trendTotals.totalCheckIns)}</strong><span>Total attendance</span></div>
               <div><strong>{overview ? formatCount(overview.uniqueParticipants) : "—"}</strong><span>Unique participants</span></div>
               <div><strong>{formatCount(trendTotals.sponsoredCheckIns)}</strong><span>Sponsored-child check-ins</span></div>
-              <div><strong>{formatCount(trendTotals.goerCheckIns)}</strong><span>Church goer check-ins</span></div>
             </div>
             <div className="analytics-chart-wrap">
               <canvas ref={trendCanvas} />

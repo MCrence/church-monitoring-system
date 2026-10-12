@@ -918,7 +918,7 @@ label.form-label:has(+ textarea[required])::after{
 .analytics-split-item{display:flex;align-items:center;gap:12px;padding:13px 16px;border:1px solid #e0e9f2;border-radius:13px;background:#f8fbfd}
 .analytics-split-item strong{font:600 20px 'Space Grotesk';color:#0c315d}
 .analytics-split-item span{color:#61758a;font-size:11px;line-height:1.5}
-.analytics-trend-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.analytics-trend-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
 .analytics-trend-summary>div{padding:13px 16px;border:1px solid #e0e9f2;border-radius:13px;background:#f8fbfd}
 .analytics-trend-summary strong{display:block;font:600 19px 'Space Grotesk';color:#0c315d}
 .analytics-trend-summary span{display:block;margin-top:3px;color:#61758a;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
