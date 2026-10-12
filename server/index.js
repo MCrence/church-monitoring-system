@@ -3879,7 +3879,7 @@ app.get('/api/analytics/overview', authenticate, checkPermission('analytics:view
     const levelClause = educationLevel ? ' AND p.education_level = ?' : '';
     const levelParams = educationLevel ? [educationLevel] : [];
     const [[participants]] = await pool.execute(
-      `SELECT COUNT(*) AS total FROM participants WHERE status = 'active'${levelClause}`,
+      `SELECT COUNT(*) AS total FROM participants p WHERE p.status = 'active'${levelClause}`,
       levelParams,
     );
     const [checkins] = await pool.execute(
