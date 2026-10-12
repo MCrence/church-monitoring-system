@@ -708,10 +708,22 @@ label.form-label:has(+ textarea[required])::after{
 .sponsorship-directory-panel{margin-bottom:24px;padding:22px}
 .sponsorship-directory-panel .sponsorship-list-heading{margin-bottom:18px}
 .sponsorship-sponsor-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
-.sponsorship-sponsor-card{display:flex;align-items:center;gap:12px;padding:13px;border:1px solid var(--line);border-radius:12px;background:#fbfdff}
+.sponsorship-sponsor-card{display:flex;width:100%;align-items:center;gap:12px;padding:13px;border:1px solid var(--line);border-radius:12px;background:#fbfdff;text-align:left;cursor:pointer;transition:border-color .18s,background .18s,box-shadow .18s,transform .18s}
+.sponsorship-sponsor-card:hover{transform:translateY(-2px);border-color:#b9d7ef;background:#fff;box-shadow:0 8px 20px rgba(24,84,132,.1)}
 .sponsorship-sponsor-card>div{min-width:0}
 .sponsorship-sponsor-card strong,.sponsorship-sponsor-card small{display:block;overflow-wrap:anywhere}
 .sponsorship-sponsor-card small{margin-top:4px;color:var(--muted);font-size:12px}
+.sponsor-profile-backdrop{z-index:1580}
+.sponsor-profile-modal{width:min(100%,560px)}
+.sponsor-profile-assignment{padding:20px;border:1px solid #e2ebf3;border-radius:15px;background:linear-gradient(145deg,#f5faff,#fff)}
+.sponsor-profile-assignment h3{margin:8px 0 4px;color:#153b62;font:700 20px 'Space Grotesk'}
+.sponsor-profile-assignment p{color:#667c91;font-size:12px}
+.sponsor-profile-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:15px}
+.child-gift-form{display:grid;gap:14px}
+.child-gift-form .form-label{margin-bottom:6px;color:#50677f;font-size:11px;font-weight:700}
+.child-gift-form .form-control{min-height:43px;border-color:#dce6ef;border-radius:10px}
+.child-gift-form textarea.form-control{min-height:90px}
+.child-gift-form>.btn{justify-self:start;border-radius:10px}
 .sponsor-create-modal{max-width:560px}
 .sponsor-create-form{display:grid;gap:17px;padding:8px 2px 2px}
 .sponsor-create-form .form-label span{color:#c94f36;font-weight:700}
@@ -742,7 +754,6 @@ label.form-label:has(+ textarea[required])::after{
 .lifecycle-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 11px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
 .lifecycle-badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
 .lifecycle-badge.active{background:#e7f6d8;color:#39751f}
-.lifecycle-badge.on_hold{background:#ffedaa;color:#846400}
 .lifecycle-badge.withdrawn{background:#ffd9d0;color:#8f2b19}
 .lifecycle-badge.deceased{background:#e2e8f0;color:#334155}
 .lifecycle-badge.completed{background:#dbeafe;color:#1d4ed8}
@@ -771,6 +782,7 @@ label.form-label:has(+ textarea[required])::after{
 .profile-tool-btn-danger:hover{background:#fdeeea;border-color:#f0c4b8;color:#8f2b19}
 .participant-qr-stage{display:flex;flex-direction:column;align-items:center;gap:16px;padding:26px;border:1px solid #e4ecf4;border-radius:18px;background:linear-gradient(160deg,#ffffff 0%,#f1f8fd 100%);margin-bottom:20px}
 .participant-qr-stage .participant-qr-image{width:min(220px,72%);height:auto;border-radius:14px;box-shadow:0 10px 26px rgba(13,58,99,.12)}
+.participant-profile-card .participant-qr-image{display:block;margin:18px auto 22px}
 .btn-print{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:9px 20px;transition:transform .18s ease,box-shadow .18s ease}
 .btn-print svg{width:15px;height:15px;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round;stroke-width:1.8}
 .btn-print:hover{transform:translateY(-1px);box-shadow:0 8px 18px rgba(13,58,99,.22)}
@@ -821,6 +833,20 @@ label.form-label:has(+ textarea[required])::after{
 .child-profile-modal .participant-modal-header .sponsorship-profile-caption{color:#d5e6f7}
 .child-profile-modal .participant-modal-header .sponsorship-profile-avatar{background:linear-gradient(145deg,#ffffff,#c9e4f7)}
 .child-profile-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:4px 0 20px}
+.child-sponsor-assignment{margin:0 0 20px;padding:18px;border:1px solid #dce9f4;border-radius:16px;background:linear-gradient(145deg,#f5faff,#fff)}
+.child-sponsor-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+.child-sponsor-heading h3{margin:5px 0 0;color:#153b62;font:700 17px 'Space Grotesk'}
+.child-sponsor-status{padding:5px 10px;border-radius:999px;background:#e7f6d8;color:#39751f;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+.child-sponsor-current{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding:12px;border:1px solid #e4edf4;border-radius:13px;background:#fff}
+.child-sponsor-current .sponsorship-child-avatar{width:40px;height:40px;flex:0 0 40px}
+.child-sponsor-current strong,.child-sponsor-current small{display:block}
+.child-sponsor-current strong{color:#173d64;font-size:13px}
+.child-sponsor-current small{margin-top:3px;color:#71849a;font-size:11px}
+.child-sponsor-form .form-label{margin-bottom:7px;color:#50677f;font-size:11px;font-weight:700}
+.child-sponsor-controls{display:flex;gap:10px}
+.child-sponsor-controls .form-select{min-width:0;min-height:42px;border-color:#dce6ef;border-radius:10px}
+.child-sponsor-controls .btn{flex:0 0 auto;border-radius:10px}
+.child-sponsor-empty{color:#71849a;font-size:12px}
 .child-profile-stat{position:relative;overflow:hidden;padding:16px 18px;border:1px solid #e4edf4;border-radius:15px;background:linear-gradient(135deg,#f8fbff,#fff)}
 .child-profile-stat::after{content:"";position:absolute;top:-40px;right:-40px;width:110px;height:110px;border-radius:50%;background:radial-gradient(circle,rgba(22,141,226,.12),transparent 70%)}
 .child-profile-stat small{color:#71849a;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em}
@@ -848,6 +874,7 @@ label.form-label:has(+ textarea[required])::after{
 .card-growth .action-icon{background:#e7f6d8;color:#39751f}
 .card-allowance .action-icon{background:#dbeafe;color:#1d4ed8}
 .card-disbursement .action-icon{background:#ffe7d9;color:#b04a17}
+.card-gift .action-icon{background:#fde7ef;color:#b83263}
 .card-letter .action-icon{background:#e9e4fd;color:#6d28d9}
 .child-action-card strong{color:#102f53;font-size:14px}
 .child-action-card small{color:#65798f;font-size:11px;line-height:1.55}
@@ -867,7 +894,8 @@ label.form-label:has(+ textarea[required])::after{
 .allowance-action-form{margin-bottom:14px}
 .sponsorship-workspace{grid-template-columns:minmax(0,1fr)}
 .sponsorship-child-list{position:static;top:auto;max-height:none;overflow:visible}
-@media(max-width:640px){.child-profile-stats{grid-template-columns:1fr}.child-action-grid{grid-template-columns:1fr}.child-allowance-toggle,.child-allowance-save{width:100%}.child-allowance-actions{width:100%}.child-allowance-actions .btn{flex:1 1 auto}}
+@media(max-width:640px){.child-profile-stats{grid-template-columns:1fr}.child-action-grid{grid-template-columns:1fr}.child-allowance-toggle,.child-allowance-save{width:100%}.child-allowance-actions{width:100%}.child-allowance-actions .btn{flex:1 1 auto}.sponsor-profile-actions{flex-direction:column}.sponsor-profile-actions .btn,.child-gift-form>.btn{width:100%}}
+@media(max-width:480px){.child-sponsor-controls{flex-direction:column}.child-sponsor-controls .btn{width:100%}}
 .analytics-section{padding:22px 24px;margin-bottom:22px}
 .analytics-section-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap;margin-bottom:18px}
 .analytics-section-heading h2{margin:0;font:600 18px 'Space Grotesk';color:#102f53}
@@ -926,3 +954,19 @@ label.form-label:has(+ textarea[required])::after{
 @media(max-width:1100px){.analytics-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.analytics-trend-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:900px){.analytics-split{grid-template-columns:1fr}.analytics-decrypt-controls{grid-template-columns:1fr}}
 @media(max-width:640px){.analytics-section{padding:18px 16px}.analytics-stat-grid{grid-template-columns:1fr 1fr}.analytics-trend-summary{grid-template-columns:1fr 1fr}.analytics-stat-value{font-size:24px}.analytics-chart-wrap{height:260px}}
+.sponsorship-overview{margin:0 0 22px}
+.sponsorship-overview-heading{display:flex;align-items:flex-end;justify-content:space-between;margin:0 0 12px}
+.sponsorship-overview-heading h2{margin:4px 0 0;color:#102f53;font:600 19px 'Space Grotesk'}
+.sponsorship-overview .sponsorship-summary-grid{grid-template-columns:repeat(5,minmax(0,1fr))}
+.sponsorship-overview-card{position:relative;display:flex;min-height:106px;flex-direction:column;align-items:flex-start;justify-content:center;gap:7px;overflow:hidden;padding:14px 16px;border-radius:15px;text-transform:none;cursor:default}
+.sponsorship-overview-card::before{position:absolute;top:0;left:0;width:100%;height:3px;background:linear-gradient(90deg,#0d5c9e,#72b7c8);content:""}
+.sponsorship-overview-card:nth-child(2)::before{background:linear-gradient(90deg,#4b8d5d,#a5c96d)}
+.sponsorship-overview-card:nth-child(3)::before{background:linear-gradient(90deg,#be8241,#edc27a)}
+.sponsorship-overview-card:nth-child(4)::before{background:linear-gradient(90deg,#7559ac,#b9a3df)}
+.sponsorship-overview-card:nth-child(5)::before{background:linear-gradient(90deg,#bc5579,#e5a2b8)}
+.sponsorship-overview-card>span{color:#526980;font-size:10px}
+.sponsorship-overview-card>span i{width:23px;height:23px;border-radius:7px;background:#edf4fb;color:#1d6aa4;font-size:10px;font-weight:700;font-style:normal}
+.sponsorship-overview-card strong{color:#092c62;font:600 26px 'Space Grotesk';line-height:1}
+.sponsorship-overview-card small{color:#71849a;font-size:9px}
+@media(max-width:1000px){.sponsorship-overview .sponsorship-summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:640px){.sponsorship-overview .sponsorship-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.sponsorship-overview-card{min-height:92px;padding:11px}.sponsorship-overview-card>span{font-size:9px}.sponsorship-overview-card strong{font-size:23px}}

@@ -106,14 +106,13 @@ const canAccessPage = (page, user) => {
 };
 const SPONSOR_LIFECYCLE = [
   { value: "active", label: "Active", description: "Sponsorship is active." },
-  { value: "on_hold", label: "On Hold", description: "Sponsorship is temporarily paused." },
   { value: "withdrawn", label: "Withdrawn", description: "The child or guardian voluntarily left the program." },
   { value: "deceased", label: "Deceased", description: "The child passed away." },
   { value: "completed", label: "Sponsorship Completed", description: "The child has officially completed the sponsorship program." },
 ];
 const normalizeSponsorLifecycle = (value) => {
   if (value === "graduated") return "completed";
-  if (value === "new" || !value) return "active";
+  if (value === "new" || value === "on_hold" || !value) return "active";
   return value;
 };
 const sponsorLifecycleLabel = (value) =>
@@ -195,10 +194,6 @@ function useParticipantAge(dateOfBirth) {
   }, [today]);
   return calculateParticipantAge(dateOfBirth, today);
 }
-function normalizePhilippineMobile(value) {
-  const phone = String(value || "").trim().replace(/[\s()-]/g, "");
-  return /^09\d{9}$/.test(phone) || /^639\d{9}$/.test(phone) || /^\+639\d{9}$/.test(phone);
-}
 function validateParticipantRegistration(form) {
   const errors = {};
   if (!form.firstName.trim()) errors.firstName = "First name is required.";
@@ -221,11 +216,8 @@ function validateParticipantRegistration(form) {
   } else if (form.programCourse.trim().length > 200) {
     errors.programCourse = "Use 200 characters or fewer.";
   }
-  if (!form.emergencyContactName.trim()) errors.emergencyContactName = "Guardian/emergency contact name is required.";
+  if (!form.emergencyContactName.trim()) errors.emergencyContactName = "Guardian name is required.";
   else if (form.emergencyContactName.trim().length > 100) errors.emergencyContactName = "Use 100 characters or fewer.";
-  if (!normalizePhilippineMobile(form.emergencyContactPhone)) {
-    errors.emergencyContactPhone = "Enter a valid Philippine mobile number.";
-  }
   if (form.schoolName.trim().length > 200) errors.schoolName = "Use 200 characters or fewer.";
   if (form.schoolAddress.trim().length > 500) errors.schoolAddress = "Use 500 characters or fewer.";
   return errors;
@@ -1113,14 +1105,13 @@ function Register({ onClose, onCreated }) {
                 <section className="registration-section">
                   <header className="registration-section-heading">
                     <span>03</span>
-                    <div><h3>Health and emergency contact</h3><p>Provide a guardian contact for participant notifications by SMS.</p></div>
+                    <div><h3>Health and emergency contact</h3><p>Provide the child’s guardian name and relevant health details.</p></div>
                   </header>
                   <div className="row g-3">
                     <Field label="Weight" placeholder="e.g. 32 kg" value={f.weight} onChange={update("weight")} />
                     <Field label="Height" placeholder="e.g. 132 cm" value={f.height} onChange={update("height")} />
                     <Field label="Medical conditions" value={f.medicalConditions} onChange={update("medicalConditions")} />
-                    <Field label="Guardian / emergency contact name" value={f.emergencyContactName} onChange={update("emergencyContactName")} required error={fieldErrors.emergencyContactName} />
-                    <Field label="Guardian mobile number" type="tel" inputMode="tel" placeholder="09xx xxx xxxx or +63 9xx xxx xxxx" value={f.emergencyContactPhone} onChange={update("emergencyContactPhone")} required error={fieldErrors.emergencyContactPhone} />
+                    <Field label="Guardian Name" value={f.emergencyContactName} onChange={update("emergencyContactName")} required error={fieldErrors.emergencyContactName} />
                   </div>
                 </section>
               </>
@@ -1582,7 +1573,7 @@ function Participants({ canManage, user }) {
                     ["School address", form.schoolAddress],
                     ["Phone", form.phone],
                     ["Address", form.address],
-                    ["Emergency contact", form.emergencyContactName],
+                    ["Guardian Name", form.emergencyContactName],
                     ["Emergency phone", form.emergencyContactPhone],
                     ["Medical conditions", form.medicalConditions],
                     ["Sponsor", form.sponsorName],
@@ -1736,7 +1727,7 @@ function Participants({ canManage, user }) {
                       onChange={update("medicalConditions")}
                     />
                     <Field
-                      label="Emergency contact name"
+                      label="Guardian Name"
                       value={form.emergencyContactName || ""}
                       onChange={update("emergencyContactName")}
                     />
@@ -2607,7 +2598,7 @@ function Scanner({ portal = false, user = null }) {
               <div><small>Weight</small><strong>{profile.weight || "Not provided"}<small> KG</small></strong></div>
               <div><small>Height</small><strong>{profile.height || "Not provided"}<small> CM</small></strong></div>
               <div><small>Medical conditions</small><strong>{profile.medicalConditions || "None"}</strong></div>
-              <div><small>Emergency contact</small><strong>{profile.emergencyContactName || "Not provided"}</strong></div>
+              <div><small>Guardian Name</small><strong>{profile.emergencyContactName || "Not provided"}</strong></div>
               <div><small>Emergency phone</small><strong>{profile.emergencyContactPhone || "Not provided"}</strong></div>
               <div><small>Sponsor</small><strong>{profile.sponsorName || "Not provided"}</strong></div>
               <div><small>Sponsor contact</small><strong>{profile.sponsorContact || "Not provided"}</strong></div>
@@ -3387,7 +3378,7 @@ function Analytics({ user }) {
   const educationOptions = [...new Set(sponsoredRows.map((row) => row.educationLevel).filter(Boolean))].sort();
   const gradeOptions = [...new Set(sponsoredRows.map((row) => row.gradeLevel).filter(Boolean))].sort();
   const riskFilterOptions = [["all", "All levels"], ["high", "High"], ["medium", "Medium"], ["low", "Low"]];
-  const sponsorshipStatusOptions = [["all", "Any status"], ["active", "Active"], ["on_hold", "On hold"], ["withdrawn", "Withdrawn"], ["completed", "Completed"], ["graduated", "Graduated"], ["deceased", "Deceased"], ["new", "New"]];
+  const sponsorshipStatusOptions = [["all", "Any status"], ["active", "Active"], ["withdrawn", "Withdrawn"], ["completed", "Completed"], ["graduated", "Graduated"], ["deceased", "Deceased"], ["new", "New"]];
   return (
     <>
       <Title
@@ -4047,6 +4038,10 @@ function SponsoredCare({ user }) {
   const [letters, setLetters] = useState([]);
   const [sponsors, setSponsors] = useState([]);
   const [showCreateSponsor, setShowCreateSponsor] = useState(false);
+  const [selectedSponsor, setSelectedSponsor] = useState(null);
+  const [unassigningSponsor, setUnassigningSponsor] = useState(false);
+  const [sponsorModalMessage, setSponsorModalMessage] = useState("");
+  const [sponsorModalError, setSponsorModalError] = useState("");
   const [sponsorForm, setSponsorForm] = useState({ familyName: "", sex: "", sponsorType: "" });
   const [sponsorFormError, setSponsorFormError] = useState("");
   const [sponsorFieldErrors, setSponsorFieldErrors] = useState({});
@@ -4084,6 +4079,13 @@ function SponsoredCare({ user }) {
   const [showAllowanceEditor, setShowAllowanceEditor] = useState(false);
   const [monthlyAllowanceDraft, setMonthlyAllowanceDraft] = useState("");
   const [savingAllowance, setSavingAllowance] = useState(false);
+  const [sponsorAssignment, setSponsorAssignment] = useState(null);
+  const [sponsorDraft, setSponsorDraft] = useState("");
+  const [loadingSponsorAssignment, setLoadingSponsorAssignment] = useState(false);
+  const [savingSponsorAssignment, setSavingSponsorAssignment] = useState(false);
+  const [sponsorAssignmentError, setSponsorAssignmentError] = useState("");
+  const [giftRecord, setGiftRecord] = useState({ giftsFrom: "", amount: "", description: "" });
+  const [savingGiftRecord, setSavingGiftRecord] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -4119,6 +4121,9 @@ function SponsoredCare({ user }) {
         body: JSON.stringify(sponsorForm),
       });
       setSponsors((current) => [sponsor, ...current]);
+      setSponsorAssignment((current) => current
+        ? { ...current, availableSponsors: [sponsor, ...current.availableSponsors] }
+        : current);
       setSponsorForm({ familyName: "", sex: "", sponsorType: "" });
       setShowCreateSponsor(false);
       setMessage("Sponsor created.");
@@ -4140,6 +4145,15 @@ function SponsoredCare({ user }) {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [creatingSponsor, showCreateSponsor]);
 
+  useEffect(() => {
+    if (!selectedSponsor) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape" && !unassigningSponsor) setSelectedSponsor(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [selectedSponsor, unassigningSponsor]);
+
   const selectChild = async (child) => {
     setSelectedChildId(child.id);
     setShowChildModal(true);
@@ -4152,6 +4166,10 @@ function SponsoredCare({ user }) {
     setStaffProof(null);
     setSelectedThreadId(null);
     setError("");
+    setSponsorAssignment(null);
+    setSponsorDraft("");
+    setSponsorAssignmentError("");
+    setLoadingSponsorAssignment(canManage);
     try {
       const [records, updates, transactions] = await Promise.all([
         apiCall(`/sponsorship/children/${child.id}/disbursements`),
@@ -4167,6 +4185,97 @@ function SponsoredCare({ user }) {
       setAllowanceTransactions(transactions);
     } catch (loadError) {
       setError(loadError.message);
+    }
+    if (canManage) {
+      try {
+        const childSponsors = await apiCall(`/sponsorship/children/${child.id}/sponsor-assignment`);
+        setSponsorAssignment(childSponsors);
+        setSponsorDraft("");
+      } catch (loadError) {
+        setSponsorAssignmentError(loadError.message);
+      } finally {
+        setLoadingSponsorAssignment(false);
+      }
+    } else {
+      setLoadingSponsorAssignment(false);
+    }
+  };
+
+  const assignSponsorToChild = async (event) => {
+    event.preventDefault();
+    if (!selectedChildId || !sponsorDraft) return;
+    setSavingSponsorAssignment(true);
+    setSponsorAssignmentError("");
+    setMessage("");
+    try {
+      const assignment = await apiCall(`/sponsorship/children/${selectedChildId}/sponsor-assignment`, {
+        method: "PUT",
+        body: JSON.stringify({ sponsorId: Number(sponsorDraft) }),
+      });
+      const previousSponsorId = sponsorAssignment?.assignedSponsor?.id;
+      setSponsors((current) => current.map((sponsor) => ({
+        ...sponsor,
+        sponsoredChild: Number(sponsor.id) === Number(assignment.assignedSponsor?.id)
+          ? { id: selectedChildId, name: selectedChild?.name || "", participantCode: selectedChild?.participantCode }
+          : Number(sponsor.id) === Number(previousSponsorId)
+            ? null
+            : sponsor.sponsoredChild,
+      })));
+      setSponsorAssignment(assignment);
+      setSponsorDraft("");
+      setMessage(`Sponsor assigned to ${selectedChild?.name}.`);
+    } catch (saveError) {
+      setSponsorAssignmentError(saveError.message);
+    } finally {
+      setSavingSponsorAssignment(false);
+    }
+  };
+
+  const unassignSponsorFromChild = async (sponsor) => {
+    if (!sponsor.sponsoredChild || unassigningSponsor) return;
+    setUnassigningSponsor(true);
+    setSponsorModalError("");
+    setSponsorModalMessage("");
+    try {
+      const assignment = await apiCall(`/sponsorship/children/${sponsor.sponsoredChild.id}/sponsor-assignment`, {
+        method: "DELETE",
+      });
+      setSponsors((current) => current.map((item) =>
+        Number(item.id) === Number(sponsor.id) ? { ...item, sponsoredChild: null } : item,
+      ));
+      setSelectedSponsor((current) => current && Number(current.id) === Number(sponsor.id)
+        ? { ...current, sponsoredChild: null }
+        : current);
+      if (Number(selectedChildId) === Number(sponsor.sponsoredChild.id)) {
+        setSponsorAssignment(assignment);
+      }
+      setSponsorModalMessage(`${sponsor.familyName} has been unassigned from ${sponsor.sponsoredChild.name}.`);
+    } catch (saveError) {
+      setSponsorModalError(saveError.message);
+    } finally {
+      setUnassigningSponsor(false);
+    }
+  };
+
+  const recordGift = async (event) => {
+    event.preventDefault();
+    if (!selectedChildId) return;
+    setSavingGiftRecord(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiCall(`/sponsorship/children/${selectedChildId}/gifts`, {
+        method: "POST",
+        body: JSON.stringify(giftRecord),
+      });
+      setDisbursements(await apiCall(`/sponsorship/children/${selectedChildId}/disbursements`));
+      setGiftRecord({ giftsFrom: "", amount: "", description: "" });
+      setActiveAction(null);
+      setMessage(`Gift of ${formatCurrency(result.amount)} from ${result.giftsFrom} recorded.`);
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setSavingGiftRecord(false);
     }
   };
 
@@ -4399,6 +4508,12 @@ function SponsoredCare({ user }) {
     .map((part) => part[0])
     .join("")
     .toUpperCase();
+  const sponsorshipOverview = [
+    { label: "Total Elementary", level: "Elementary", icon: "E" },
+    { label: "Total High School", level: "Junior High School", icon: "H", detail: "Junior High School" },
+    { label: "Total Senior High", level: "Senior High School", icon: "S" },
+    { label: "Total College", level: "College", icon: "C" },
+  ];
 
   return (
     <>
@@ -4417,6 +4532,29 @@ function SponsoredCare({ user }) {
           <span className="sponsorship-hero-note">{children.length}<small>{isGoer ? "children in your group" : "children in care"}</small></span>
         </div>
       </section>
+      {canManage && (
+        <section className="sponsorship-overview" aria-labelledby="sponsorship-overview-title">
+          <div className="sponsorship-overview-heading">
+            <div>
+              <span className="sponsorship-section-eyebrow">PROGRAM OVERVIEW</span>
+              <h2 id="sponsorship-overview-title">Dashboard overview</h2>
+            </div>
+          </div>
+          <div className="sponsorship-summary-grid">
+            {sponsorshipOverview.map((item) => (
+              <article className="surface sponsorship-summary-card sponsorship-overview-card" key={item.level}>
+                <span><i aria-hidden="true">{item.icon}</i>{item.label}</span>
+                <strong>{loading ? "—" : formatCount(children.filter((child) => child.educationLevel === item.level).length)}</strong>
+                {item.detail && <small>{item.detail}</small>}
+              </article>
+            ))}
+            <article className="surface sponsorship-summary-card sponsorship-overview-card summary-sponsors">
+              <span><i aria-hidden="true">+</i>Total Sponsors</span>
+              <strong>{loading ? "—" : formatCount(sponsors.length)}</strong>
+            </article>
+          </div>
+        </section>
+      )}
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
       {message && <div className="alert alert-success" role="status">{message}</div>}
       {canManage && (
@@ -4436,15 +4574,20 @@ function SponsoredCare({ user }) {
           {sponsors.length ? (
             <div className="sponsorship-sponsor-list">
               {sponsors.map((sponsor) => (
-                <article className="sponsorship-sponsor-card" key={sponsor.id}>
+                <button type="button" className="sponsorship-sponsor-card" key={sponsor.id} onClick={() => {
+                  setSponsorModalMessage("");
+                  setSponsorModalError("");
+                  setSelectedSponsor(sponsor);
+                }}>
                   <span className="sponsorship-child-avatar" aria-hidden="true">
                     {sponsor.familyName.trim().slice(0, 1).toUpperCase()}
                   </span>
                   <div>
                     <strong>{sponsor.familyName}</strong>
                     <small>{sponsor.sponsorType} · {sponsor.sex}</small>
+                    <small>{sponsor.sponsoredChild ? `Sponsoring ${sponsor.sponsoredChild.name}` : "No child assigned"}</small>
                   </div>
-                </article>
+                </button>
               ))}
             </div>
           ) : (
@@ -4452,6 +4595,50 @@ function SponsoredCare({ user }) {
           )}
         </section>
       )}
+      {selectedSponsor && createPortal((
+        <div className="participant-modal-backdrop sponsor-profile-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !unassigningSponsor) setSelectedSponsor(null);
+        }}>
+          <section className="participant-modal sponsor-profile-modal" role="dialog" aria-modal="true" aria-labelledby="sponsor-profile-title">
+            <header className="participant-modal-header">
+              <div className="sponsorship-profile-summary">
+                <span className="sponsorship-profile-avatar" aria-hidden="true">
+                  {selectedSponsor.familyName.trim().slice(0, 1).toUpperCase()}
+                </span>
+                <div>
+                  <span className="sponsorship-section-eyebrow">SPONSOR PROFILE</span>
+                  <h2 id="sponsor-profile-title">{selectedSponsor.familyName}</h2>
+                  <span className="sponsorship-profile-caption">{selectedSponsor.sponsorType} · {selectedSponsor.sex}</span>
+                </div>
+              </div>
+              <button type="button" className="btn-close" aria-label="Close sponsor profile" onClick={() => setSelectedSponsor(null)} disabled={unassigningSponsor} />
+            </header>
+            <div className="sponsor-profile-assignment">
+              {sponsorModalError && <div className="alert alert-danger" role="alert">{sponsorModalError}</div>}
+              {sponsorModalMessage && <div className="alert alert-success" role="status">{sponsorModalMessage}</div>}
+              <span className="sponsorship-section-eyebrow">SPONSORING</span>
+              {selectedSponsor.sponsoredChild ? (
+                <>
+                  <h3>{selectedSponsor.sponsoredChild.name}</h3>
+                  <p>{selectedSponsor.sponsoredChild.participantCode || `Child #${selectedSponsor.sponsoredChild.id}`}</p>
+                  <div className="sponsor-profile-actions">
+                    <button type="button" className="btn btn-outline-primary" onClick={() => {
+                      const child = children.find((item) => Number(item.id) === Number(selectedSponsor.sponsoredChild.id));
+                      setSelectedSponsor(null);
+                      if (child) selectChild(child);
+                    }}>View child profile</button>
+                    <button type="button" className="btn btn-outline-danger" disabled={unassigningSponsor} onClick={() => unassignSponsorFromChild(selectedSponsor)}>
+                      {unassigningSponsor ? "Unassigning…" : "Unassign sponsor"}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <p className="mb-0 text-secondary">This sponsor is not currently assigned to a child.</p>
+              )}
+            </div>
+          </section>
+        </div>
+      ), document.body)}
       {showCreateSponsor && createPortal((
         <div className="participant-modal-backdrop" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !creatingSponsor) setShowCreateSponsor(false);
@@ -4574,6 +4761,72 @@ function SponsoredCare({ user }) {
               </div>
             )}
             {canManage && (
+              <section className="child-sponsor-assignment" aria-labelledby="child-sponsor-title">
+                <div className="child-sponsor-heading">
+                  <div>
+                    <span className="sponsorship-section-eyebrow">SPONSOR MATCH</span>
+                    <h3 id="child-sponsor-title">Child sponsor</h3>
+                  </div>
+                  {sponsorAssignment?.assignedSponsor && (
+                    <span className="child-sponsor-status">Assigned</span>
+                  )}
+                </div>
+                {sponsorAssignmentError && (
+                  <div className="alert alert-danger mb-3" role="alert">{sponsorAssignmentError}</div>
+                )}
+                {loadingSponsorAssignment ? (
+                  <p className="text-secondary mb-0" role="status">Loading sponsor options…</p>
+                ) : sponsorAssignment?.assignedSponsor ? (
+                  <div className="child-sponsor-current">
+                    <span className="sponsorship-child-avatar" aria-hidden="true">
+                      {sponsorAssignment.assignedSponsor.familyName.trim().slice(0, 1).toUpperCase()}
+                    </span>
+                    <div>
+                      <strong>{sponsorAssignment.assignedSponsor.familyName}</strong>
+                      <small>{sponsorAssignment.assignedSponsor.sponsorType} · {sponsorAssignment.assignedSponsor.sex}</small>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-secondary mb-3">No sponsor has been assigned to this child yet.</p>
+                )}
+                {!loadingSponsorAssignment && sponsorAssignment && (
+                  sponsorAssignment.availableSponsors.length ? (
+                    <form className="child-sponsor-form" onSubmit={assignSponsorToChild}>
+                      <label className="form-label" htmlFor={`child-sponsor-select-${selectedChild.id}`}>
+                        {sponsorAssignment.assignedSponsor ? "Assign a different sponsor" : "Choose an available sponsor"}
+                      </label>
+                      <div className="child-sponsor-controls">
+                        <select
+                          id={`child-sponsor-select-${selectedChild.id}`}
+                          className="form-select"
+                          value={sponsorDraft}
+                          onChange={(event) => setSponsorDraft(event.target.value)}
+                          required
+                          disabled={savingSponsorAssignment}
+                        >
+                          <option value="">Select sponsor</option>
+                          {sponsorAssignment.availableSponsors.map((sponsor) => (
+                            <option key={sponsor.id} value={sponsor.id}>
+                              {sponsor.familyName} · {sponsor.sponsorType}
+                            </option>
+                          ))}
+                        </select>
+                        <button className="btn btn-dark" type="submit" disabled={!sponsorDraft || savingSponsorAssignment}>
+                          {savingSponsorAssignment ? "Assigning…" : "Assign sponsor"}
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <p className="child-sponsor-empty mb-0">
+                      {sponsorAssignment.assignedSponsor
+                        ? "There are no other available sponsors."
+                        : "There are no unassigned sponsors available."}
+                    </p>
+                  )
+                )}
+              </section>
+            )}
+            {canManage && (
               <div className="child-allowance-set">
                 {showAllowanceEditor ? (
                   <form className="child-allowance-form" onSubmit={saveMonthlyAllowance}>
@@ -4615,6 +4868,13 @@ function SponsoredCare({ user }) {
                   <span className="action-icon" aria-hidden="true">₱</span>
                   <strong>Disbursement</strong>
                   <small>Add to or deduct from the child's available balance.</small>
+                </button>
+              )}
+              {canManage && (
+                <button type="button" className="child-action-card card-gift" onClick={() => setActiveAction("gift")}>
+                  <span className="action-icon" aria-hidden="true">♡</span>
+                  <strong>Gifts</strong>
+                  <small>Record a gift received by {selectedChild.name}.</small>
                 </button>
               )}
               {canRecordCare && (
@@ -4690,10 +4950,10 @@ function SponsoredCare({ user }) {
                 <h4 className="sponsorship-subheading">{isGoer ? "Received allowance and gifts" : "Sponsorship disbursements"}</h4>
                 <div className="table-responsive mt-3">
                   <table className="table align-middle">
-                    <thead><tr><th>Date</th><th>Record</th><th>Amount</th><th>Note</th><th>Proof</th></tr></thead>
+                    <thead><tr><th>Date</th><th>Record</th><th>Gifts from</th><th>Amount</th><th>Description</th><th>Proof</th></tr></thead>
                     <tbody>{disbursements.map((record) => (
-                      <tr key={record.id}><td>{new Date(record.recorded_on).toLocaleDateString()}</td><td>{record.recordType === "received" ? `${record.care_type[0].toUpperCase()}${record.care_type.slice(1)} received` : "Sponsor disbursement"}</td><td>{formatCurrency(record.amount)}</td><td>{record.recordType === "received" ? record.description || "—" : "—"}</td>                      <td>{record.hasReceipt ? (isGoer ? "Receipt on file" : <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => openStaffReceipt(String(record.id).replace(/^disbursement-/, ""))}>View proof</button>) : "—"}</td></tr>
-                    ))}{!disbursements.length && <tr><td colSpan="5" className="text-secondary">No allowance or gift records.</td></tr>}</tbody>
+                      <tr key={record.id}><td>{new Date(record.recorded_on).toLocaleDateString()}</td><td>{record.recordType === "received" ? `${record.care_type[0].toUpperCase()}${record.care_type.slice(1)} received` : "Sponsor disbursement"}</td><td>{record.giftsFrom || "—"}</td><td>{formatCurrency(record.amount)}</td><td>{record.recordType === "received" ? record.description || "—" : "—"}</td><td>{record.hasReceipt ? (isGoer ? "Receipt on file" : <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => openStaffReceipt(String(record.id).replace(/^disbursement-/, ""))}>View proof</button>) : "—"}</td></tr>
+                    ))}{!disbursements.length && <tr><td colSpan="6" className="text-secondary">No allowance or gift records.</td></tr>}</tbody>
                   </table>
                 </div>
                 {staffProof && (
@@ -4862,6 +5122,37 @@ function SponsoredCare({ user }) {
               <button className="btn btn-outline-dark" type="submit" disabled={(allowanceAction === "deduct" && !gift.receiptData) || savingDisbursement}>{savingDisbursement ? "Saving…" : allowanceAction === "add" ? "Add to balance" : "Record disbursement"}</button>
             </form>
             <p className="text-secondary">Current available balance: {formatCurrency(selectedChild.availableBalance)}. Deductions require a receipt or proof before they are recorded.</p>
+          </section>
+        </div>
+      ), document.body)}
+      {activeAction === "gift" && canManage && createPortal((
+        <div className="participant-modal-backdrop action-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !savingGiftRecord) setActiveAction(null);
+        }}>
+          <section className="participant-modal action-modal" role="dialog" aria-modal="true" aria-labelledby="gift-action-title">
+            <header className="participant-modal-header">
+              <div>
+                <span className="eyebrow">CARE ACTIONS / GIFTS</span>
+                <h2 id="gift-action-title">Record a gift</h2>
+                <p>Record a gift received by {selectedChild.name}. This does not change the available sponsorship balance.</p>
+              </div>
+              <button type="button" className="btn-close" aria-label="Close gift form" disabled={savingGiftRecord} onClick={() => setActiveAction(null)} />
+            </header>
+            <form className="child-gift-form" onSubmit={recordGift}>
+              <div>
+                <label className="form-label" htmlFor="gift-from">Gifts from</label>
+                <input id="gift-from" className="form-control" maxLength="100" required value={giftRecord.giftsFrom} onChange={(event) => setGiftRecord((current) => ({ ...current, giftsFrom: event.target.value }))} />
+              </div>
+              <div>
+                <label className="form-label" htmlFor="gift-amount">Amount (PHP)</label>
+                <input id="gift-amount" className="form-control" type="number" min="0.01" max="1000000" step="0.01" required value={giftRecord.amount} onChange={(event) => setGiftRecord((current) => ({ ...current, amount: event.target.value }))} />
+              </div>
+              <div>
+                <label className="form-label" htmlFor="gift-description">Description</label>
+                <textarea id="gift-description" className="form-control" rows="3" maxLength="255" value={giftRecord.description} onChange={(event) => setGiftRecord((current) => ({ ...current, description: event.target.value }))} placeholder="Optional details about the gift" />
+              </div>
+              <button type="submit" className="btn btn-dark" disabled={savingGiftRecord}>{savingGiftRecord ? "Recording…" : "Record gift"}</button>
+            </form>
           </section>
         </div>
       ), document.body)}

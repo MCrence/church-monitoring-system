@@ -6,10 +6,16 @@ const { initializeSponsorshipTables } = require('./sponsorship-tables');
 test('creates sponsorship tables before dependent message table', async () => {
   const created = [];
   const definitions = [];
+  const queries = [];
   const pool = {
     async query(sql) {
+      queries.push(sql);
       const match = sql.match(/CREATE TABLE IF NOT EXISTS (\w+)/);
-      if (!match) throw new Error(`Unexpected query: ${sql}`);
+      if (!match) {
+        assert.match(sql, /DELETE assignment/);
+        assert.ok(created.includes('sponsorship_assignments'));
+        return [{}];
+      }
       const table = match[1];
       definitions.push(sql);
       if (
@@ -24,6 +30,13 @@ test('creates sponsorship tables before dependent message table', async () => {
     async execute(sql) {
       if (sql.includes("TABLE_NAME = 'sponsors'")) {
         return [[{ COLUMN_NAME: 'sponsor_type' }, { COLUMN_NAME: 'sex' }]];
+      }
+      if (sql.includes("TABLE_NAME = 'sponsored_child_care_records'")) {
+        return [[
+          { COLUMN_NAME: 'gift_from_encrypted', IS_NULLABLE: 'YES' },
+          { COLUMN_NAME: 'receipt_mime', IS_NULLABLE: 'YES' },
+          { COLUMN_NAME: 'receipt_data', IS_NULLABLE: 'YES' },
+        ]];
       }
       if (sql.includes("TABLE_NAME = 'sponsorship_letter_threads'")) {
         return [[{ COLUMN_NAME: 'subject_encrypted' }]];
@@ -52,6 +65,7 @@ test('creates sponsorship tables before dependent message table', async () => {
   assert.deepEqual(created, [
     'sponsorship_allowance_transactions',
     'sponsors',
+    'sponsorship_assignments',
     'sponsorship_disbursements',
     'sponsored_child_care_records',
     'sponsorship_letter_threads',
@@ -60,6 +74,12 @@ test('creates sponsorship tables before dependent message table', async () => {
   assert.match(definitions[0], /previous_balance DECIMAL\(10,2\) NOT NULL/);
   assert.match(definitions[0], /UNIQUE KEY uq_allowance_disbursement \(disbursement_id\)/);
   assert.match(definitions[0], /UNIQUE KEY uq_allowance_related_transaction/);
+  const assignmentTable = definitions.find((sql) => sql.includes('CREATE TABLE IF NOT EXISTS sponsorship_assignments'));
+  assert.match(assignmentTable, /PRIMARY KEY \(participant_id\)/);
+  assert.match(assignmentTable, /UNIQUE KEY uq_sponsorship_assignment_sponsor \(sponsor_id\)/);
+  assert.match(assignmentTable, /REFERENCES participants \(id\)/);
+  assert.match(assignmentTable, /REFERENCES sponsors \(id\)/);
+  assert.ok(queries.some((sql) => sql.includes("WHERE participant.status = 'deleted'")));
   assert.match(
     definitions.find((sql) => sql.includes('CREATE TABLE IF NOT EXISTS sponsorship_disbursements')),
     /UNIQUE KEY uq_sponsorship_disbursement_idempotency \(idempotency_key\)/,
@@ -77,6 +97,7 @@ test('adds disbursement linkage and idempotency columns and indexes to existing 
       if (sql.includes("TABLE_NAME = 'sponsors'")) {
         return [[{ COLUMN_NAME: 'sponsor_type' }, { COLUMN_NAME: 'sex' }]];
       }
+      if (sql.includes("TABLE_NAME = 'sponsored_child_care_records'")) return [[]];
       if (sql.includes("TABLE_NAME = 'sponsorship_letter_threads'")) {
         return [[{ COLUMN_NAME: 'subject_encrypted' }]];
       }
@@ -86,10 +107,14 @@ test('adds disbursement linkage and idempotency columns and indexes to existing 
 
   await initializeSponsorshipTables(pool);
 
+  assert.ok(queries.some((sql) => sql.includes("WHERE participant.status = 'deleted'")));
   assert.ok(queries.some((sql) => sql.includes('ADD COLUMN disbursement_id BIGINT UNSIGNED')));
   assert.ok(queries.some((sql) => sql.includes('ADD COLUMN idempotency_key CHAR(36)')));
   assert.ok(queries.some((sql) => sql.includes('ADD UNIQUE KEY uq_allowance_disbursement')));
   assert.ok(queries.some((sql) => sql.includes('ADD UNIQUE KEY uq_sponsorship_disbursement_idempotency')));
+  assert.ok(queries.some((sql) => sql.includes('ADD COLUMN gift_from_encrypted TEXT DEFAULT NULL')));
+  assert.ok(queries.some((sql) => sql.includes('MODIFY COLUMN receipt_mime VARCHAR(100) DEFAULT NULL')));
+  assert.ok(queries.some((sql) => sql.includes('MODIFY COLUMN receipt_data LONGBLOB DEFAULT NULL')));
 });
 
 test('adds the encrypted subject column to legacy thread tables', async () => {
@@ -103,6 +128,7 @@ test('adds the encrypted subject column to legacy thread tables', async () => {
       if (sql.includes("TABLE_NAME = 'sponsors'")) {
         return [[{ COLUMN_NAME: 'sponsor_type' }, { COLUMN_NAME: 'sex' }]];
       }
+      if (sql.includes("TABLE_NAME = 'sponsored_child_care_records'")) return [[]];
       if (sql.includes("TABLE_NAME = 'sponsorship_letter_threads'")) {
         return [[]];
       }
@@ -124,6 +150,7 @@ test('adds missing sponsor profile columns without replacing sponsor records', a
     },
     async execute(sql) {
       if (sql.includes("TABLE_NAME = 'sponsors'")) return [[]];
+      if (sql.includes("TABLE_NAME = 'sponsored_child_care_records'")) return [[]];
       return [[{ COLUMN_NAME: 'subject_encrypted' }]];
     },
   };
@@ -146,6 +173,7 @@ test('surfaces migration failures other than a concurrent duplicate column', asy
       if (sql.includes("TABLE_NAME = 'sponsors'")) {
         return [[{ COLUMN_NAME: 'sponsor_type' }, { COLUMN_NAME: 'sex' }]];
       }
+      if (sql.includes("TABLE_NAME = 'sponsored_child_care_records'")) return [[]];
       if (sql.includes("TABLE_NAME = 'sponsorship_letter_threads'")) {
         return [[]];
       }

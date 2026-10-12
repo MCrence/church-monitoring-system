@@ -70,7 +70,10 @@ function participantRegistrationErrors(body, educationLevels, gradeLevelsByEduca
   } else if (String(body.emergencyContactName).trim().length > 100) {
     errors.emergencyContactName = 'Use 100 characters or fewer.';
   }
-  if (!normalizePhilippineMobile(body.emergencyContactPhone)) {
+  if (
+    String(body.emergencyContactPhone || '').trim() &&
+    !normalizePhilippineMobile(body.emergencyContactPhone)
+  ) {
     errors.emergencyContactPhone = 'Enter a valid Philippine mobile number.';
   }
 

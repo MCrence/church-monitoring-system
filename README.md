@@ -144,14 +144,14 @@ SMTP variables only if you still use SMTP locally or explicitly set
 
 ### Guardian SMS notifications (Semaphore)
 
-Sponsored-child registration requires the guardian/emergency-contact name and
-a valid Philippine mobile number. The number is normalized to E.164 and saved
-in the existing encrypted emergency-contact phone field. After registration,
-the server sends a brief profile-created notice through the Semaphore v4
+Sponsored-child registration requires the guardian name. A mobile number is
+not collected by the registration form; the existing encrypted emergency
+contact phone field remains available to authorized staff when a number is
+already recorded. The server sends a profile-created notice through the Semaphore v4
 Messages API; it does not include the child's name, passcode, or other profile
 details. The registration response and audit log distinguish an SMS accepted
 for processing, one Semaphore reports sent to the carrier network, and a
-failed or unconfigured send. A carrier-network status does not guarantee that
+failed, unconfigured, or skipped send when no valid number is on file. A carrier-network status does not guarantee that
 the guardian received or read the message. When authorized staff record a
 growth measurement, attended activity, or care note, the server also sends a
 brief guardian SMS identifying the update type and date, without including
@@ -319,7 +319,7 @@ the server as well as reflected in the navigation.
 The Participants directory lets authorized staff register Sponsored Children,
 search by name, and filter by education type (Elementary, Junior High
 School, Senior High School, or College) and, with sponsored-care access,
-by child status (Active, On Hold, Withdrawn, Deceased, or Sponsorship
+by child status (Active, Withdrawn, Deceased, or Sponsorship
 Completed). Existing Goer participant
 records remain available in the directory for viewing and management. Goer
 participant records do not use QR codes; any previously issued Goer QR codes
@@ -327,7 +327,7 @@ are revoked on server startup while their historical records remain stored.
 
 Child status and monthly allowance are edited from the child’s Participants
 profile modal. Authorized staff with Manage sponsored care permission can set
-the sponsorship status to Active, On Hold, Withdrawn, Deceased, or Sponsorship
+the sponsorship status to Active, Withdrawn, Deceased, or Sponsorship
 Completed. The Participants directory uses search, education-type and child-status
 filters, and sorting instead of the former participant-type dropdown. In the Sponsored Care
 module, the page lists the children in care; selecting a child opens a profile
@@ -347,11 +347,21 @@ disbursement IDs, the actor, amount, before/after balances, and time. The
 monthly allowance is a scheduled amount and does not change the available
 balance automatically.
 
+The Sponsor Care child profile also displays the assigned sponsor and lets
+authorized staff assign an available sponsor. Each sponsor can be assigned to
+one child at a time; sponsors already assigned to another child are omitted
+from the available choices. Clicking a sponsor in the directory opens a
+profile showing the sponsored child, with an option to unassign the sponsor.
+Assignments and unassignments are recorded in the audit log.
+
 Staff with View sponsored care permission can review transaction history, past
 disbursements, received-care records, receipt proofs, and child letter threads.
 Staff with Manage sponsored care permission can also record a sponsor
-disbursement, reply to letters, and update letter status. Goers record a
-received gift or allowance separately from staff account-balance transactions.
+disbursement, record a received gift with its source, amount, and description,
+reply to letters, and update letter status. Gift source names are encrypted in
+the existing care-record table and gift entries do not change the available
+allowance balance. Goers record a received gift or allowance separately from
+staff account-balance transactions.
 The sponsor disbursement form no longer asks for a description; legacy
 descriptions remain stored but are not returned for those records. Receipt
 proofs accept JPG, PNG, or PDF files (up to 4 MB); proof files are stored in

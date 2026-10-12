@@ -53,6 +53,29 @@ async function initializeSponsorshipTables(pool) {
   }
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS sponsorship_assignments (
+      participant_id INT UNSIGNED NOT NULL,
+      sponsor_id INT UNSIGNED NOT NULL,
+      assigned_by INT UNSIGNED DEFAULT NULL,
+      assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (participant_id),
+      UNIQUE KEY uq_sponsorship_assignment_sponsor (sponsor_id),
+      CONSTRAINT fk_sponsorship_assignment_participant
+        FOREIGN KEY (participant_id) REFERENCES participants (id)
+        ON DELETE CASCADE,
+      CONSTRAINT fk_sponsorship_assignment_sponsor
+        FOREIGN KEY (sponsor_id) REFERENCES sponsors (id)
+        ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await pool.query(`
+    DELETE assignment
+    FROM sponsorship_assignments assignment
+    JOIN participants participant ON participant.id = assignment.participant_id
+    WHERE participant.status = 'deleted'
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS sponsorship_disbursements (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
       participant_id INT UNSIGNED NOT NULL,
@@ -121,8 +144,9 @@ async function initializeSponsorshipTables(pool) {
       amount DECIMAL(10,2) NOT NULL,
       recorded_on DATE NOT NULL,
       description VARCHAR(255) DEFAULT NULL,
-      receipt_mime VARCHAR(100) NOT NULL,
-      receipt_data LONGBLOB NOT NULL,
+      gift_from_encrypted TEXT DEFAULT NULL,
+      receipt_mime VARCHAR(100) DEFAULT NULL,
+      receipt_data LONGBLOB DEFAULT NULL,
       created_by INT UNSIGNED DEFAULT NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (id),
@@ -132,6 +156,32 @@ async function initializeSponsorshipTables(pool) {
         ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
+  const [careRecordColumns] = await pool.execute(
+    `SELECT COLUMN_NAME, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sponsored_child_care_records'
+       AND COLUMN_NAME IN ('gift_from_encrypted', 'receipt_mime', 'receipt_data')`,
+  );
+  const existingCareRecordColumns = new Map(
+    careRecordColumns.map(({ COLUMN_NAME, IS_NULLABLE }) => [COLUMN_NAME, IS_NULLABLE]),
+  );
+  if (!existingCareRecordColumns.has('gift_from_encrypted')) {
+    try {
+      await pool.query('ALTER TABLE sponsored_child_care_records ADD COLUMN gift_from_encrypted TEXT DEFAULT NULL');
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+    }
+  }
+  for (const [column, definition] of [
+    ['receipt_mime', 'VARCHAR(100) DEFAULT NULL'],
+    ['receipt_data', 'LONGBLOB DEFAULT NULL'],
+  ]) {
+    if (existingCareRecordColumns.get(column) === 'YES') continue;
+    try {
+      await pool.query(`ALTER TABLE sponsored_child_care_records MODIFY COLUMN ${column} ${definition}`);
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+    }
+  }
   await pool.query(`
     CREATE TABLE IF NOT EXISTS sponsorship_letter_threads (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

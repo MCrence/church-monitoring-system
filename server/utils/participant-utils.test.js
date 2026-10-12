@@ -62,7 +62,6 @@ test('returns inline registration validation errors for missing or invalid requi
       'dateOfBirth',
       'educationLevel',
       'emergencyContactName',
-      'emergencyContactPhone',
       'firstName',
       'gender',
       'lastName',
@@ -80,6 +79,30 @@ test('returns inline registration validation errors for missing or invalid requi
       emergencyContactPhone: '09171234567',
     }, educationLevels, grades).dateOfBirth,
     undefined,
+  );
+  const missingPhoneErrors = participantRegistrationErrors({
+    firstName: 'Ana',
+    lastName: 'Cruz',
+    dateOfBirth: `${new Date().getUTCFullYear() - 10}-01-01`,
+    gender: 'Female',
+    educationLevel: 'Elementary',
+    gradeLevel: 'Grade 1',
+    emergencyContactName: 'Guardian',
+  }, educationLevels, grades);
+  assert.equal(missingPhoneErrors.emergencyContactName, undefined);
+  assert.equal(missingPhoneErrors.emergencyContactPhone, undefined);
+  assert.equal(
+    participantRegistrationErrors({
+      firstName: 'Ana',
+      lastName: 'Cruz',
+      dateOfBirth: `${new Date().getUTCFullYear() - 10}-01-01`,
+      gender: 'Female',
+      educationLevel: 'Elementary',
+      gradeLevel: 'Grade 1',
+      emergencyContactName: 'Guardian',
+      emergencyContactPhone: '123',
+    }, educationLevels, grades).emergencyContactPhone,
+    'Enter a valid Philippine mobile number.',
   );
   assert.equal(
     participantRegistrationErrors({

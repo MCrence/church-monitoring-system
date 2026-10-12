@@ -1574,16 +1574,21 @@ app.post('/api/participants', authenticate, checkPermission('participants:manage
     duplicateLockName = null;
     await writeAuditLog(req.user, 'participant.created', 'participant', result.insertId);
     let notification;
-    try {
-      notification = await sendSemaphoreSms({
-        apiKey: process.env.SEMAPHORE_API_KEY,
-        senderName: process.env.SEMAPHORE_SENDER_NAME,
-        number: normalizePhilippineMobile(req.body.emergencyContactPhone),
-        message: 'A participant profile has been registered for the child in your care. Contact FMC Field Care if you have questions.',
-      });
-    } catch (error) {
-      console.error('Semaphore SMS delivery failed:', error.name || 'Unknown error');
-      notification = { status: 'failed' };
+    const guardianPhone = normalizePhilippineMobile(req.body.emergencyContactPhone);
+    if (!guardianPhone) {
+      notification = { status: 'invalid_number' };
+    } else {
+      try {
+        notification = await sendSemaphoreSms({
+          apiKey: process.env.SEMAPHORE_API_KEY,
+          senderName: process.env.SEMAPHORE_SENDER_NAME,
+          number: guardianPhone,
+          message: 'A participant profile has been registered for the child in your care. Contact FMC Field Care if you have questions.',
+        });
+      } catch (error) {
+        console.error('Semaphore SMS delivery failed:', error.name || 'Unknown error');
+        notification = { status: 'failed' };
+      }
     }
     await writeAuditLog(req.user, 'participant.guardian_sms', 'participant', result.insertId, {
       status: notification.status,
@@ -1731,17 +1736,30 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
 });
 
 app.delete('/api/participants/:id', authenticate, checkPermission('participants:manage'), async (req, res, next) => {
-  const connection = await pool.getConnection();
+  let connection;
+  let transactionActive = false;
   try {
+    await sponsorshipTablesReady;
+    connection = await pool.getConnection();
     await connection.beginTransaction();
+    transactionActive = true;
     const [result] = await connection.execute('UPDATE participants SET status = ?, updated_at = NOW() WHERE id = ?', ['deleted', req.params.id]);
-    if (!result.affectedRows) { await connection.rollback(); return res.status(404).json({ error: 'Participant not found' }); }
+    if (!result.affectedRows) {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(404).json({ error: 'Participant not found' });
+    }
     // Revoke any active QR codes for the participant
     await connection.execute("UPDATE qr_codes SET status = 'revoked', revoked_at = NOW() WHERE participant_id = ?", [req.params.id]);
+    await connection.execute('DELETE FROM sponsorship_assignments WHERE participant_id = ?', [req.params.id]);
     await connection.commit();
+    transactionActive = false;
     await writeAuditLog(req.user, 'participant.deleted', 'participant', req.params.id);
     res.json({ deleted: true });
-  } catch (error) { await connection.rollback(); next(error); } finally { connection.release(); }
+  } catch (error) {
+    if (connection && transactionActive) await connection.rollback();
+    next(error);
+  } finally { connection?.release(); }
 });
 
 app.post('/api/checkin', authenticate, checkPermission('checkin:record'), async (req, res, next) => {
@@ -2035,8 +2053,12 @@ app.get('/api/sponsorship/sponsors', authenticate, checkPermission('sponsorship:
   try {
     await sponsorshipTablesReady;
     const [rows] = await pool.query(
-      `SELECT id, name_encrypted, sex, sponsor_type, created_at
-       FROM sponsors ORDER BY id DESC`,
+      `SELECT s.id, s.name_encrypted, s.sex, s.sponsor_type, s.created_at,
+              p.id AS participant_id, p.full_name_encrypted, p.participant_code
+       FROM sponsors s
+       LEFT JOIN sponsorship_assignments a ON a.sponsor_id = s.id
+       LEFT JOIN participants p ON p.id = a.participant_id
+       ORDER BY s.id DESC`,
     );
     res.json(rows.map((row) => ({
       id: row.id,
@@ -2044,6 +2066,11 @@ app.get('/api/sponsorship/sponsors', authenticate, checkPermission('sponsorship:
       sex: row.sex || '',
       sponsorType: row.sponsor_type || '',
       createdAt: row.created_at,
+      sponsoredChild: row.participant_id ? {
+        id: row.participant_id,
+        name: decrypt(row.full_name_encrypted) || 'Unnamed child',
+        participantCode: row.participant_code,
+      } : null,
     })));
   } catch (error) { next(error); }
 });
@@ -2075,6 +2102,191 @@ app.post('/api/sponsorship/sponsors', authenticate, checkPermission('sponsorship
   } catch (error) { next(error); }
 });
 
+async function loadChildSponsorAssignment(participantId) {
+  const [[assignedRow]] = await pool.execute(
+    `SELECT s.id, s.name_encrypted, s.sex, s.sponsor_type
+     FROM sponsorship_assignments a
+     JOIN sponsors s ON s.id = a.sponsor_id
+     WHERE a.participant_id = ?
+     LIMIT 1`,
+    [participantId],
+  );
+  const [availableRows] = await pool.execute(
+    `SELECT s.id, s.name_encrypted, s.sex, s.sponsor_type
+     FROM sponsors s
+     WHERE NOT EXISTS (
+       SELECT 1 FROM sponsorship_assignments a WHERE a.sponsor_id = s.id
+     )
+     ORDER BY s.id DESC`,
+  );
+  const formatSponsor = (row) => ({
+    id: row.id,
+    familyName: row.name_encrypted ? decrypt(row.name_encrypted) : '',
+    sex: row.sex || '',
+    sponsorType: row.sponsor_type || '',
+  });
+  return {
+    assignedSponsor: assignedRow ? formatSponsor(assignedRow) : null,
+    availableSponsors: availableRows.map(formatSponsor),
+  };
+}
+
+app.get('/api/sponsorship/children/:id/sponsor-assignment', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  try {
+    await Promise.all([participantProfileColumnsReady, sponsorshipTablesReady]);
+    const participantId = Number(req.params.id);
+    if (!Number.isSafeInteger(participantId) || participantId <= 0) {
+      return res.status(400).json({ error: 'Invalid child participant ID' });
+    }
+    const [[child]] = await pool.execute(
+      `SELECT id FROM participants
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+       LIMIT 1`,
+      [participantId],
+    );
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    res.json(await loadChildSponsorAssignment(participantId));
+  } catch (error) { next(error); }
+});
+
+app.put('/api/sponsorship/children/:id/sponsor-assignment', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  let connection;
+  let transactionActive = false;
+  try {
+    await Promise.all([participantProfileColumnsReady, sponsorshipTablesReady]);
+    const participantId = Number(req.params.id);
+    const sponsorId = Number(req.body?.sponsorId);
+    if (!Number.isSafeInteger(participantId) || participantId <= 0) {
+      return res.status(400).json({ error: 'Invalid child participant ID' });
+    }
+    if (!Number.isSafeInteger(sponsorId) || sponsorId <= 0) {
+      return res.status(400).json({ error: 'Select an available sponsor' });
+    }
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionActive = true;
+    const [[child]] = await connection.execute(
+      `SELECT id FROM participants
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+       LIMIT 1 FOR UPDATE`,
+      [participantId],
+    );
+    if (!child) {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(404).json({ error: 'Sponsored child not found' });
+    }
+    const [[currentAssignment]] = await connection.execute(
+      `SELECT sponsor_id FROM sponsorship_assignments WHERE participant_id = ? LIMIT 1`,
+      [participantId],
+    );
+    const sponsorIdsToLock = [...new Set([sponsorId, currentAssignment?.sponsor_id].filter(Boolean))]
+      .map(Number)
+      .sort((left, right) => left - right);
+    const [lockedSponsors] = await connection.query(
+      `SELECT id FROM sponsors WHERE id IN (${sponsorIdsToLock.map(() => '?').join(',')})
+       ORDER BY id FOR UPDATE`,
+      sponsorIdsToLock,
+    );
+    if (!lockedSponsors.some((sponsor) => Number(sponsor.id) === sponsorId)) {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(404).json({ error: 'Sponsor not found' });
+    }
+    const [[existingUse]] = await connection.execute(
+      `SELECT participant_id FROM sponsorship_assignments WHERE sponsor_id = ? LIMIT 1`,
+      [sponsorId],
+    );
+    if (existingUse && Number(existingUse.participant_id) !== participantId) {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(409).json({ error: 'That sponsor is already assigned to another child' });
+    }
+    if (Number(currentAssignment?.sponsor_id) !== sponsorId) {
+      if (currentAssignment) {
+        await connection.execute(
+          `UPDATE sponsorship_assignments
+           SET sponsor_id = ?, assigned_by = ?, assigned_at = NOW()
+           WHERE participant_id = ?`,
+          [sponsorId, req.user.id, participantId],
+        );
+      } else {
+        await connection.execute(
+          `INSERT INTO sponsorship_assignments (participant_id, sponsor_id, assigned_by, assigned_at)
+           VALUES (?, ?, ?, NOW())`,
+          [participantId, sponsorId, req.user.id],
+        );
+      }
+    }
+    await connection.commit();
+    transactionActive = false;
+    if (Number(currentAssignment?.sponsor_id) !== sponsorId) {
+      await writeAuditLog(req.user, 'sponsorship.child.sponsor.assigned', 'participant', participantId, {
+        sponsorId,
+        previousSponsorId: currentAssignment?.sponsor_id || null,
+      });
+    }
+    res.json(await loadChildSponsorAssignment(participantId));
+  } catch (error) {
+    if (connection && transactionActive) await connection.rollback();
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'That sponsor is already assigned to another child' });
+    }
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+app.delete('/api/sponsorship/children/:id/sponsor-assignment', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  let connection;
+  let transactionActive = false;
+  try {
+    await Promise.all([participantProfileColumnsReady, sponsorshipTablesReady]);
+    const participantId = Number(req.params.id);
+    if (!Number.isSafeInteger(participantId) || participantId <= 0) {
+      return res.status(400).json({ error: 'Invalid child participant ID' });
+    }
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionActive = true;
+    const [[child]] = await connection.execute(
+      `SELECT id FROM participants
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
+       LIMIT 1 FOR UPDATE`,
+      [participantId],
+    );
+    if (!child) {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(404).json({ error: 'Sponsored child not found' });
+    }
+    const [[assignment]] = await connection.execute(
+      `SELECT sponsor_id FROM sponsorship_assignments WHERE participant_id = ? LIMIT 1 FOR UPDATE`,
+      [participantId],
+    );
+    if (assignment) {
+      await connection.execute(
+        `DELETE FROM sponsorship_assignments WHERE participant_id = ?`,
+        [participantId],
+      );
+    }
+    await connection.commit();
+    transactionActive = false;
+    if (assignment) {
+      await writeAuditLog(req.user, 'sponsorship.child.sponsor.unassigned', 'participant', participantId, {
+        sponsorId: assignment.sponsor_id,
+      });
+    }
+    res.json(await loadChildSponsorAssignment(participantId));
+  } catch (error) {
+    if (connection && transactionActive) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (req, res, next) => {
   try {
     await participantProfileColumnsReady;
@@ -2084,7 +2296,7 @@ app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (
       : '';
     const adminFields = isGoer
       ? ''
-      : `, school_name_encrypted, school_address_encrypted,
+      : `, education_level, school_name_encrypted, school_address_encrypted,
          sponsorship_lifecycle, sponsorship_status`;
     const [rows] = await pool.execute(
       `SELECT id, full_name_encrypted, participant_code, monthly_allowance,
@@ -2099,6 +2311,7 @@ app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (
       name: decrypt(row.full_name_encrypted) || 'Unnamed child',
       participantCode: row.participant_code,
       ...(!isGoer ? {
+        educationLevel: row.education_level || '',
         monthlyAllowance: Number(row.monthly_allowance || 0),
         availableBalance: Number(row.available_allowance_balance || 0),
       } : {}),
@@ -2523,7 +2736,7 @@ app.get('/api/sponsorship/children/:id/disbursements', authenticate, checkSponso
     const [disbursementRows, careRows] = isGoer
       ? [[], (await pool.execute(
         `SELECT id, amount, DATE_FORMAT(recorded_on, '%Y-%m-%d') AS recorded_on,
-                care_type, description, receipt_mime, created_at
+                care_type, description, gift_from_encrypted, receipt_mime, created_at
          FROM sponsored_child_care_records
          WHERE participant_id = ?
          ORDER BY recorded_on DESC, id DESC`,
@@ -2540,7 +2753,7 @@ app.get('/api/sponsorship/children/:id/disbursements', authenticate, checkSponso
         ).then(([rows]) => rows),
         pool.execute(
           `SELECT id, amount, DATE_FORMAT(recorded_on, '%Y-%m-%d') AS recorded_on,
-                  care_type, description, receipt_mime, created_at
+                  care_type, description, gift_from_encrypted, receipt_mime, created_at
            FROM sponsored_child_care_records
            WHERE participant_id = ?
            ORDER BY recorded_on DESC, id DESC`,
@@ -2557,13 +2770,17 @@ app.get('/api/sponsorship/children/:id/disbursements', authenticate, checkSponso
         receipt_mime: row.receipt_mime,
         hasReceipt: Boolean(row.receipt_mime),
       })),
-      ...careRows.map((row) => ({
-        ...row,
-        id: `received-${row.id}`,
-        recordType: 'received',
-        amount: Number(row.amount),
-        hasReceipt: Boolean(row.receipt_mime),
-      })),
+      ...careRows.map((row) => {
+        const { gift_from_encrypted: encryptedGiftFrom, ...careRecord } = row;
+        return {
+          ...careRecord,
+          id: `received-${row.id}`,
+          recordType: 'received',
+          amount: Number(row.amount),
+          giftsFrom: encryptedGiftFrom ? decrypt(encryptedGiftFrom) : '',
+          hasReceipt: Boolean(row.receipt_mime),
+        };
+      }),
     ];
     records.sort((left, right) =>
       right.recorded_on.localeCompare(left.recorded_on) ||
@@ -2754,6 +2971,45 @@ app.post('/api/sponsorship/children/:id/disbursements', authenticate, checkPermi
   } finally {
     if (connection) connection.release();
   }
+});
+
+app.post('/api/sponsorship/children/:id/gifts', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  try {
+    const giftFrom = String(req.body?.giftsFrom || '').trim();
+    const amountCents = parsePositiveAmountCents(req.body?.amount);
+    const description = String(req.body?.description || '').trim();
+    if (!giftFrom || giftFrom.length > 100) {
+      return res.status(400).json({ error: 'Enter who the gift is from (100 characters or fewer)' });
+    }
+    if (amountCents === null) {
+      return res.status(400).json({ error: 'Enter a positive gift amount up to 1,000,000.00 with no more than two decimal places' });
+    }
+    if (description.length > 255) {
+      return res.status(400).json({ error: 'Description must be 255 characters or fewer' });
+    }
+    await sponsorshipTablesReady;
+    const child = await getAccessibleSponsorshipChild(req.user, req.params.id);
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    const amount = (amountCents / 100).toFixed(2);
+    const [result] = await pool.execute(
+      `INSERT INTO sponsored_child_care_records
+         (participant_id, care_type, amount, recorded_on, description, gift_from_encrypted, receipt_mime, receipt_data, created_by)
+       VALUES (?, 'gift', ?, CURDATE(), ?, ?, NULL, NULL, ?)`,
+      [child.id, amount, description || null, encrypt(giftFrom), req.user.id],
+    );
+    await writeAuditLog(req.user, 'sponsorship.gift.recorded', 'participant', child.id, {
+      giftRecordId: result.insertId,
+      amount,
+      giftsFrom: giftFrom,
+      hasDescription: Boolean(description),
+    });
+    res.status(201).json({
+      id: `received-${result.insertId}`,
+      amount: Number(amount),
+      giftsFrom: giftFrom,
+      description: description || null,
+    });
+  } catch (error) { next(error); }
 });
 
 app.post('/api/sponsorship/children/:id/care-records', authenticate, checkSponsorshipRecord, async (req, res, next) => {
