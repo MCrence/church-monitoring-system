@@ -69,11 +69,78 @@ async function initializeSponsorshipTables(pool) {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS sponsorship_assignment_history (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      participant_id INT UNSIGNED NOT NULL,
+      sponsor_id INT UNSIGNED NOT NULL,
+      sponsor_name_encrypted TEXT DEFAULT NULL,
+      assigned_by INT UNSIGNED DEFAULT NULL,
+      started_at DATETIME NOT NULL,
+      ended_at DATETIME DEFAULT NULL,
+      ended_by INT UNSIGNED DEFAULT NULL,
+      PRIMARY KEY (id),
+      INDEX idx_sponsorship_history_participant (participant_id, started_at, id),
+      CONSTRAINT fk_sponsorship_history_participant
+        FOREIGN KEY (participant_id) REFERENCES participants (id)
+        ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await pool.query(`
+    INSERT INTO sponsorship_assignment_history
+      (participant_id, sponsor_id, sponsor_name_encrypted, assigned_by, started_at)
+    SELECT assignment.participant_id, assignment.sponsor_id, sponsor.name_encrypted,
+           assignment.assigned_by, assignment.assigned_at
+    FROM sponsorship_assignments assignment
+    JOIN sponsors sponsor ON sponsor.id = assignment.sponsor_id
+    WHERE NOT EXISTS (
+      SELECT 1 FROM sponsorship_assignment_history history
+      WHERE history.participant_id = assignment.participant_id
+        AND history.sponsor_id = assignment.sponsor_id
+        AND history.ended_at IS NULL
+    )
+  `);
+  await pool.query(`
+    UPDATE sponsorship_assignment_history history
+    JOIN participants participant ON participant.id = history.participant_id
+    SET history.ended_at = COALESCE(history.ended_at, NOW())
+    WHERE participant.status = 'deleted' AND history.ended_at IS NULL
+  `);
+  await pool.query(`
     DELETE assignment
     FROM sponsorship_assignments assignment
     JOIN participants participant ON participant.id = assignment.participant_id
     WHERE participant.status = 'deleted'
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS participant_status_history (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      participant_id INT UNSIGNED NOT NULL,
+      status_type VARCHAR(24) NOT NULL DEFAULT 'participant',
+      previous_status VARCHAR(30) NOT NULL,
+      current_status VARCHAR(30) NOT NULL,
+      changed_by INT UNSIGNED DEFAULT NULL,
+      changed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_participant_status_history (participant_id, changed_at, id),
+      CONSTRAINT fk_participant_status_history_participant
+        FOREIGN KEY (participant_id) REFERENCES participants (id)
+        ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  const [statusHistoryColumns] = await pool.execute(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'participant_status_history'
+       AND COLUMN_NAME = 'status_type'`,
+  );
+  if (!statusHistoryColumns.length) {
+    try {
+      await pool.query(
+        "ALTER TABLE participant_status_history ADD COLUMN status_type VARCHAR(24) NOT NULL DEFAULT 'participant' AFTER participant_id",
+      );
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+    }
+  }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS sponsorship_disbursements (

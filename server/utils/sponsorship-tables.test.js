@@ -12,8 +12,9 @@ test('creates sponsorship tables before dependent message table', async () => {
       queries.push(sql);
       const match = sql.match(/CREATE TABLE IF NOT EXISTS (\w+)/);
       if (!match) {
-        assert.match(sql, /DELETE assignment/);
-        assert.ok(created.includes('sponsorship_assignments'));
+        if (sql.includes('DELETE assignment')) {
+          assert.ok(created.includes('sponsorship_assignments'));
+        }
         return [{}];
       }
       const table = match[1];
@@ -28,6 +29,7 @@ test('creates sponsorship tables before dependent message table', async () => {
       return [{}];
     },
     async execute(sql) {
+      if (sql.includes("TABLE_NAME = 'participant_status_history'")) return [[]];
       if (sql.includes("TABLE_NAME = 'sponsors'")) {
         return [[{ COLUMN_NAME: 'sponsor_type' }, { COLUMN_NAME: 'sex' }]];
       }
@@ -66,6 +68,8 @@ test('creates sponsorship tables before dependent message table', async () => {
     'sponsorship_allowance_transactions',
     'sponsors',
     'sponsorship_assignments',
+    'sponsorship_assignment_history',
+    'participant_status_history',
     'sponsorship_disbursements',
     'sponsored_child_care_records',
     'sponsorship_letter_threads',
@@ -79,6 +83,16 @@ test('creates sponsorship tables before dependent message table', async () => {
   assert.match(assignmentTable, /UNIQUE KEY uq_sponsorship_assignment_sponsor \(sponsor_id\)/);
   assert.match(assignmentTable, /REFERENCES participants \(id\)/);
   assert.match(assignmentTable, /REFERENCES sponsors \(id\)/);
+  assert.match(
+    definitions.find((sql) => sql.includes('CREATE TABLE IF NOT EXISTS sponsorship_assignment_history')),
+    /sponsor_name_encrypted TEXT DEFAULT NULL/,
+  );
+  assert.ok(queries.some((sql) => sql.includes('INSERT INTO sponsorship_assignment_history')));
+  assert.ok(queries.some((sql) => sql.includes('ADD COLUMN status_type VARCHAR(24)')));
+  assert.match(
+    definitions.find((sql) => sql.includes('CREATE TABLE IF NOT EXISTS participant_status_history')),
+    /previous_status VARCHAR\(30\) NOT NULL/,
+  );
   assert.ok(queries.some((sql) => sql.includes("WHERE participant.status = 'deleted'")));
   assert.match(
     definitions.find((sql) => sql.includes('CREATE TABLE IF NOT EXISTS sponsorship_disbursements')),
@@ -94,6 +108,7 @@ test('adds disbursement linkage and idempotency columns and indexes to existing 
       return [{}];
     },
     async execute(sql) {
+      if (sql.includes("TABLE_NAME = 'participant_status_history'")) return [[]];
       if (sql.includes("TABLE_NAME = 'sponsors'")) {
         return [[{ COLUMN_NAME: 'sponsor_type' }, { COLUMN_NAME: 'sex' }]];
       }
@@ -125,6 +140,7 @@ test('adds the encrypted subject column to legacy thread tables', async () => {
       return [{}];
     },
     async execute(sql) {
+      if (sql.includes("TABLE_NAME = 'participant_status_history'")) return [[]];
       if (sql.includes("TABLE_NAME = 'sponsors'")) {
         return [[{ COLUMN_NAME: 'sponsor_type' }, { COLUMN_NAME: 'sex' }]];
       }
@@ -149,6 +165,9 @@ test('adds missing sponsor profile columns without replacing sponsor records', a
       return [{}];
     },
     async execute(sql) {
+      if (sql.includes("TABLE_NAME = 'participant_status_history'")) {
+        return [[{ COLUMN_NAME: 'status_type' }]];
+      }
       if (sql.includes("TABLE_NAME = 'sponsors'")) return [[]];
       if (sql.includes("TABLE_NAME = 'sponsored_child_care_records'")) return [[]];
       return [[{ COLUMN_NAME: 'subject_encrypted' }]];
@@ -170,6 +189,7 @@ test('surfaces migration failures other than a concurrent duplicate column', asy
       return [{}];
     },
     async execute(sql) {
+      if (sql.includes("TABLE_NAME = 'participant_status_history'")) return [[]];
       if (sql.includes("TABLE_NAME = 'sponsors'")) {
         return [[{ COLUMN_NAME: 'sponsor_type' }, { COLUMN_NAME: 'sex' }]];
       }

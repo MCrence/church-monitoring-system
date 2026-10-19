@@ -100,6 +100,7 @@ const canAccessPermission = (permission, user) => {
   );
 };
 const canAccessPage = (page, user) => {
+  if (page === "participantHistory") return canAccessPermission("participants:view", user);
   const role = String(user?.role || user || "").toLowerCase();
   if (PAGE_ACCESS[page]) return PAGE_ACCESS[page].includes(role);
   return canAccessPermission(PAGE_PERMISSIONS[page], user);
@@ -196,31 +197,90 @@ function useParticipantAge(dateOfBirth) {
 }
 function validateParticipantRegistration(form) {
   const errors = {};
-  if (!form.firstName.trim()) errors.firstName = "First name is required.";
-  else if (form.firstName.trim().length > 100) errors.firstName = "Use 100 characters or fewer.";
-  if (!form.lastName.trim()) errors.lastName = "Last name is required.";
-  else if (form.lastName.trim().length > 100) errors.lastName = "Use 100 characters or fewer.";
-  if (form.middleName.trim().length > 100) errors.middleName = "Use 100 characters or fewer.";
-  if (!form.dateOfBirth) errors.dateOfBirth = "Date of birth is required.";
-  else if (calculateParticipantAge(form.dateOfBirth) === "") errors.dateOfBirth = "Enter a valid date of birth.";
-  else if (calculateParticipantAge(form.dateOfBirth) < 6 || calculateParticipantAge(form.dateOfBirth) > 22) {
-    errors.dateOfBirth = "Sponsored children must be between 6 and 22 years old.";
+  const text = (field) => typeof form[field] === "string" ? form[field] : "";
+  const trimmed = (field) => text(field).trim();
+  const namePattern = /^\p{L}+(?:[ ]+\p{L}+)*$/u;
+  const guardianNamePattern = /^\p{L}+(?:[ '\u2019-]+\p{L}+)*$/u;
+  for (const [field, label] of [["firstName", "First name"], ["lastName", "Last name"]]) {
+    const value = trimmed(field);
+    if (!value) errors[field] = `${label} is required.`;
+    else if (value.length > 50) errors[field] = `${label} must be 50 characters or fewer.`;
+    else if (value.length < 2 || !namePattern.test(value)) errors[field] = `${label} must contain letters only.`;
   }
-  if (!GENDER_OPTIONS.includes(form.gender)) errors.gender = "Select Male or Female.";
-  if (!EDUCATION_LEVELS.includes(form.educationLevel)) errors.educationLevel = "Select an education level.";
-  else if (!GRADE_LEVELS[form.educationLevel]?.includes(form.gradeLevel)) {
-    errors.gradeLevel = "Select a valid grade or year level.";
+  const middleName = trimmed("middleName");
+  if (middleName.length > 50) errors.middleName = "Middle name must be 50 characters or fewer.";
+  else if (middleName && !namePattern.test(middleName)) errors.middleName = "Middle name must contain letters only.";
+  const guardianName = trimmed("emergencyContactName");
+  if (!guardianName) errors.emergencyContactName = "Guardian name is required.";
+  else if (guardianName.length > 100 || !guardianNamePattern.test(guardianName)) {
+    errors.emergencyContactName = "Guardian name must contain a valid name.";
   }
-  if (form.educationLevel === "College" && !form.programCourse.trim()) {
-    errors.programCourse = "Enter the college program or course.";
-  } else if (form.programCourse.trim().length > 200) {
-    errors.programCourse = "Use 200 characters or fewer.";
+  if (!text("emergencyContactPhone")) errors.emergencyContactPhone = "Guardian contact number is required.";
+  else if (!/^09[0-9]{9}$/.test(text("emergencyContactPhone"))) {
+    errors.emergencyContactPhone = "Guardian contact number must be 11 digits and start with 09.";
   }
-  if (!form.emergencyContactName.trim()) errors.emergencyContactName = "Guardian name is required.";
-  else if (form.emergencyContactName.trim().length > 100) errors.emergencyContactName = "Use 100 characters or fewer.";
-  if (form.schoolName.trim().length > 200) errors.schoolName = "Use 200 characters or fewer.";
-  if (form.schoolAddress.trim().length > 500) errors.schoolAddress = "Use 500 characters or fewer.";
+
+  const dateOfBirth = text("dateOfBirth");
+  const parsedBirthDate = /^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)
+    ? new Date(`${dateOfBirth}T00:00:00.000Z`)
+    : null;
+  const validBirthDate = parsedBirthDate &&
+    !Number.isNaN(parsedBirthDate.getTime()) &&
+    parsedBirthDate.toISOString().slice(0, 10) === dateOfBirth;
+  const age = validBirthDate ? calculateParticipantAge(dateOfBirth) : "";
+  if (!dateOfBirth) errors.dateOfBirth = "Date of birth is required.";
+  else if (!validBirthDate) errors.dateOfBirth = "Enter a valid date of birth.";
+  else if (dateOfBirth > new Date().toISOString().slice(0, 10)) errors.dateOfBirth = "Date of birth cannot be in the future.";
+  else if (age < 6) errors.dateOfBirth = "Child must be at least 6 years old.";
+  else if (age > 22) errors.dateOfBirth = "Child must not be older than 22 years.";
+
+  if (!GENDER_OPTIONS.includes(text("gender"))) errors.gender = "Please select a sex.";
+  const educationLevel = trimmed("educationLevel");
+  if (!EDUCATION_LEVELS.includes(educationLevel)) errors.educationLevel = "Please select an education level.";
+  else {
+    if (!GRADE_LEVELS[educationLevel]?.includes(trimmed("gradeLevel"))) errors.gradeLevel = "Please select a grade/year.";
+    if (!trimmed("schoolName")) errors.schoolName = "School currently attending is required.";
+    else if (
+      trimmed("schoolName").length > 150 ||
+      !/\p{L}/u.test(trimmed("schoolName")) ||
+      !/^[\p{L}\p{N}\s.'’&,()/-]+$/u.test(trimmed("schoolName"))
+    ) errors.schoolName = "Enter a valid school name (150 characters or fewer).";
+    if (!trimmed("schoolAddress")) errors.schoolAddress = "School address is required.";
+    else if (trimmed("schoolAddress").length > 255) errors.schoolAddress = "School address must be 255 characters or fewer.";
+  }
+  const programCourse = trimmed("programCourse");
+  if (educationLevel === "College" && !programCourse) {
+    errors.programCourse = "College students must provide their course.";
+  } else if (programCourse.length > 200) {
+    errors.programCourse = "College course must be 200 characters or fewer.";
+  }
+
+  const address = trimmed("address");
+  if (text("address") && !address) errors.address = "Home address cannot contain only spaces.";
+  else if (address && address.length < 5) errors.address = "Home address must be at least 5 characters.";
+  else if (address.length > 255) errors.address = "Home address must be 255 characters or fewer.";
+
+  for (const [field, label, maximum] of [["weight", "Weight", 500], ["height", "Height", 300]]) {
+    const value = text(field);
+    if (value && (!/^\d+(?:\.\d+)?$/.test(value) || Number(value) <= 0 || Number(value) > maximum)) {
+      errors[field] = `${label} must be a number greater than 0 and no more than ${maximum}.`;
+    }
+  }
+  const medicalConditions = text("medicalConditions");
+  if (medicalConditions.length > 500) errors.medicalConditions = "Medical conditions must be 500 characters or fewer.";
+  else if (medicalConditions && !medicalConditions.trim()) errors.medicalConditions = "Enter medical conditions or leave this field blank.";
   return errors;
+}
+function restrictNumericKeyDown(event, allowDecimal = false) {
+  if (
+    event.ctrlKey ||
+    event.metaKey ||
+    event.altKey ||
+    ["Backspace", "Delete", "Tab", "ArrowLeft", "ArrowRight", "Home", "End", "Enter"].includes(event.key)
+  ) return;
+  if (/^\d$/.test(event.key)) return;
+  if (allowDecimal && event.key === "." && !event.currentTarget.value.includes(".")) return;
+  event.preventDefault();
 }
 function participantNameFields(person) {
   if (person.firstName || person.middleName || person.lastName) {
@@ -686,10 +746,11 @@ function AccountSettings({ onUserUpdated }) {
 const Field = ({ label, error, ...p }) => {
   const generatedId = useId();
   const id = p.id || generatedId;
+  const required = Boolean(p.required);
   return (
     <div className="col-12 col-md-6">
       <label className="form-label" htmlFor={id}>
-        {label}
+        {label}{required && <span aria-hidden="true"> *</span>}
       </label>
       <input
         {...p}
@@ -741,16 +802,18 @@ const PrintIcon = () => (
     <path d="M6 14h12v7H6z" />
   </svg>
 );
-const GenderSelect = ({ id, value, onChange, required = false, error }) => (
+const GenderSelect = ({ id, value, onChange, onBlur, required = false, error }) => (
   <div className="col-12 col-md-6">
     <label className="form-label" htmlFor={id}>
-      Sex
+      Sex{required && <span aria-hidden="true"> *</span>}
     </label>
     <select
       id={id}
       className={`form-select${error ? " is-invalid" : ""}`}
       value={GENDER_OPTIONS.includes(value) ? value : ""}
       onChange={onChange}
+      onBlur={onBlur}
+      name="gender"
       required={required}
       aria-invalid={error ? "true" : undefined}
       aria-describedby={error ? `${id}-error` : undefined}
@@ -758,7 +821,7 @@ const GenderSelect = ({ id, value, onChange, required = false, error }) => (
       <option value="">Select sex</option>
       {GENDER_OPTIONS.map((option) => <option key={option}>{option}</option>)}
     </select>
-    {error && <div className="invalid-feedback" id={`${id}-error`}>{error}</div>}
+    {error && <div className="invalid-feedback" id={`${id}-error`} role="alert">{error}</div>}
   </div>
 );
 function Dashboard({ go }) {
@@ -858,8 +921,8 @@ function Dashboard({ go }) {
 }
 function getGreeting() {
   const hour = new Date().getHours();
-  if (hour >= 5 && hour < 12) return "morning";
-  if (hour >= 12 && hour < 17) return "afternoon";
+  if (hour >= 1 && hour < 12) return "morning";
+  if (hour >= 12 && hour < 18) return "afternoon";
   return "evening";
 }
 function Register({ onClose, onCreated }) {
@@ -886,42 +949,88 @@ function Register({ onClose, onCreated }) {
   const [result, setR] = useState(null);
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState({});
+  const [touchedFields, setTouchedFields] = useState({});
+  const [submitted, setSubmitted] = useState(false);
   const [duplicates, setDuplicates] = useState([]);
   const [confirmPotentialDuplicate, setConfirmPotentialDuplicate] = useState(false);
   const [saving, setSaving] = useState(false);
+  const registrationFormRef = useRef(null);
+  const focusFirstInvalidField = (validationErrors) => {
+    const firstInvalidField = Object.keys(validationErrors)[0];
+    if (!firstInvalidField) return;
+    window.requestAnimationFrame(() => {
+      const input = registrationFormRef.current?.querySelector(`[name="${firstInvalidField}"]`);
+      input?.scrollIntoView({ behavior: "smooth", block: "center" });
+      input?.focus({ preventScroll: true });
+    });
+  };
   const setFieldValue = (key, value) => {
-    setF((current) => ({ ...current, [key]: value }));
-    setFieldErrors((current) => ({ ...current, [key]: "" }));
+    const next = { ...f, [key]: value };
+    setF(next);
+    if (submitted || touchedFields[key]) {
+      const nextErrors = validateParticipantRegistration(next);
+      setFieldErrors((current) => {
+        const visibleErrors = { ...current };
+        if (submitted) return nextErrors;
+        if (nextErrors[key]) visibleErrors[key] = nextErrors[key];
+        else delete visibleErrors[key];
+        return visibleErrors;
+      });
+    } else {
+      setFieldErrors((current) => ({ ...current, [key]: "" }));
+    }
     setError("");
     setDuplicates([]);
     setConfirmPotentialDuplicate(false);
   };
   const update = (key) => (event) => setFieldValue(key, event.target.value);
+  const touchField = (key) => {
+    setTouchedFields((current) => ({ ...current, [key]: true }));
+    const validationErrors = validateParticipantRegistration(f);
+    setFieldErrors((current) => ({
+      ...current,
+      [key]: validationErrors[key] || "",
+    }));
+  };
   const submit = async (e) => {
     e.preventDefault();
     setError("");
+    setSubmitted(true);
+    setTouchedFields(Object.fromEntries(Object.keys(blank).map((key) => [key, true])));
     const validationErrors = validateParticipantRegistration(f);
     setFieldErrors(validationErrors);
     if (Object.keys(validationErrors).length) {
       setError("Please correct the highlighted fields before registering.");
+      focusFirstInvalidField(validationErrors);
       return;
     }
+    const cleaned = Object.fromEntries(
+      Object.entries(f).map(([key, value]) => [
+        key,
+        typeof value === "string" && key !== "emergencyContactPhone" ? value.trim() : value,
+      ]),
+    );
     setSaving(true);
     try {
       const created = await apiCall("/participants", {
         method: "POST",
         body: JSON.stringify({
-          ...f,
-          fullName: composeFullName(f),
+          ...cleaned,
+          fullName: composeFullName(cleaned),
           confirmPotentialDuplicate,
         }),
       });
-      setR({ ...created, dateOfBirth: f.dateOfBirth });
+      setR({ ...created, dateOfBirth: cleaned.dateOfBirth });
       setF(blank);
       await onCreated();
     } catch (x) {
       setError(x.message);
       setFieldErrors(x.errors || {});
+      if (x.errors && Object.keys(x.errors).length) {
+        setSubmitted(true);
+        setTouchedFields(Object.fromEntries(Object.keys(blank).map((key) => [key, true])));
+        focusFirstInvalidField(x.errors);
+      }
       setDuplicates(x.duplicates || []);
       setConfirmPotentialDuplicate(false);
     } finally {
@@ -973,7 +1082,7 @@ function Register({ onClose, onCreated }) {
             </div>
           </div>
         ) : (
-          <form className="participant-registration-form" onSubmit={submit} noValidate>
+          <form ref={registrationFormRef} className="participant-registration-form" onSubmit={submit} noValidate>
             <p className="registration-note mb-0">Fields marked * are required. Age is calculated from date of birth.</p>
             <section className="registration-section">
               <header className="registration-section-heading">
@@ -981,24 +1090,30 @@ function Register({ onClose, onCreated }) {
                 <div><h3>Child details</h3><p>Start with the child’s basic information.</p></div>
               </header>
               <div className="row g-3">
-                <Field label="First name" value={f.firstName} onChange={update("firstName")} required error={fieldErrors.firstName} />
-                <Field label="Middle name (optional)" value={f.middleName} onChange={update("middleName")} error={fieldErrors.middleName} />
-                <Field label="Last name" value={f.lastName} onChange={update("lastName")} required error={fieldErrors.lastName} />
+                <Field name="firstName" label="First name" value={f.firstName} onChange={update("firstName")} onBlur={() => touchField("firstName")} maxLength={50} required error={fieldErrors.firstName} />
+                <Field name="middleName" label="Middle name (optional)" value={f.middleName} onChange={update("middleName")} onBlur={() => touchField("middleName")} maxLength={50} error={fieldErrors.middleName} />
+                <Field name="lastName" label="Last name" value={f.lastName} onChange={update("lastName")} onBlur={() => touchField("lastName")} maxLength={50} required error={fieldErrors.lastName} />
                 <Field
+                  name="dateOfBirth"
                   label="Date of birth"
                   type="date"
                   value={f.dateOfBirth}
                   onChange={update("dateOfBirth")}
+                  onBlur={() => touchField("dateOfBirth")}
                   required
                   error={fieldErrors.dateOfBirth}
                 />
                 <AgeField dateOfBirth={f.dateOfBirth} />
-                <GenderSelect id="register-gender" value={f.gender} onChange={update("gender")} required error={fieldErrors.gender} />
+                <GenderSelect id="register-gender" value={f.gender} onChange={update("gender")} onBlur={() => touchField("gender")} required error={fieldErrors.gender} />
                 <Field
+                  name="address"
                   label="Home address"
                   placeholder="Street, Barangay, City"
                   value={f.address}
                   onChange={update("address")}
+                  onBlur={() => touchField("address")}
+                  maxLength={255}
+                  error={fieldErrors.address}
                 />
               </div>
             </section>
@@ -1011,27 +1126,32 @@ function Register({ onClose, onCreated }) {
                   </header>
                   <div className="row g-3">
                     <div className="col-12 col-md-6">
-                      <label className="form-label" htmlFor="register-school-name">School currently attending</label>
+                      <label className="form-label" htmlFor="register-school-name">School currently attending <span aria-hidden="true">*</span></label>
                       <input
                         id="register-school-name"
+                        name="schoolName"
                         className={`form-control${fieldErrors.schoolName ? " is-invalid" : ""}`}
                         value={f.schoolName}
                         onChange={update("schoolName")}
-                        maxLength={200}
+                        onBlur={() => touchField("schoolName")}
+                        maxLength={150}
+                        required
                         aria-invalid={fieldErrors.schoolName ? "true" : undefined}
                         aria-describedby={`register-school-name-hint${fieldErrors.schoolName ? " register-school-name-error" : ""}`}
                       />
-                      {fieldErrors.schoolName && <div className="invalid-feedback d-block" id="register-school-name-error">{fieldErrors.schoolName}</div>}
+                      {fieldErrors.schoolName && <div className="invalid-feedback d-block" id="register-school-name-error" role="alert">{fieldErrors.schoolName}</div>}
                       <small className="registration-field-hint" id="register-school-name-hint">
                       Enter the full name of the school where the child is currently enrolled.
                       </small>
                     </div>
                     <div className="col-12 col-md-6">
-                      <label className="form-label" htmlFor="register-education-level">Education level</label>
+                      <label className="form-label" htmlFor="register-education-level">Education level <span aria-hidden="true">*</span></label>
                       <select
                         id="register-education-level"
+                        name="educationLevel"
                         className={`form-select${fieldErrors.educationLevel ? " is-invalid" : ""}`}
                         value={f.educationLevel}
+                        onBlur={() => touchField("educationLevel")}
                         onChange={(event) => {
                           const level = event.target.value;
                           setFieldValue("educationLevel", level);
@@ -1048,52 +1168,63 @@ function Register({ onClose, onCreated }) {
                         }}
                         required
                         aria-invalid={fieldErrors.educationLevel ? "true" : undefined}
+                        aria-describedby={fieldErrors.educationLevel ? "register-education-level-error" : undefined}
                       >
                         <option value="">Select education level</option>
                         {EDUCATION_LEVELS.map((level) => <option key={level}>{level}</option>)}
                       </select>
-                      {fieldErrors.educationLevel && <div className="invalid-feedback d-block">{fieldErrors.educationLevel}</div>}
+                      {fieldErrors.educationLevel && <div className="invalid-feedback d-block" id="register-education-level-error" role="alert">{fieldErrors.educationLevel}</div>}
                     </div>
                     {f.educationLevel && (
                       <div className="col-12 col-md-6">
                         <label className="form-label" htmlFor="register-grade-level">
-                          {f.educationLevel === "College" ? "College year" : "Grade level"}
+                          {f.educationLevel === "College" ? "College year" : "Grade level"} <span aria-hidden="true">*</span>
                         </label>
                         <select
                           id="register-grade-level"
+                          name="gradeLevel"
                           className={`form-select${fieldErrors.gradeLevel ? " is-invalid" : ""}`}
                           value={f.gradeLevel}
                           onChange={update("gradeLevel")}
+                          onBlur={() => touchField("gradeLevel")}
                           required
                           aria-invalid={fieldErrors.gradeLevel ? "true" : undefined}
+                          aria-describedby={fieldErrors.gradeLevel ? "register-grade-level-error" : undefined}
                         >
                           <option value="">Select {f.educationLevel === "College" ? "college year" : "grade level"}</option>
                           {GRADE_LEVELS[f.educationLevel].map((grade) => <option key={grade}>{grade}</option>)}
                         </select>
-                        {fieldErrors.gradeLevel && <div className="invalid-feedback d-block">{fieldErrors.gradeLevel}</div>}
+                        {fieldErrors.gradeLevel && <div className="invalid-feedback d-block" id="register-grade-level-error" role="alert">{fieldErrors.gradeLevel}</div>}
                       </div>
                     )}
                     {f.educationLevel === "College" && (
                       <Field
                         label="College program or course"
+                        name="programCourse"
                         value={f.programCourse}
                         onChange={update("programCourse")}
+                        onBlur={() => touchField("programCourse")}
+                        maxLength={200}
                         required
                         error={fieldErrors.programCourse}
                       />
                     )}
                     <div className="col-12">
-                      <label className="form-label" htmlFor="register-school-address">School address</label>
+                      <label className="form-label" htmlFor="register-school-address">School address <span aria-hidden="true">*</span></label>
                       <textarea
                         id="register-school-address"
+                        name="schoolAddress"
                         className={`form-control${fieldErrors.schoolAddress ? " is-invalid" : ""}`}
                         rows="2"
-                        maxLength={500}
+                        maxLength={255}
                         value={f.schoolAddress}
                         onChange={update("schoolAddress")}
+                        onBlur={() => touchField("schoolAddress")}
+                        required
                         aria-invalid={fieldErrors.schoolAddress ? "true" : undefined}
+                        aria-describedby={fieldErrors.schoolAddress ? "register-school-address-error" : undefined}
                       />
-                      {fieldErrors.schoolAddress && <div className="invalid-feedback d-block">{fieldErrors.schoolAddress}</div>}
+                      {fieldErrors.schoolAddress && <div className="invalid-feedback d-block" id="register-school-address-error" role="alert">{fieldErrors.schoolAddress}</div>}
                     </div>
                     <div className="col-12">
                       <p className="registration-note mb-0">
@@ -1108,11 +1239,64 @@ function Register({ onClose, onCreated }) {
                     <div><h3>Health and emergency contact</h3><p>Provide the child’s guardian name and relevant health details.</p></div>
                   </header>
                   <div className="row g-3">
-                    <Field label="Weight" placeholder="e.g. 32 kg" value={f.weight} onChange={update("weight")} />
-                    <Field label="Height" placeholder="e.g. 132 cm" value={f.height} onChange={update("height")} />
-                    <Field label="Medical conditions" value={f.medicalConditions} onChange={update("medicalConditions")} />
-                    <Field label="Guardian Name" value={f.emergencyContactName} onChange={update("emergencyContactName")} required error={fieldErrors.emergencyContactName} />
-                    <Field label="Guardian contact number" type="tel" placeholder="e.g. +63 912 345 6789" value={f.emergencyContactPhone} onChange={update("emergencyContactPhone")} />
+                    <Field
+                      name="weight"
+                      label="Weight"
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="e.g. 32.5"
+                      value={f.weight}
+                      onChange={update("weight")}
+                      onKeyDown={(event) => restrictNumericKeyDown(event, true)}
+                      onBlur={() => touchField("weight")}
+                      error={fieldErrors.weight}
+                    />
+                    <Field
+                      name="height"
+                      label="Height"
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="e.g. 132.5"
+                      value={f.height}
+                      onChange={update("height")}
+                      onKeyDown={(event) => restrictNumericKeyDown(event, true)}
+                      onBlur={() => touchField("height")}
+                      error={fieldErrors.height}
+                    />
+                    <Field
+                      name="medicalConditions"
+                      label="Medical conditions"
+                      value={f.medicalConditions}
+                      onChange={update("medicalConditions")}
+                      onBlur={() => touchField("medicalConditions")}
+                      maxLength={500}
+                      error={fieldErrors.medicalConditions}
+                    />
+                    <Field
+                      name="emergencyContactName"
+                      label="Guardian Name"
+                      value={f.emergencyContactName}
+                      onChange={update("emergencyContactName")}
+                      onBlur={() => touchField("emergencyContactName")}
+                      maxLength={100}
+                      required
+                      error={fieldErrors.emergencyContactName}
+                    />
+                    <Field
+                      name="emergencyContactPhone"
+                      label="Guardian contact number"
+                      type="tel"
+                      inputMode="numeric"
+                      autoComplete="tel-national"
+                      placeholder="e.g. 09123456789"
+                      value={f.emergencyContactPhone}
+                      onChange={update("emergencyContactPhone")}
+                      onKeyDown={(event) => restrictNumericKeyDown(event)}
+                      onBlur={() => touchField("emergencyContactPhone")}
+                      pattern="09[0-9]{9}"
+                      required
+                      error={fieldErrors.emergencyContactPhone}
+                    />
                   </div>
                 </section>
               </>
@@ -1156,7 +1340,435 @@ function Register({ onClose, onCreated }) {
     </div>
   ), document.body);
 }
-function Participants({ canManage, user }) {
+function formatParticipantHistoryDate(value, options = { year: "numeric", month: "long", day: "numeric" }) {
+  if (!value) return "Not recorded";
+  const dateOnly = String(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const date = dateOnly
+    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+    : new Date(value);
+  return Number.isNaN(date.getTime()) ? "Not recorded" : date.toLocaleDateString(undefined, options);
+}
+function participantHistoryStatusLabel(value) {
+  if (!value) return "Unknown";
+  if (["active", "withdrawn", "deceased", "completed", "graduated", "new", "on_hold"].includes(value)) {
+    return sponsorLifecycleLabel(value);
+  }
+  return String(value).replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+function ParticipantHistoryPage({ participantId, onBack }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [tab, setTab] = useState("overview");
+  const [attendanceView, setAttendanceView] = useState("monthly");
+  const [selectedYear, setSelectedYear] = useState(String(new Date().getFullYear()));
+  const [attendanceFilters, setAttendanceFilters] = useState({
+    year: "",
+    month: "",
+    event: "",
+    status: "",
+  });
+  const [attendancePage, setAttendancePage] = useState(1);
+  const [historyPage, setHistoryPage] = useState(1);
+  const chartRef = useRef(null);
+  const chartCanvasRef = useRef(null);
+  const attendanceQuery = new URLSearchParams({
+    page: String(attendancePage),
+    pageSize: "10",
+    historyPage: String(historyPage),
+    historyPageSize: "10",
+    trendYear: selectedYear,
+    year: attendanceFilters.year,
+    month: attendanceFilters.month,
+    event: attendanceFilters.event,
+    status: attendanceFilters.status,
+  });
+  const attendanceQueryString = attendanceQuery.toString();
+  useEffect(() => {
+    let active = true;
+    apiCall(`/participants/${participantId}/history?${attendanceQueryString}`)
+      .then((response) => {
+        if (active) {
+          setData(response);
+          setError("");
+        }
+      })
+      .catch((requestError) => {
+        if (active) setError(requestError.message || "Unable to load participant history.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [participantId, attendanceQueryString]);
+  useEffect(() => {
+    if (loading || tab !== "attendance" || !chartCanvasRef.current || !data) return undefined;
+    const points = attendanceView === "monthly"
+      ? data.attendanceByMonth || []
+      : data.attendanceByYear || [];
+    chartRef.current?.destroy();
+    chartRef.current = new Chart(chartCanvasRef.current, {
+      type: "bar",
+      data: {
+        labels: points.map((point) => attendanceView === "monthly"
+          ? new Date(2000, point.month - 1, 1).toLocaleDateString(undefined, { month: "short" })
+          : String(point.year)),
+        datasets: [{
+          label: "Attendance rate",
+          data: points.map((point) => point.attendanceRate || 0),
+          backgroundColor: "#1782c4",
+          borderRadius: 6,
+          maxBarThickness: 38,
+        }],
+      },
+      options: {
+        maintainAspectRatio: false,
+        scales: {
+          y: { beginAtZero: true, max: 100, ticks: { callback: (value) => `${value}%` } },
+        },
+        plugins: { legend: { display: false } },
+      },
+    });
+    return () => {
+      chartRef.current?.destroy();
+      chartRef.current = null;
+    };
+  }, [data, loading, tab, attendanceView, selectedYear]);
+  const updateAttendanceFilter = (key) => (event) => {
+    setLoading(true);
+    setAttendanceFilters((current) => ({ ...current, [key]: event.target.value }));
+    setAttendancePage(1);
+  };
+  const changeAttendancePage = (nextPage) => {
+    setLoading(true);
+    setAttendancePage(nextPage);
+  };
+  const changeHistoryPage = (nextPage) => {
+    setLoading(true);
+    setHistoryPage(nextPage);
+  };
+  const participant = data?.participant;
+  const summary = data?.summary || {};
+  const attendance = data?.attendance || { records: [], page: 1, pageSize: 10, total: 0 };
+  const history = data?.history || { records: [], page: 1, pageSize: 10, total: 0 };
+  const attendancePages = Math.max(1, Math.ceil(attendance.total / attendance.pageSize));
+  const historyPages = Math.max(1, Math.ceil(history.total / history.pageSize));
+  const years = [...new Set([
+    new Date().getFullYear(),
+    ...(data?.attendanceByYear || []).map((entry) => entry.year),
+  ])].sort((first, second) => second - first);
+  const monthlyAttendance = data?.attendanceByMonth || [];
+  const selectedYearData = (data?.attendanceByYear || []).find(
+    (entry) => String(entry.year) === selectedYear,
+  );
+  if (loading && !data) {
+    return <div className="participant-history-loading" role="status">Loading participant history…</div>;
+  }
+  if (error && !data) {
+    return (
+      <section className="participant-history-page">
+        <button type="button" className="btn btn-outline-primary mb-4" onClick={onBack}>← Back to Participants</button>
+        <div className="alert alert-danger" role="alert">{error}</div>
+      </section>
+    );
+  }
+  if (!participant) {
+    return (
+      <section className="participant-history-page">
+        <button type="button" className="btn btn-outline-primary mb-4" onClick={onBack}>← Back to Participants</button>
+        <div className="alert alert-warning" role="status">Participant not found.</div>
+      </section>
+    );
+  }
+  const currentSponsor = participant.currentSponsor;
+  const currentSponsorDuration = currentSponsor?.startedAt
+    ? formatParticipantHistoryDate(currentSponsor.startedAt)
+    : "Not recorded";
+  return (
+    <section className="participant-history-page">
+      <button type="button" className="participant-history-back" onClick={onBack}>← Back to Participants</button>
+      <header className="participant-history-hero">
+        <div>
+          <span className="eyebrow">PARTICIPANTS / HISTORY</span>
+          <h1>{participant.name || "Unnamed participant"}</h1>
+          <div className="participant-history-identity">
+            <span>{participant.participantCode || `Participant #${participant.id}`}</span>
+            <span className="participant-history-status">{participantHistoryStatusLabel(participant.status)}</span>
+            <span>{Number.isFinite(participant.age) ? `${participant.age} years old` : "Age not recorded"}</span>
+          </div>
+          <p>Current Sponsor: {currentSponsor?.name || "No current sponsor"}</p>
+        </div>
+      </header>
+      {error && <div className="alert alert-danger" role="alert">{error}</div>}
+      {loading && <div className="participant-history-refresh" role="status">Refreshing history…</div>}
+      <div className="participant-history-summary">
+        {[
+          ["Registration Date", formatParticipantHistoryDate(summary.registrationDate)],
+          ["Total Events Attended", formatCount(summary.totalAttended)],
+          ["Attendance Rate", `${summary.attendanceRate || 0}%`],
+          ["Current Sponsor", currentSponsor?.name || "None"],
+          ["Sponsored Since", currentSponsorDuration],
+        ].map(([label, value]) => (
+          <article className="participant-history-summary-card" key={label}>
+            <small>{label}</small>
+            <strong>{value}</strong>
+          </article>
+        ))}
+      </div>
+      <nav className="participant-history-tabs" aria-label="Participant history sections">
+        {[
+          ["overview", "Overview"],
+          ["attendance", "Attendance"],
+          ["sponsorship", "Sponsorship"],
+          ["history", "History"],
+        ].map(([value, label]) => (
+          <button
+            type="button"
+            className={tab === value ? "active" : ""}
+            aria-current={tab === value ? "page" : undefined}
+            key={value}
+            onClick={() => setTab(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+      {tab === "overview" && (
+        <div className="participant-history-content">
+          <div className="participant-history-overview-grid">
+            <article className="surface participant-history-section">
+              <h2>Registration information</h2>
+              <dl className="participant-history-details">
+                <div><dt>Registration date</dt><dd>{formatParticipantHistoryDate(participant.registrationDate)}</dd></div>
+                <div><dt>Participant ID</dt><dd>{participant.participantCode || `Participant #${participant.id}`}</dd></div>
+                <div><dt>Initial status</dt><dd>{participantHistoryStatusLabel(participant.initialStatus)}</dd></div>
+                <div><dt>Current status</dt><dd>{participantHistoryStatusLabel(participant.status)}</dd></div>
+                <div><dt>Education</dt><dd>{participant.educationLevel || "Not recorded"}</dd></div>
+                <div><dt>Grade / year</dt><dd>{participant.gradeLevel || "Not recorded"}</dd></div>
+                {participant.programCourse && <div><dt>Course</dt><dd>{participant.programCourse}</dd></div>}
+                {participant.schoolName && <div><dt>School</dt><dd>{participant.schoolName}</dd></div>}
+              </dl>
+            </article>
+            <article className="surface participant-history-section">
+              <h2>Attendance summary</h2>
+              <div className="participant-history-attendance-numbers">
+                <div><strong>{formatCount(summary.totalAttended)}</strong><span>Attended</span></div>
+                <div><strong>{formatCount(summary.totalAbsences)}</strong><span>Absent</span></div>
+                <div><strong>{formatCount(summary.totalEvents)}</strong><span>Total events</span></div>
+                <div><strong>{summary.attendanceRate || 0}%</strong><span>Attendance rate</span></div>
+              </div>
+              {currentSponsor ? (
+                <div className="participant-history-current-sponsor">
+                  <small>Current sponsor</small>
+                  <strong>{currentSponsor.name}</strong>
+                  <span>Sponsored since {currentSponsorDuration}</span>
+                </div>
+              ) : (
+                <p className="text-secondary mb-0">No current sponsor is assigned.</p>
+              )}
+            </article>
+          </div>
+          <article className="surface participant-history-section">
+            <div className="participant-history-section-heading">
+              <h2>Recent attendance</h2>
+              <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => setTab("attendance")}>View attendance</button>
+            </div>
+            {attendance.records.length ? (
+              <div className="table-responsive">
+                <table className="table align-middle participant-history-table">
+                  <thead><tr><th>Event</th><th>Event date</th><th>Check-in time</th><th>Status</th></tr></thead>
+                  <tbody>{attendance.records.slice(0, 5).map((record, index) => (
+                    <tr key={`${record.event}-${record.eventDate}-${index}`}>
+                      <td>{record.event}</td>
+                      <td>{formatParticipantHistoryDate(record.eventDate)}</td>
+                      <td>{record.checkedInAt ? formatParticipantHistoryDate(record.checkedInAt, { hour: "numeric", minute: "2-digit" }) : "—"}</td>
+                      <td><span className={`participant-history-record-status ${record.status}`}>{participantHistoryStatusLabel(record.status)}</span></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ) : <p className="text-secondary mb-0">No attendance records found.</p>}
+          </article>
+          <article className="surface participant-history-section">
+            <div className="participant-history-section-heading">
+              <h2>Recent history</h2>
+              <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => setTab("history")}>View full history</button>
+            </div>
+            {history.records.length ? (
+              <ul className="participant-history-timeline participant-history-timeline-compact">
+                {history.records.slice(0, 5).map((record, index) => (
+                  <li key={`${record.eventAt}-${record.title}-${index}`}>
+                    <time>{formatParticipantHistoryDate(record.eventAt)}</time>
+                    <strong>{record.title}</strong>
+                    {record.description && <span>{record.description}</span>}
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="text-secondary mb-0">No history available.</p>}
+          </article>
+        </div>
+      )}
+      {tab === "attendance" && (
+        <div className="participant-history-content">
+          <div className="participant-history-attendance-heading">
+            <div><h2>Attendance history</h2><p>Attendance is calculated from recorded events and this participant’s check-ins.</p></div>
+            <div className="participant-history-view-toggle" role="group" aria-label="Attendance trend view">
+              <button type="button" className={attendanceView === "monthly" ? "active" : ""} onClick={() => setAttendanceView("monthly")}>Monthly</button>
+              <button type="button" className={attendanceView === "yearly" ? "active" : ""} onClick={() => setAttendanceView("yearly")}>Yearly</button>
+            </div>
+            {attendanceView === "monthly" && (
+              <label className="participant-history-year-select">
+                <span>Trend year</span>
+                <select className="form-select" value={selectedYear} onChange={(event) => { setLoading(true); setSelectedYear(event.target.value); }}>
+                  {years.map((year) => <option value={year} key={year}>{year}</option>)}
+                </select>
+              </label>
+            )}
+          </div>
+          <div className="participant-history-attendance-numbers">
+            <div><strong>{formatCount(summary.totalAttended)}</strong><span>Total events attended</span></div>
+            <div><strong>{formatCount(summary.totalAbsences)}</strong><span>Total absences</span></div>
+            <div><strong>{formatCount(summary.totalEvents)}</strong><span>Total events</span></div>
+            <div><strong>{attendanceView === "yearly" && selectedYearData ? selectedYearData.attendanceRate : summary.attendanceRate || 0}%</strong><span>Attendance percentage</span></div>
+          </div>
+          <article className="surface participant-history-chart">
+            <div className="participant-history-chart-canvas"><canvas ref={chartCanvasRef} aria-label={`${attendanceView} attendance trend`} /></div>
+          </article>
+          <article className="surface participant-history-section">
+            <h2>{attendanceView === "monthly" ? `Monthly attendance — ${selectedYear}` : "Yearly attendance"}</h2>
+            <div className="table-responsive">
+              <table className="table align-middle participant-history-table">
+                <thead><tr><th>{attendanceView === "monthly" ? "Month" : "Year"}</th><th>Attended</th><th>Total events</th><th>Attendance</th></tr></thead>
+                <tbody>
+                  {(attendanceView === "monthly" ? monthlyAttendance : data?.attendanceByYear || []).map((entry) => {
+                    const label = attendanceView === "monthly"
+                      ? new Date(2000, entry.month - 1, 1).toLocaleDateString(undefined, { month: "long" })
+                      : entry.year;
+                    const rate = entry.attendanceRate ?? (entry.totalEvents
+                      ? Math.round((entry.totalAttended / entry.totalEvents) * 1000) / 10
+                      : 0);
+                    return <tr key={label}><td>{label}</td><td>{entry.totalAttended}</td><td>{entry.totalEvents}</td><td>{rate}%</td></tr>;
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </article>
+          <article className="surface participant-history-section">
+            <h2>Attendance records</h2>
+            <div className="participant-history-filters">
+              <label><span>Year</span><select className="form-select" value={attendanceFilters.year} onChange={updateAttendanceFilter("year")}><option value="">All years</option>{years.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
+              <label><span>Month</span><select className="form-select" value={attendanceFilters.month} onChange={updateAttendanceFilter("month")}><option value="">All months</option>{Array.from({ length: 12 }, (_, index) => index + 1).map((month) => <option key={month} value={month}>{new Date(2000, month - 1, 1).toLocaleDateString(undefined, { month: "long" })}</option>)}</select></label>
+              <label><span>Event</span><select className="form-select" value={attendanceFilters.event} onChange={updateAttendanceFilter("event")}><option value="">All events</option>{(data?.eventOptions || []).map((event) => <option key={event} value={event}>{event}</option>)}</select></label>
+              <label><span>Status</span><select className="form-select" value={attendanceFilters.status} onChange={updateAttendanceFilter("status")}><option value="">All statuses</option><option value="attended">Attended</option><option value="missed">Missed</option></select></label>
+            </div>
+            {attendance.records.length ? (
+              <>
+                <div className="table-responsive">
+                  <table className="table align-middle participant-history-table">
+                    <thead><tr><th>Event</th><th>Event date</th><th>Check-in time</th><th>Status</th></tr></thead>
+                    <tbody>{attendance.records.map((record, index) => (
+                      <tr key={`${record.event}-${record.eventDate}-${index}`}>
+                        <td>{record.event}</td>
+                        <td>{formatParticipantHistoryDate(record.eventDate)}</td>
+                        <td>{record.checkedInAt ? formatParticipantHistoryDate(record.checkedInAt, { hour: "numeric", minute: "2-digit" }) : "—"}</td>
+                        <td><span className={`participant-history-record-status ${record.status}`}>{participantHistoryStatusLabel(record.status)}</span></td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+                <div className="participant-history-pagination">
+                  <span>{attendance.total} attendance records</span>
+                  <button type="button" className="btn btn-sm btn-outline-primary" disabled={attendancePage <= 1} onClick={() => changeAttendancePage(attendancePage - 1)}>Previous</button>
+                  <span>Page {attendancePage} of {attendancePages}</span>
+                  <button type="button" className="btn btn-sm btn-outline-primary" disabled={attendancePage >= attendancePages} onClick={() => changeAttendancePage(attendancePage + 1)}>Next</button>
+                </div>
+              </>
+            ) : <p className="text-secondary mb-0">No attendance records found.</p>}
+          </article>
+        </div>
+      )}
+      {tab === "sponsorship" && (
+        <div className="participant-history-content">
+          <article className="surface participant-history-section">
+            <h2>Current sponsor</h2>
+            {currentSponsor ? (
+              <dl className="participant-history-details">
+                <div><dt>Sponsor</dt><dd>{currentSponsor.name}</dd></div>
+                <div><dt>Start date</dt><dd>{currentSponsorDuration}</dd></div>
+                <div><dt>Current status</dt><dd>{participantHistoryStatusLabel(participant.status)}</dd></div>
+              </dl>
+            ) : <p className="text-secondary mb-0">No current sponsor is assigned.</p>}
+          </article>
+          <article className="surface participant-history-section">
+            <h2>Previous sponsors</h2>
+            {data?.sponsorship?.some((record) => record.status === "ended") ? (
+              <div className="table-responsive">
+                <table className="table align-middle participant-history-table">
+                  <thead><tr><th>Sponsor</th><th>Start date</th><th>End date</th><th>Status</th></tr></thead>
+                  <tbody>{data.sponsorship.filter((record) => record.status === "ended").map((record, index) => (
+                    <tr key={`${record.sponsorId}-${record.startedAt}-${index}`}>
+                      <td>{record.sponsor}</td>
+                      <td>{formatParticipantHistoryDate(record.startedAt)}</td>
+                      <td>{formatParticipantHistoryDate(record.endedAt)}</td>
+                      <td><span className="participant-history-record-status ended">Ended</span></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ) : <p className="text-secondary mb-0">{data?.sponsorship?.length ? "No previous sponsorship records." : "No sponsorship records found."}</p>}
+          </article>
+          <article className="surface participant-history-section">
+            <h2>All sponsorship assignments</h2>
+            {data?.sponsorship?.length ? (
+              <div className="table-responsive">
+                <table className="table align-middle participant-history-table">
+                  <thead><tr><th>Sponsor</th><th>Start date</th><th>End date</th><th>Status</th></tr></thead>
+                  <tbody>{data.sponsorship.map((record, index) => (
+                    <tr key={`${record.sponsorId}-${record.startedAt}-${index}`}>
+                      <td>{record.sponsor}</td>
+                      <td>{formatParticipantHistoryDate(record.startedAt)}</td>
+                      <td>{record.endedAt ? formatParticipantHistoryDate(record.endedAt) : "Present"}</td>
+                      <td><span className={`participant-history-record-status ${record.status}`}>{record.status === "active" ? "Active" : "Ended"}</span></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ) : <p className="text-secondary mb-0">No sponsorship records found.</p>}
+          </article>
+        </div>
+      )}
+      {tab === "history" && (
+        <div className="participant-history-content">
+          <article className="surface participant-history-section">
+            <h2>Participant history</h2>
+            {history.records.length ? (
+              <>
+                <ul className="participant-history-timeline">
+                  {history.records.map((record, index) => (
+                    <li key={`${record.eventAt}-${record.title}-${index}`}>
+                      <time>{formatParticipantHistoryDate(record.eventAt)}</time>
+                      <strong>{record.title}</strong>
+                      {record.description && <span>{record.description}</span>}
+                    </li>
+                  ))}
+                </ul>
+                <div className="participant-history-pagination">
+                  <span>{history.total} history events</span>
+                  <button type="button" className="btn btn-sm btn-outline-primary" disabled={historyPage <= 1} onClick={() => changeHistoryPage(historyPage - 1)}>Previous</button>
+                  <span>Page {historyPage} of {historyPages}</span>
+                  <button type="button" className="btn btn-sm btn-outline-primary" disabled={historyPage >= historyPages} onClick={() => changeHistoryPage(historyPage + 1)}>Next</button>
+                </div>
+              </>
+            ) : <p className="text-secondary mb-0">No history available.</p>}
+          </article>
+        </div>
+      )}
+    </section>
+  );
+}
+function Participants({ canManage, user, onViewHistory }) {
   const canViewSponsorship = canAccessPermission("sponsorship:view", user);
   const canManageSponsorship = canAccessPermission("sponsorship:manage", user);
   const [list, setList] = useState([]);
@@ -1496,6 +2108,13 @@ function Participants({ canManage, user }) {
                   <p className="text-secondary mt-2 mb-0">{form.participant_code} · <AgeValue dateOfBirth={form.dateOfBirth} /></p>
                 </div>
                 <div className="profile-card-tools">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => onViewHistory(selected)}
+                  >
+                    View History
+                  </button>
                   {canManage && (
                     <>
                       <button type="button" className="profile-tool-btn" title="Edit details" aria-label="Edit participant details" onClick={() => { setMessage(""); setEditing(true); }}>
@@ -5738,7 +6357,14 @@ function storedUser() {
 function App() {
   const [user, setUser] = useState(storedUser);
   const [authTransition, setAuthTransition] = useState("");
-  const [page, setPage] = useState("dashboard");
+  const [page, setPage] = useState(() => {
+    const route = window.location.pathname.match(/^\/participants(?:\/(\d+))?\/?$/);
+    return route ? (route[1] ? "participantHistory" : "participants") : "dashboard";
+  });
+  const [participantHistoryId, setParticipantHistoryId] = useState(() => {
+    const route = window.location.pathname.match(/^\/participants\/(\d+)\/?$/);
+    return route?.[1] || "";
+  });
   const [pageChanging, setPageChanging] = useState(false);
   const [pageTransitionId, setPageTransitionId] = useState(0);
   const pageTransitionTimer = useRef(null);
@@ -5747,6 +6373,23 @@ function App() {
     const expire = () => setUser(null);
     window.addEventListener("auth-expired", expire);
     return () => window.removeEventListener("auth-expired", expire);
+  }, []);
+  useEffect(() => {
+    const syncParticipantRoute = () => {
+      const route = window.location.pathname.match(/^\/participants(?:\/(\d+))?\/?$/);
+      if (route?.[1]) {
+        setParticipantHistoryId(route[1]);
+        setPage("participantHistory");
+      } else if (route) {
+        setParticipantHistoryId("");
+        setPage("participants");
+      } else {
+        setParticipantHistoryId("");
+        setPage((current) => current === "participantHistory" ? "participants" : current);
+      }
+    };
+    window.addEventListener("popstate", syncParticipantRoute);
+    return () => window.removeEventListener("popstate", syncParticipantRoute);
   }, []);
   useEffect(() => () => {
     clearTimeout(pageTransitionTimer.current);
@@ -5760,11 +6403,27 @@ function App() {
   };
   const navigateToPage = (nextPage) => {
     if (nextPage === page) return;
+    if (page === "participantHistory") {
+      window.history.replaceState({}, "", nextPage === "participants" ? "/participants" : "/");
+      setParticipantHistoryId("");
+    }
     clearTimeout(pageTransitionTimer.current);
     setPage(nextPage);
     setPageChanging(true);
     setPageTransitionId((current) => current + 1);
     pageTransitionTimer.current = setTimeout(() => setPageChanging(false), 450);
+  };
+  const openParticipantHistory = (participantId) => {
+    const id = String(participantId || "").trim();
+    if (!/^\d+$/.test(id)) return;
+    window.history.pushState({ participantId: id }, "", `/participants/${id}`);
+    setParticipantHistoryId(id);
+    navigateToPage("participantHistory");
+  };
+  const backToParticipants = () => {
+    window.history.replaceState({}, "", "/participants");
+    setParticipantHistoryId("");
+    navigateToPage("participants");
   };
   if (!user) {
     return (
@@ -5776,7 +6435,8 @@ function App() {
   }
   let pages = {
     dashboard: <Dashboard go={navigateToPage} />,
-    participants: <Participants canManage={canAccessPermission("participants:manage", user)} user={user} />,
+    participants: <Participants canManage={canAccessPermission("participants:manage", user)} user={user} onViewHistory={openParticipantHistory} />,
+    participantHistory: <ParticipantHistoryPage key={participantHistoryId} participantId={participantHistoryId} onBack={backToParticipants} />,
     events: <Events canManage={canAccessPermission("events:manage", user)} />,
     scanner: <Scanner user={user} />,
     portal: <Scanner portal />,
@@ -5797,7 +6457,7 @@ function App() {
     <div className="app-shell">
       <Header
         user={user}
-        page={visiblePage}
+        page={visiblePage === "participantHistory" ? "participants" : visiblePage}
         go={navigateToPage}
         logout={() => {
           clearTimeout(authTransitionTimer.current);

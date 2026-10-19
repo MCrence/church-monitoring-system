@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/participants/:participantId",
+      "destination": "/"
+    },
+    {
       "source": "/api/:path*",
       "destination": "https://church-monitoring-system.onrender.com/api/:path*"
     },

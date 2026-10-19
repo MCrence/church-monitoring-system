@@ -53,51 +53,116 @@ function findPotentialParticipantDuplicates(candidate, existingParticipants) {
   });
 }
 
-function participantRegistrationErrors(body, educationLevels, gradeLevelsByEducation) {
+function participantRegistrationErrors(body, educationLevels, gradeLevelsByEducation, today = new Date()) {
   const errors = {};
+  const input = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  const text = (field) => typeof input[field] === 'string' ? input[field] : '';
+  const trimmed = (field) => text(field).trim();
+  const namePattern = /^\p{L}+(?:[ ]+\p{L}+)*$/u;
+  const guardianNamePattern = /^\p{L}+(?:[ '\u2019-]+\p{L}+)*$/u;
   for (const field of ['firstName', 'lastName']) {
-    if (!String(body[field] || '').trim()) errors[field] = 'This field is required.';
-    else if (String(body[field]).trim().length > 100) errors[field] = 'Use 100 characters or fewer.';
+    const value = trimmed(field);
+    const label = field === 'firstName' ? 'First name' : 'Last name';
+    if (!value) errors[field] = `${label} is required.`;
+    else if (value.length > 50) errors[field] = `${label} must be 50 characters or fewer.`;
+    else if (value.length < 2 || !namePattern.test(value)) {
+      errors[field] = `${label} must contain letters only.`;
+    }
   }
-  if (String(body.middleName || '').trim().length > 100) {
-    errors.middleName = 'Use 100 characters or fewer.';
+  const middleName = trimmed('middleName');
+  if (middleName.length > 50) {
+    errors.middleName = 'Middle name must be 50 characters or fewer.';
+  } else if (middleName && !namePattern.test(middleName)) {
+    errors.middleName = 'Middle name must contain letters only.';
   }
-  if (!['Male', 'Female'].includes(String(body.gender || '').trim())) {
-    errors.gender = 'Select Male or Female.';
+  if (!['Male', 'Female'].includes(trimmed('gender'))) {
+    errors.gender = 'Please select a sex.';
   }
-  if (!String(body.emergencyContactName || '').trim()) {
-    errors.emergencyContactName = 'Guardian/emergency contact name is required.';
-  } else if (String(body.emergencyContactName).trim().length > 100) {
-    errors.emergencyContactName = 'Use 100 characters or fewer.';
-  }
-  if (
-    String(body.emergencyContactPhone || '').trim() &&
-    !normalizePhilippineMobile(body.emergencyContactPhone)
+  const guardianName = trimmed('emergencyContactName');
+  if (!guardianName) {
+    errors.emergencyContactName = 'Guardian name is required.';
+  } else if (
+    guardianName.length > 100 ||
+    !guardianNamePattern.test(guardianName)
   ) {
-    errors.emergencyContactPhone = 'Enter a valid Philippine mobile number.';
+    errors.emergencyContactName = 'Guardian name must contain a valid name.';
+  }
+  const guardianPhone = text('emergencyContactPhone');
+  if (!guardianPhone) {
+    errors.emergencyContactPhone = 'Guardian contact number is required.';
+  } else if (!/^09[0-9]{9}$/.test(guardianPhone)) {
+    errors.emergencyContactPhone = 'Guardian contact number must be 11 digits and start with 09.';
   }
 
-  const age = calculateAge(body.dateOfBirth);
-  if (age === null) {
+  const dateOfBirth = text('dateOfBirth');
+  const parsedBirthDate = /^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)
+    ? new Date(`${dateOfBirth}T00:00:00.000Z`)
+    : null;
+  const validBirthDate = parsedBirthDate &&
+    !Number.isNaN(parsedBirthDate.getTime()) &&
+    parsedBirthDate.toISOString().slice(0, 10) === dateOfBirth;
+  const age = validBirthDate ? calculateAge(dateOfBirth, today) : null;
+  if (!dateOfBirth) {
+    errors.dateOfBirth = 'Date of birth is required.';
+  } else if (!validBirthDate) {
     errors.dateOfBirth = 'Enter a valid date of birth.';
-  } else if (age < 6 || age > 22) {
-    errors.dateOfBirth = 'Sponsored children must be between 6 and 22 years old.';
+  } else if (dateOfBirth > today.toISOString().slice(0, 10)) {
+    errors.dateOfBirth = 'Date of birth cannot be in the future.';
+  } else if (age < 6) {
+    errors.dateOfBirth = 'Child must be at least 6 years old.';
+  } else if (age > 22) {
+    errors.dateOfBirth = 'Child must not be older than 22 years.';
   }
-  if (!educationLevels.has(body.educationLevel)) {
-    errors.educationLevel = 'Select an education level.';
-  } else if (!gradeLevelsByEducation[body.educationLevel]?.has(body.gradeLevel)) {
-    errors.gradeLevel = 'Select a valid grade or year level.';
+  const educationLevel = trimmed('educationLevel');
+  if (!educationLevels.has(educationLevel)) {
+    errors.educationLevel = 'Please select an education level.';
+  } else {
+    if (!gradeLevelsByEducation[educationLevel]?.has(trimmed('gradeLevel'))) {
+      errors.gradeLevel = 'Please select a grade/year.';
+    }
+    if (!trimmed('schoolName')) {
+      errors.schoolName = 'School currently attending is required.';
+    } else if (
+      trimmed('schoolName').length > 150 ||
+      !/\p{L}/u.test(trimmed('schoolName')) ||
+      !/^[\p{L}\p{N}\s.'’&,()/-]+$/u.test(trimmed('schoolName'))
+    ) {
+      errors.schoolName = 'Enter a valid school name (150 characters or fewer).';
+    }
+    if (!trimmed('schoolAddress')) {
+      errors.schoolAddress = 'School address is required.';
+    } else if (trimmed('schoolAddress').length > 255) {
+      errors.schoolAddress = 'School address must be 255 characters or fewer.';
+    }
   }
-  if (body.educationLevel === 'College' && !String(body.programCourse || '').trim()) {
-    errors.programCourse = 'Enter the college program or course.';
-  } else if (String(body.programCourse || '').trim().length > 200) {
-    errors.programCourse = 'Use 200 characters or fewer.';
+  const programCourse = trimmed('programCourse');
+  if (educationLevel === 'College' && !programCourse) {
+    errors.programCourse = 'College students must provide their course.';
+  } else if (programCourse.length > 200 || (programCourse && !programCourse.trim())) {
+    errors.programCourse = 'College course must be 200 characters or fewer.';
   }
-  if (String(body.schoolName || '').trim().length > 200) {
-    errors.schoolName = 'Use 200 characters or fewer.';
+  const address = trimmed('address');
+  if (text('address') && !address) {
+    errors.address = 'Home address cannot contain only spaces.';
+  } else if (address && address.length < 5) {
+    errors.address = 'Home address must be at least 5 characters.';
+  } else if (address.length > 255) {
+    errors.address = 'Home address must be 255 characters or fewer.';
   }
-  if (String(body.schoolAddress || '').trim().length > 500) {
-    errors.schoolAddress = 'Use 500 characters or fewer.';
+  for (const [field, label, maximum] of [
+    ['weight', 'Weight', 500],
+    ['height', 'Height', 300],
+  ]) {
+    const value = text(field);
+    if (value && (!/^\d+(?:\.\d+)?$/.test(value) || Number(value) <= 0 || Number(value) > maximum)) {
+      errors[field] = `${label} must be a number greater than 0 and no more than ${maximum}.`;
+    }
+  }
+  const medicalConditions = text('medicalConditions');
+  if (medicalConditions.length > 500) {
+    errors.medicalConditions = 'Medical conditions must be 500 characters or fewer.';
+  } else if (medicalConditions && !medicalConditions.trim()) {
+    errors.medicalConditions = 'Enter medical conditions or leave this field blank.';
   }
   return errors;
 }
