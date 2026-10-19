@@ -3919,13 +3919,17 @@ function participantOccurrenceSubquery() {
                occurrence.event_location
              ) AS location
       FROM (
-               SELECT e.name AS event_name, e.starts_at AS event_date, e.location AS event_location
+               SELECT CONVERT(e.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_name,
+                      e.starts_at AS event_date,
+                      CONVERT(e.location USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_location
                FROM events e
                JOIN participants p ON p.id = ?
                WHERE e.status <> 'cancelled'
                  AND e.starts_at >= p.created_at AND e.starts_at < NOW()
                UNION ALL
-               SELECT attended.event_name, attended.event_date, attended.event_location
+               SELECT CONVERT(attended.event_name USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+                      attended.event_date,
+                      CONVERT(attended.event_location USING utf8mb4) COLLATE utf8mb4_unicode_ci
                FROM (
                  SELECT c.event_name, DATE(c.checked_in_at) AS event_date, MIN(c.location) AS event_location
                  FROM check_in_logs c
@@ -4060,58 +4064,71 @@ async function loadParticipantDetailHistory(participantId, options) {
   const careTimelineRows = options.includeCareHistory
     ? `
       UNION ALL
-      SELECT updates.recorded_on, 'care',
-             CONCAT('Participant update recorded: ', updates.update_type), NULL
+      SELECT updates.recorded_on,
+             CONVERT('care' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(CONCAT('Participant update recorded: ', updates.update_type) USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CAST(NULL AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM sponsored_child_updates updates
       WHERE updates.participant_id = ?
       UNION ALL
-      SELECT care.recorded_on, 'care',
-             CONCAT('Care record: ', care.care_type), care.description
+      SELECT care.recorded_on,
+             CONVERT('care' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(CONCAT('Care record: ', care.care_type) USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(care.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM sponsored_child_care_records care
       WHERE care.participant_id = ?
       UNION ALL
-      SELECT disbursement.disbursed_on, 'sponsorship',
-             'Sponsorship allowance disbursed', NULL
+      SELECT disbursement.disbursed_on,
+             CONVERT('sponsorship' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT('Sponsorship allowance disbursed' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CAST(NULL AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM sponsorship_disbursements disbursement
       WHERE disbursement.participant_id = ?
     `
     : '';
   const timelineSubquery = `(
-      SELECT p.created_at AS event_at, 'registration' AS event_type,
-             'Participant registered' AS title, NULL AS description
+      SELECT p.created_at AS event_at,
+             CONVERT('registration' USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_type,
+             CONVERT('Participant registered' USING utf8mb4) COLLATE utf8mb4_unicode_ci AS title,
+             CAST(NULL AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci AS description
       FROM participants p WHERE p.id = ?
       UNION ALL
-      SELECT history.started_at, 'sponsorship',
-             CASE WHEN EXISTS (
+      SELECT history.started_at,
+             CONVERT('sponsorship' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(CASE WHEN EXISTS (
                SELECT 1 FROM sponsorship_assignment_history previous
                WHERE previous.participant_id = history.participant_id
                  AND (previous.started_at < history.started_at
                    OR (previous.started_at = history.started_at AND previous.id < history.id))
-             ) THEN 'Sponsor changed' ELSE 'Sponsorship assigned' END,
-             history.sponsor_name_encrypted
+             ) THEN 'Sponsor changed' ELSE 'Sponsorship assigned' END USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(history.sponsor_name_encrypted USING utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM sponsorship_assignment_history history
       WHERE history.participant_id = ?
       UNION ALL
-      SELECT history.ended_at, 'sponsorship', 'Sponsorship ended',
-             history.sponsor_name_encrypted
+      SELECT history.ended_at,
+             CONVERT('sponsorship' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT('Sponsorship ended' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(history.sponsor_name_encrypted USING utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM sponsorship_assignment_history history
       WHERE history.participant_id = ? AND history.ended_at IS NOT NULL
       UNION ALL
-      SELECT changed.changed_at, 'status',
-             CASE WHEN changed.status_type = 'sponsorship'
-               THEN 'Sponsorship status changed' ELSE 'Participant status changed' END,
-             CONCAT(changed.previous_status, ' → ', changed.current_status)
+      SELECT changed.changed_at,
+             CONVERT('status' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(CASE WHEN changed.status_type = 'sponsorship'
+               THEN 'Sponsorship status changed' ELSE 'Participant status changed' END USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(CONCAT(changed.previous_status, ' → ', changed.current_status) USING utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM participant_status_history changed
       WHERE changed.participant_id = ?
       ${careTimelineRows}
       UNION ALL
-      SELECT event_rows.event_date, 'attendance',
-             CASE WHEN event_rows.attended_at IS NULL
+      SELECT event_rows.event_date,
+             CONVERT('attendance' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(CASE WHEN event_rows.attended_at IS NULL
                THEN CONCAT('Missed ', event_rows.event_name)
-               ELSE CONCAT('Attended ', event_rows.event_name) END,
-             CASE WHEN event_rows.attended_at IS NULL
+               ELSE CONCAT('Attended ', event_rows.event_name) END USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(CASE WHEN event_rows.attended_at IS NULL
                THEN 'No check-in record'
-               ELSE CONCAT('Checked in at ', DATE_FORMAT(event_rows.attended_at, '%h:%i %p')) END
+               ELSE CONCAT('Checked in at ', DATE_FORMAT(event_rows.attended_at, '%h:%i %p')) END USING utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM ${occurrenceSubquery} event_rows
     )`;
   const timelineParams = [
