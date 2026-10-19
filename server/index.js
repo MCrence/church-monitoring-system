@@ -983,6 +983,7 @@ app.get('/api/participants/:id/history', authenticate, checkPermission('particip
     await Promise.all([
       participantProfileColumnsReady,
       sponsorshipTablesReady,
+      eventsTableReady,
       ...(includeCareHistory ? [sponsoredChildUpdatesReady] : []),
     ]);
     const participantId = Number(req.params.id);
