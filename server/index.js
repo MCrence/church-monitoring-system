@@ -3898,32 +3898,9 @@ async function computeSponsoredChildren(filters) {
     }));
 }
 
-function participantOccurrenceCte() {
+function participantOccurrenceSubquery() {
   return `
-    WITH event_occurrences AS (
-      SELECT e.name AS event_name, e.starts_at AS event_date, e.location AS event_location
-      FROM events e
-      JOIN participants p ON p.id = ?
-      WHERE e.status <> 'cancelled'
-        AND e.starts_at >= p.created_at AND e.starts_at < NOW()
-      UNION ALL
-      SELECT attended.event_name, attended.event_date, attended.event_location
-      FROM (
-        SELECT c.event_name, DATE(c.checked_in_at) AS event_date, MIN(c.location) AS event_location
-        FROM check_in_logs c
-        JOIN participants p ON p.id = c.participant_id
-        WHERE c.participant_id = ? AND c.status = 'checked_in'
-          AND c.checked_in_at >= p.created_at AND c.checked_in_at < NOW()
-        GROUP BY c.event_name, DATE(c.checked_in_at)
-      ) attended
-      WHERE NOT EXISTS (
-        SELECT 1 FROM events e
-        WHERE e.status <> 'cancelled'
-          AND LOWER(e.name) = LOWER(attended.event_name)
-          AND DATE(e.starts_at) = attended.event_date
-      )
-    ),
-    event_rows AS (
+    (
       SELECT occurrence.event_name, occurrence.event_date,
              COALESCE(
                (SELECT MIN(c.checked_in_at)
@@ -3941,7 +3918,29 @@ function participantOccurrenceCte() {
                   AND DATE(c.checked_in_at) = DATE(occurrence.event_date)),
                occurrence.event_location
              ) AS location
-      FROM event_occurrences occurrence
+      FROM (
+               SELECT e.name AS event_name, e.starts_at AS event_date, e.location AS event_location
+               FROM events e
+               JOIN participants p ON p.id = ?
+               WHERE e.status <> 'cancelled'
+                 AND e.starts_at >= p.created_at AND e.starts_at < NOW()
+               UNION ALL
+               SELECT attended.event_name, attended.event_date, attended.event_location
+               FROM (
+                 SELECT c.event_name, DATE(c.checked_in_at) AS event_date, MIN(c.location) AS event_location
+                 FROM check_in_logs c
+                 JOIN participants p ON p.id = c.participant_id
+                 WHERE c.participant_id = ? AND c.status = 'checked_in'
+                   AND c.checked_in_at >= p.created_at AND c.checked_in_at < NOW()
+                 GROUP BY c.event_name, DATE(c.checked_in_at)
+               ) attended
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM events e
+                 WHERE e.status <> 'cancelled'
+                   AND LOWER(e.name) = LOWER(attended.event_name)
+                   AND DATE(e.starts_at) = attended.event_date
+               )
+      ) occurrence
     )
   `;
 }
@@ -3974,14 +3973,13 @@ async function loadParticipantDetailHistory(participantId, options) {
      ORDER BY changed_at ASC, id ASC`,
     [participantId],
   );
-  const occurrenceCte = participantOccurrenceCte();
+  const occurrenceSubquery = participantOccurrenceSubquery();
   const occurrenceParams = [participantId, participantId, participantId, participantId];
   const [attendanceGroups] = await pool.execute(
-    `${occurrenceCte}
-     SELECT YEAR(event_date) AS year, MONTH(event_date) AS month,
+    `SELECT YEAR(event_date) AS year, MONTH(event_date) AS month,
             COUNT(*) AS total_events,
             SUM(attended_at IS NOT NULL) AS total_attended
-     FROM event_rows
+     FROM ${occurrenceSubquery} event_rows
      GROUP BY YEAR(event_date), MONTH(event_date)
      ORDER BY year, month`,
     occurrenceParams,
@@ -4042,21 +4040,21 @@ async function loadParticipantDetailHistory(participantId, options) {
   if (options.status === 'missed') attendanceWhere.push('attended_at IS NULL');
   const attendanceFilter = attendanceWhere.length ? `WHERE ${attendanceWhere.join(' AND ')}` : '';
   const [attendanceCountRows] = await pool.execute(
-    `${occurrenceCte} SELECT COUNT(*) AS total FROM event_rows ${attendanceFilter}`,
+    `SELECT COUNT(*) AS total FROM ${occurrenceSubquery} event_rows ${attendanceFilter}`,
     attendanceParams,
   );
   const [attendanceRows] = await pool.execute(
-    `${occurrenceCte}
-     SELECT event_name, DATE_FORMAT(event_date, '%Y-%m-%d') AS event_date,
+    `SELECT event_name, DATE_FORMAT(event_date, '%Y-%m-%d') AS event_date,
             attended_at, location
-     FROM event_rows ${attendanceFilter}
+     FROM ${occurrenceSubquery} event_rows ${attendanceFilter}
      ORDER BY event_date DESC, event_name ASC
      LIMIT ? OFFSET ?`,
     [...attendanceParams, options.pageSize, (options.page - 1) * options.pageSize],
   );
   const [eventRows] = await pool.execute(
-    `${occurrenceCte}
-     SELECT DISTINCT event_name FROM event_rows ORDER BY event_name`,
+    `SELECT DISTINCT event_name
+     FROM ${occurrenceSubquery} event_rows
+     ORDER BY event_name`,
     occurrenceParams,
   );
   const careTimelineRows = options.includeCareHistory
@@ -4078,8 +4076,7 @@ async function loadParticipantDetailHistory(participantId, options) {
       WHERE disbursement.participant_id = ?
     `
     : '';
-  const timelineCte = `${occurrenceCte},
-    timeline_rows AS (
+  const timelineSubquery = `(
       SELECT p.created_at AS event_at, 'registration' AS event_type,
              'Participant registered' AS title, NULL AS description
       FROM participants p WHERE p.id = ?
@@ -4115,24 +4112,23 @@ async function loadParticipantDetailHistory(participantId, options) {
              CASE WHEN event_rows.attended_at IS NULL
                THEN 'No check-in record'
                ELSE CONCAT('Checked in at ', DATE_FORMAT(event_rows.attended_at, '%h:%i %p')) END
-      FROM event_rows
+      FROM ${occurrenceSubquery} event_rows
     )`;
   const timelineParams = [
-    ...occurrenceParams,
     participantId,
     participantId,
     participantId,
     participantId,
     ...(options.includeCareHistory ? [participantId, participantId, participantId] : []),
+    ...occurrenceParams,
   ];
   const [timelineCountRows] = await pool.execute(
-    `${timelineCte} SELECT COUNT(*) AS total FROM timeline_rows`,
+    `SELECT COUNT(*) AS total FROM ${timelineSubquery} timeline_rows`,
     timelineParams,
   );
   const [timelineRows] = await pool.execute(
-    `${timelineCte}
-     SELECT event_at, event_type, title, description
-     FROM timeline_rows
+    `SELECT event_at, event_type, title, description
+     FROM ${timelineSubquery} timeline_rows
      ORDER BY event_at DESC, title ASC
      LIMIT ? OFFSET ?`,
     [...timelineParams, options.historyPageSize, (options.historyPage - 1) * options.historyPageSize],
