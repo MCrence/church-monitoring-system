@@ -38,6 +38,12 @@ const {
   parsePositiveAmountCents,
 } = require('./utils/allowance-utils');
 const {
+  getParticipationStatus,
+  GROUNDS_FOR_DEPARTURE_ABSENCES,
+  isRemovalEligible,
+  summarizeParticipation,
+} = require('./utils/participation');
+const {
   GOER_EDUCATION_LEVELS,
   canGoerAccessParticipant,
   canGoerManageCare,
@@ -186,6 +192,46 @@ const sponsoredChildUpdatesReady = eventsTableReady.then(() => pool.query(`
       ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 `));
+const participationTrackingReady = participantProfileColumnsReady.then(async () => {
+  const [columns] = await pool.execute(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'participants'
+       AND COLUMN_NAME = 'participation_status'`,
+  );
+  if (!columns.length) {
+    await pool.query(
+      "ALTER TABLE participants ADD COLUMN participation_status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE'",
+    );
+  }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sponsored_child_participation_history (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      participant_id INT UNSIGNED NOT NULL,
+      action_type VARCHAR(32) NOT NULL,
+      previous_status VARCHAR(32) NOT NULL,
+      current_status VARCHAR(32) NOT NULL,
+      reason TEXT DEFAULT NULL,
+      absence_count INT UNSIGNED NOT NULL DEFAULT 0,
+      created_by INT UNSIGNED DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_child_participation_history (participant_id, created_at, id),
+      UNIQUE KEY uq_child_participation_action (participant_id, action_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  const [indexes] = await pool.execute(
+    `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'sponsored_child_participation_history'
+       AND INDEX_NAME = 'uq_child_participation_action'`,
+  );
+  if (!indexes.length) {
+    await pool.query(
+      `ALTER TABLE sponsored_child_participation_history
+       ADD UNIQUE KEY uq_child_participation_action (participant_id, action_type)`,
+    );
+  }
+});
 const attendanceModelValidationReady = pool.query(`
   CREATE TABLE IF NOT EXISTS attendance_model_validation_runs (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -590,13 +636,38 @@ function participantView(row) {
     || result.fullName;
   result.age = calculateAge(result.dateOfBirth);
   result.participantType = result.participant_type;
-  result.sponsorshipType = result.sponsorship_type;
   result.educationLevel = result.education_level;
   result.gradeLevel = result.grade_level;
   result.enrollmentDate = result.enrollment_date instanceof Date
     ? new Date(result.enrollment_date.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
     : result.enrollment_date;
   return result;
+}
+
+function stripFinancialSponsorshipData(participant) {
+  for (const field of [
+    'sponsorName',
+    'sponsorContact',
+    'sponsor_id',
+    'sponsor_family_name_encrypted',
+    'sponsor_email_encrypted',
+    'sponsor_address_encrypted',
+    'sponsorship_type',
+    'sponsorship_start_date',
+    'sponsorship_status',
+    'sponsorship_lifecycle',
+    'monthly_allowance',
+    'available_allowance_balance',
+    'communication_history_encrypted',
+    'donation_history_encrypted',
+    'sponsorship_payments_encrypted',
+    'letters_sent_encrypted',
+    'letters_received_encrypted',
+    'last_letter_date',
+  ]) {
+    delete participant[field];
+  }
+  return participant;
 }
 
 app.get('/api/health', async (req, res) => {
@@ -706,15 +777,11 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
 
 app.get('/api/participants', authenticate, checkPermission('participants:view'), async (req, res, next) => {
   try {
-    await Promise.all([participantProfileColumnsReady, goerQrRevocationReady]);
+    await Promise.all([participantProfileColumnsReady, goerQrRevocationReady, participationTrackingReady]);
     const canViewSponsorship = hasPermission(req.user, 'sponsorship:view');
-    const allowanceFields = canViewSponsorship
-      ? 'p.sponsorship_lifecycle, p.monthly_allowance, p.available_allowance_balance,'
-      : '';
     const [rows] = await pool.query(
       `SELECT p.id, p.participant_code, p.participant_type, p.gender, p.status, p.created_at,
-              ${allowanceFields}
-              p.full_name_encrypted, p.first_name_encrypted, p.middle_name_encrypted,
+              p.participation_status, p.full_name_encrypted, p.first_name_encrypted, p.middle_name_encrypted,
               p.last_name_encrypted, p.date_of_birth_encrypted, p.education_level, p.grade_level,
               (SELECT q.qr_code_image FROM qr_codes q
                WHERE q.participant_id = p.id AND q.status = 'active'
@@ -722,8 +789,12 @@ app.get('/api/participants', authenticate, checkPermission('participants:view'),
                ORDER BY q.id DESC LIMIT 1) AS qr_code_image
        FROM participants p ORDER BY p.id DESC`,
     );
+    const participationById = canViewSponsorship
+      ? new Map((await getSponsoredParticipationSummaries()).map((child) => [Number(child.id), child]))
+      : new Map();
     res.json(rows.map((row) => {
-      const participant = participantView(row);
+      const participant = stripFinancialSponsorshipData(participantView(row));
+      const participation = participationById.get(Number(row.id));
       return {
         id: participant.id,
         participant_code: participant.participant_code,
@@ -734,9 +805,8 @@ app.get('/api/participants', authenticate, checkPermission('participants:view'),
         fullName: participant.fullName,
         age: participant.age,
         ...(canViewSponsorship ? {
-          sponsorship_lifecycle: participant.sponsorship_lifecycle,
-          monthly_allowance: Number(participant.monthly_allowance || 0),
-          available_allowance_balance: Number(participant.available_allowance_balance || 0),
+          participation_status: participation?.status || 'ACTIVE',
+          monthly_participation: participation?.monthly || null,
         } : {}),
         education_level: participant.education_level,
         grade_level: participant.grade_level,
@@ -957,7 +1027,7 @@ app.get('/api/events/:id/attendance', authenticate, checkPermission('events:view
 
 app.get('/api/participants/:id', authenticate, checkPermission('participants:view'), async (req, res, next) => {
   try {
-    await Promise.all([participantProfileColumnsReady, goerQrRevocationReady]);
+    await Promise.all([participantProfileColumnsReady, goerQrRevocationReady, participationTrackingReady]);
     const [rows] = await pool.execute("SELECT p.*, q.qr_code_image, q.qr_uid FROM participants p LEFT JOIN qr_codes q ON q.id = (SELECT q2.id FROM qr_codes q2 WHERE q2.participant_id = p.id AND q2.status = 'active' AND p.participant_type = 'sponsored_child' ORDER BY q2.id DESC LIMIT 1) WHERE p.id = ? LIMIT 1", [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Participant not found' });
     if (rows[0].participant_type !== 'goer' && rows[0].qr_code_image && rows[0].qr_uid) {
@@ -966,12 +1036,14 @@ app.get('/api/participants/:id', authenticate, checkPermission('participants:vie
         await QRCode.toFile(qrFile, rows[0].qr_uid);
       }
     }
-    const participant = participantView(rows[0]);
+    const participant = stripFinancialSponsorshipData(participantView(rows[0]));
     delete participant.qr_uid;
-    if (!hasPermission(req.user, 'sponsorship:view')) {
-      delete participant.sponsorship_lifecycle;
-      delete participant.monthly_allowance;
-      delete participant.available_allowance_balance;
+    if (hasPermission(req.user, 'sponsorship:view') && participant.participant_type === 'sponsored_child') {
+      const [monitoring] = await getSponsoredParticipationSummaries(Number(req.params.id));
+      participant.participation_status = monitoring?.status || 'ACTIVE';
+      participant.monthly_participation = monitoring?.monthly || null;
+    } else {
+      delete participant.participation_status;
     }
     res.json({ participant });
   } catch (error) { next(error); }
@@ -982,7 +1054,7 @@ app.get('/api/participants/:id/history', authenticate, checkPermission('particip
     const includeCareHistory = hasPermission(req.user, 'sponsorship:view');
     await Promise.all([
       participantProfileColumnsReady,
-      sponsorshipTablesReady,
+      participationTrackingReady,
       eventsTableReady,
       ...(includeCareHistory ? [sponsoredChildUpdatesReady] : []),
     ]);
@@ -1020,6 +1092,10 @@ app.get('/api/participants/:id/history', authenticate, checkPermission('particip
       includeCareHistory,
     });
     if (!history) return res.status(404).json({ error: 'Participant not found' });
+    if (history.participant.participantType === 'sponsored_child' && includeCareHistory) {
+      [history.participation] = await getSponsoredParticipationSummaries(participantId);
+      history.participant.status = history.participation?.status || 'ACTIVE';
+    }
     res.json(history);
   } catch (error) { next(error); }
 });
@@ -1069,15 +1145,18 @@ app.get('/api/goers', authenticate, checkRole(['System Administrator']), async (
     await staffPermissionsReady;
     const [goers] = await pool.execute(
       `SELECT id, username, first_name, middle_name, last_name, email, role, status, access_permissions,
-              goer_education_level, created_at
+              goer_education_level, created_at, last_login_at
        FROM users WHERE LOWER(role) = 'goer'
        ORDER BY first_name, last_name, email`,
     );
     res.json({
+      educationLevels: GOER_EDUCATION_LEVELS,
       goers: goers.map((user) => ({
         ...accountView(user),
+        username: user.username,
         status: user.status,
         createdAt: user.created_at,
+        lastLoginAt: user.last_login_at,
       })),
     });
   } catch (error) { next(error); }
@@ -1105,13 +1184,14 @@ app.post('/api/goers', authenticate, checkRole(['System Administrator']), async 
       [email],
     );
     if (existing.length) return res.status(409).json({ error: 'Email is already in use' });
+    const username = `account-${crypto.randomUUID()}`;
     const [result] = await pool.execute(
       `INSERT INTO users
          (username, first_name, middle_name, last_name, email, password_hash, role, status, access_permissions,
           goer_education_level, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 'Goer', 'active', NULL, ?, NOW(), NOW())`,
       [
-        `account-${crypto.randomUUID()}`,
+        username,
         names.firstName,
         names.middleName || null,
         names.lastName,
@@ -1132,10 +1212,13 @@ app.post('/api/goers', authenticate, checkRole(['System Administrator']), async 
         lastName: names.lastName,
         fullName: names.fullName,
         email,
+        username,
         role: 'Goer',
         status: 'active',
         permissions: ['checkin:record'],
         goerEducationLevel: educationLevel,
+        createdAt: new Date(),
+        lastLoginAt: null,
       },
     });
   } catch (error) {
@@ -1205,11 +1288,19 @@ app.get('/api/staff', authenticate, checkRole(['System Administrator']), async (
     await staffPermissionsReady;
     const [staff] = await pool.execute(
       `SELECT id, username, first_name, middle_name, last_name, email, role, status,
-              access_permissions, created_at
+              access_permissions, created_at, last_login_at
        FROM users WHERE LOWER(role) = 'church administrator'
        ORDER BY first_name, last_name, email`,
     );
-    res.json({ staff: staff.map((user) => ({ ...accountView(user), status: user.status, createdAt: user.created_at })) });
+    res.json({
+      staff: staff.map((user) => ({
+        ...accountView(user),
+        username: user.username,
+        status: user.status,
+        createdAt: user.created_at,
+        lastLoginAt: user.last_login_at,
+      })),
+    });
   } catch (error) { next(error); }
 });
 
@@ -1235,13 +1326,14 @@ app.post('/api/staff', authenticate, checkRole(['System Administrator']), async 
       [email],
     );
     if (existing.length) return res.status(409).json({ error: 'Email is already in use' });
+    const username = `account-${crypto.randomUUID()}`;
     const [result] = await pool.execute(
       `INSERT INTO users
          (username, first_name, middle_name, last_name, email, password_hash, role,
           status, access_permissions, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 'Church Administrator', 'active', ?, NOW(), NOW())`,
       [
-        `account-${crypto.randomUUID()}`,
+        username,
         names.firstName,
         names.middleName || null,
         names.lastName,
@@ -1262,9 +1354,11 @@ app.post('/api/staff', authenticate, checkRole(['System Administrator']), async 
         lastName: names.lastName,
         fullName: names.fullName,
         email,
+        username,
         role: 'Church Administrator',
         status: 'active',
         permissions: [...new Set(permissions)],
+        createdAt: new Date(),
       },
     });
   } catch (error) {
@@ -1302,12 +1396,39 @@ app.put('/api/staff/:id/status', authenticate, checkRole(['System Administrator'
     if (!['active', 'inactive'].includes(status)) {
       return res.status(400).json({ error: 'Status must be active or inactive' });
     }
-    const [result] = await pool.execute(
-      `UPDATE users SET status = ?, updated_at = NOW()
-       WHERE id = ? AND LOWER(role) = 'church administrator'`,
-      [status, req.params.id],
-    );
-    if (!result.affectedRows) return res.status(404).json({ error: 'Staff account not found' });
+    if (status === 'inactive' && String(req.user.id) === String(req.params.id)) {
+      return res.status(403).json({ error: 'You cannot deactivate the account you are currently using.' });
+    }
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [accounts] = await connection.execute(
+        `SELECT id, status FROM users
+         WHERE LOWER(role) = 'church administrator'
+         ORDER BY id FOR UPDATE`,
+      );
+      const account = accounts.find((item) => String(item.id) === String(req.params.id));
+      if (!account) {
+        await connection.rollback();
+        return res.status(404).json({ error: 'Staff account not found' });
+      }
+      if (account.status === 'active' && status === 'inactive' &&
+          accounts.filter((item) => item.status === 'active').length <= 1) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'At least one active Church Administrator account must remain.' });
+      }
+      await connection.execute(
+        `UPDATE users SET status = ?, updated_at = NOW()
+         WHERE id = ? AND LOWER(role) = 'church administrator'`,
+        [status, req.params.id],
+      );
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
     await writeAuditLog(req.user, `staff.${status}`, 'user', req.params.id);
     res.json({ status });
   } catch (error) { next(error); }
@@ -1679,7 +1800,7 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
   try {
     await participantProfileColumnsReady;
     const [existingRows] = await pool.execute(
-      `SELECT gender, participant_type, sponsorship_lifecycle, monthly_allowance, status
+      `SELECT gender, participant_type, status
        FROM participants WHERE id = ? LIMIT 1`,
       [req.params.id],
     );
@@ -1710,32 +1831,6 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
     }
     if (schoolAddress.length > 500) {
       return res.status(400).json({ error: 'School address must be 500 characters or fewer' });
-    }
-    let monthlyAllowance = existingRows[0].monthly_allowance;
-    let lifecycle = existingRows[0].sponsorship_lifecycle;
-    if (
-      participantType === 'sponsored_child' &&
-      (
-        Object.prototype.hasOwnProperty.call(req.body, 'monthlyAllowance') ||
-        Object.prototype.hasOwnProperty.call(req.body, 'lifecycle')
-      ) &&
-      !hasPermission(req.user, 'sponsorship:manage')
-    ) {
-      return res.status(403).json({ error: 'Manage sponsored care permission is required to update child status or monthly allowance' });
-    }
-    if (participantType === 'sponsored_child') {
-      if (Object.prototype.hasOwnProperty.call(req.body, 'monthlyAllowance')) {
-        monthlyAllowance = Number(req.body.monthlyAllowance);
-        if (!Number.isFinite(monthlyAllowance) || monthlyAllowance < 0 || monthlyAllowance > 1000000) {
-          return res.status(400).json({ error: 'Monthly allowance must be between 0 and 1,000,000' });
-        }
-      }
-      if (Object.prototype.hasOwnProperty.call(req.body, 'lifecycle')) {
-        lifecycle = String(req.body.lifecycle || '');
-        if (!sponsorshipLifecycleStatuses.has(lifecycle)) {
-          return res.status(400).json({ error: 'Select a valid child lifecycle status' });
-        }
-      }
     }
     if (
       Object.prototype.hasOwnProperty.call(req.body, 'passcode') &&
@@ -1770,10 +1865,6 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
       school_address_encrypted: participantType === 'sponsored_child' ? encrypt(schoolAddress || null) : null,
       status: req.body.status || 'active',
     };
-    if (participantType === 'sponsored_child') {
-      fields.monthly_allowance = monthlyAllowance;
-      fields.sponsorship_lifecycle = lifecycle;
-    }
     if (isValidParticipantPasscode(req.body.passcode)) {
       fields.passcode_hash = await bcrypt.hash(req.body.passcode, 12);
       fields.passcode_encrypted = encrypt(req.body.passcode);
@@ -1795,34 +1886,13 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
         [req.params.id, existingRows[0].status || 'unknown', fields.status || 'active', req.user.id],
       );
     }
-    if (
-      participantType === 'sponsored_child' &&
-      String(existingRows[0].sponsorship_lifecycle || '') !== String(fields.sponsorship_lifecycle || '')
-    ) {
-      await connection.execute(
-        `INSERT INTO participant_status_history
-           (participant_id, status_type, previous_status, current_status, changed_by, changed_at)
-         VALUES (?, 'sponsorship', ?, ?, ?, NOW())`,
-        [
-          req.params.id,
-          existingRows[0].sponsorship_lifecycle || 'unknown',
-          fields.sponsorship_lifecycle || 'active',
-          req.user.id,
-        ],
-      );
-    }
     const [rows] = await connection.execute('SELECT * FROM participants WHERE id = ? LIMIT 1', [req.params.id]);
     await connection.commit();
     transactionActive = false;
     await writeAuditLog(req.user, 'participant.updated', 'participant', req.params.id, {
       changedFields: Object.keys(req.body),
     });
-    const participant = participantView(rows[0]);
-    if (!hasPermission(req.user, 'sponsorship:view')) {
-      delete participant.sponsorship_lifecycle;
-      delete participant.monthly_allowance;
-      delete participant.available_allowance_balance;
-    }
+    const participant = stripFinancialSponsorshipData(participantView(rows[0]));
     res.json({ participant });
   } catch (error) {
     if (connection && transactionActive) await connection.rollback();
@@ -1986,7 +2056,7 @@ app.post('/api/portal/profile', authenticate, checkPermission('portal:view'), as
       return res.status(403).json({ error: 'Sponsored Child passcode required', requiresPasscode: true });
     }
     const [attendance] = await pool.execute("SELECT event_name, location, checked_in_at, checked_out_at, status FROM check_in_logs WHERE participant_id = ? ORDER BY checked_in_at DESC LIMIT 20", [participant.id]);
-    res.json({ participant: participantView(participant), attendance });
+    res.json({ participant: stripFinancialSponsorshipData(participantView(participant)), attendance });
   } catch (error) { next(error); }
 });
 
@@ -2151,6 +2221,18 @@ async function getAccessibleSponsorshipChild(user, participantId) {
   if (!child || !canGoerAccessParticipant(user, child)) return null;
   return child;
 }
+
+const retiredSponsorshipFeature = (_req, res) =>
+  res.status(410).json({ error: 'Financial sponsorship features are no longer available' });
+app.use('/api/sponsorship/sponsors', retiredSponsorshipFeature);
+app.use('/api/sponsorship/letters', retiredSponsorshipFeature);
+app.use('/api/sponsorship/disbursements', retiredSponsorshipFeature);
+app.use('/api/sponsorship/children/:id/sponsor-assignment', retiredSponsorshipFeature);
+app.use('/api/sponsorship/children/:id/allowance-transactions', retiredSponsorshipFeature);
+app.use('/api/sponsorship/children/:id/disbursements', retiredSponsorshipFeature);
+app.use('/api/sponsorship/children/:id/gifts', retiredSponsorshipFeature);
+app.use('/api/sponsorship/children/:id/letters', retiredSponsorshipFeature);
+app.put('/api/sponsorship/children/:id', retiredSponsorshipFeature);
 
 app.get('/api/sponsorship/sponsors', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
   try {
@@ -2409,44 +2491,275 @@ app.delete('/api/sponsorship/children/:id/sponsor-assignment', authenticate, che
   }
 });
 
-app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (req, res, next) => {
-  try {
-    await participantProfileColumnsReady;
-    const isGoer = isGoerRole(req.user.role);
-    const groupScope = isGoer
-      ? 'AND education_level = ? AND status = \'active\''
-      : '';
-    const adminFields = isGoer
-      ? ''
-      : `, education_level, school_name_encrypted, school_address_encrypted,
-         sponsorship_lifecycle, sponsorship_status`;
-    const [rows] = await pool.execute(
-      `SELECT id, full_name_encrypted, participant_code, monthly_allowance,
-              available_allowance_balance ${adminFields}
-       FROM participants
-       WHERE participant_type = 'sponsored_child' AND status <> 'deleted' ${groupScope}
-       ORDER BY FIELD(sponsorship_lifecycle, 'active', 'on_hold', 'withdrawn', 'deceased', 'completed', 'new', 'graduated'), full_name_encrypted`,
-      isGoer ? [req.user.goerEducationLevel] : [],
-    );
-    const children = rows.map((row) => ({
+async function getSponsoredParticipationSummaries(participantId = null) {
+  await Promise.all([participantProfileColumnsReady, eventsTableReady, participationTrackingReady]);
+  const childFilter = participantId ? 'AND p.id = ?' : '';
+  const childParams = participantId ? [participantId] : [];
+  const [participants] = await pool.execute(
+    `SELECT p.id, p.participant_code, p.full_name_encrypted, p.date_of_birth_encrypted,
+            p.gender, p.created_at, p.education_level, p.grade_level, p.participation_status,
+            p.status AS participant_status
+     FROM participants p
+     WHERE p.participant_type = 'sponsored_child'
+       AND p.status <> 'deleted' ${childFilter}
+     ORDER BY p.created_at DESC, p.id DESC`,
+    childParams,
+  );
+  if (!participants.length) return [];
+
+  const participantIds = participants.map((row) => row.id);
+  const placeholders = participantIds.map(() => '?').join(', ');
+  const [events] = await pool.query(
+    `SELECT name, starts_at, location FROM events
+     WHERE status <> 'cancelled' AND starts_at < NOW()
+     ORDER BY starts_at ASC, id ASC`,
+  );
+  const [checkIns] = await pool.execute(
+    `SELECT participant_id, event_name, location, checked_in_at
+     FROM check_in_logs
+     WHERE participant_id IN (${placeholders})
+       AND status = 'checked_in' AND checked_in_at IS NOT NULL
+     ORDER BY checked_in_at ASC, id ASC`,
+    participantIds,
+  );
+  const [actions] = await pool.execute(
+    `SELECT h.id, h.participant_id, h.action_type, h.previous_status,
+            h.current_status, h.reason, h.absence_count, h.created_by, h.created_at,
+            u.username AS administrator_username,
+            CONCAT_WS(' ', u.first_name, u.middle_name, u.last_name) AS administrator_name
+     FROM sponsored_child_participation_history h
+     LEFT JOIN users u ON u.id = h.created_by
+     WHERE h.participant_id IN (${placeholders})
+     ORDER BY h.created_at ASC, h.id ASC`,
+    participantIds,
+  );
+  const eventRows = events.map((event) => ({
+    name: event.name,
+    date: event.starts_at,
+    location: event.location,
+  }));
+  const checkInsByChild = new Map();
+  for (const row of checkIns) {
+    const childRows = checkInsByChild.get(Number(row.participant_id)) || [];
+    childRows.push({
+      eventName: row.event_name,
+      location: row.location,
+      checkedInAt: row.checked_in_at,
+    });
+    checkInsByChild.set(Number(row.participant_id), childRows);
+  }
+  const actionsByChild = new Map();
+  for (const row of actions) {
+    const childRows = actionsByChild.get(Number(row.participant_id)) || [];
+    childRows.push({
+      id: row.id,
+      type: row.action_type,
+      previousStatus: row.previous_status,
+      currentStatus: row.current_status,
+      reason: row.reason || '',
+      absenceCount: Number(row.absence_count) || 0,
+      administrator: row.administrator_name || row.administrator_username || 'System',
+      createdAt: row.created_at,
+    });
+    actionsByChild.set(Number(row.participant_id), childRows);
+  }
+
+  return Promise.all(participants.map(async (row) => {
+    const tracking = summarizeParticipation({
+      registrationDate: row.created_at,
+      events: eventRows,
+      checkIns: checkInsByChild.get(Number(row.id)) || [],
+    });
+    const childActions = actionsByChild.get(Number(row.id)) || [];
+    if (
+      tracking.lifetime.absent >= GROUNDS_FOR_DEPARTURE_ABSENCES
+      && !childActions.some((action) => action.type === 'grounds_for_departure')
+      && !childActions.some((action) => action.type === 'second_chance')
+    ) {
+      const [result] = await pool.execute(
+        `INSERT IGNORE INTO sponsored_child_participation_history
+         (participant_id, action_type, previous_status, current_status, reason, absence_count)
+         VALUES (?, 'grounds_for_departure', 'WARNING', 'GROUNDS_FOR_DEPARTURE',
+                 'Six total absences reached', ?)`,
+        [row.id, tracking.lifetime.absent],
+      );
+      if (result.affectedRows === 1) {
+        childActions.push({
+          id: result.insertId,
+          type: 'grounds_for_departure',
+          previousStatus: 'WARNING',
+          currentStatus: 'GROUNDS_FOR_DEPARTURE',
+          reason: 'Six total absences reached',
+          absenceCount: tracking.lifetime.absent,
+          administrator: 'System',
+          createdAt: new Date(),
+        });
+      }
+    }
+    const secondChance = childActions.find((action) => action.type === 'second_chance') || null;
+    const removed = row.participation_status === 'REMOVED_FROM_SPONSORSHIP'
+      || childActions.some((action) => action.type === 'removed');
+    const currentStatus = getParticipationStatus({
+      totalAbsences: tracking.lifetime.absent,
+      monthlyCompliant: tracking.currentMonth.attended >= 2,
+      secondChanceGranted: Boolean(secondChance),
+      removed,
+    });
+    const postSecondChanceAbsences = secondChance
+      ? Math.max(0, tracking.lifetime.absent - secondChance.absenceCount)
+      : 0;
+    return {
       id: row.id,
       name: decrypt(row.full_name_encrypted) || 'Unnamed child',
       participantCode: row.participant_code,
-      ...(!isGoer ? {
-        educationLevel: row.education_level || '',
-        monthlyAllowance: Number(row.monthly_allowance || 0),
-        availableBalance: Number(row.available_allowance_balance || 0),
-      } : {}),
-      ...(!isGoer ? {
-        schoolName: row.school_name_encrypted ? decrypt(row.school_name_encrypted) : '',
-        schoolAddress: row.school_address_encrypted ? decrypt(row.school_address_encrypted) : '',
-        lifecycle: row.sponsorship_lifecycle || 'active',
-        sponsorStatus: row.sponsorship_status || 'unknown',
-      } : {}),
-    }));
-    children.sort((left, right) => left.name.localeCompare(right.name));
+      age: calculateAge(decrypt(row.date_of_birth_encrypted)),
+      gender: row.gender || '',
+      registrationDate: row.created_at,
+      educationLevel: row.education_level || '',
+      gradeLevel: row.grade_level || '',
+      status: currentStatus,
+      monthly: tracking.currentMonth,
+      lifetime: tracking.lifetime,
+      currentYear: tracking.currentYear,
+      years: tracking.years,
+      months: tracking.months,
+      secondChance,
+      postSecondChanceAbsences,
+      removalEligible: isRemovalEligible({
+        secondChanceGranted: Boolean(secondChance),
+        postSecondChanceAbsences,
+        removed,
+      }),
+      history: childActions,
+    };
+  }));
+}
+
+app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (req, res, next) => {
+  try {
+    const isGoer = isGoerRole(req.user.role);
+    let children = await getSponsoredParticipationSummaries();
+    if (isGoer) {
+      children = children.filter((child) => child.educationLevel === req.user.goerEducationLevel
+        && child.status !== 'REMOVED_FROM_SPONSORSHIP');
+    }
     res.json(children);
   } catch (error) { next(error); }
+});
+
+app.get('/api/sponsorship/children/:id/history', authenticate, checkSponsorshipView, async (req, res, next) => {
+  try {
+    const participantId = Number(req.params.id);
+    if (!Number.isSafeInteger(participantId) || participantId < 1) {
+      return res.status(400).json({ error: 'Select a valid participant' });
+    }
+    const [child] = await getSponsoredParticipationSummaries(participantId);
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    res.json(child);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  let connection;
+  try {
+    const participantId = Number(req.params.id);
+    if (!Number.isSafeInteger(participantId) || participantId < 1) {
+      return res.status(400).json({ error: 'Select a valid participant' });
+    }
+    const [child] = await getSponsoredParticipationSummaries(participantId);
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    if (child.status !== 'GROUNDS_FOR_DEPARTURE') {
+      return res.status(409).json({ error: 'A second chance is available only after the six-absence threshold is reached' });
+    }
+    const reason = String(req.body.reason || '').trim().slice(0, 1000);
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [existing] = await connection.execute(
+      `SELECT id FROM sponsored_child_participation_history
+       WHERE participant_id = ? AND action_type IN ('second_chance', 'removed')
+       ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+      [participantId],
+    );
+    if (existing[0]) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'This child already has a second-chance or removal record' });
+    }
+    await connection.execute(
+      `UPDATE participants SET participation_status = 'SECOND_CHANCE'
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'`,
+      [participantId],
+    );
+    await connection.execute(
+      `INSERT INTO sponsored_child_participation_history
+       (participant_id, action_type, previous_status, current_status, reason, absence_count, created_by)
+       VALUES (?, 'second_chance', 'GROUNDS_FOR_DEPARTURE', 'SECOND_CHANCE', ?, ?, ?)`,
+      [participantId, reason || null, child.lifetime.absent, req.user.id],
+    );
+    await connection.commit();
+    await writeAuditLog(req.user, 'sponsorship.second_chance.granted', 'participant', participantId, {
+      previousStatus: 'GROUNDS_FOR_DEPARTURE',
+      newStatus: 'SECOND_CHANCE',
+      absenceCount: child.lifetime.absent,
+      reason: reason || null,
+    });
+    const [updatedChild] = await getSponsoredParticipationSummaries(participantId);
+    res.json(updatedChild);
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+app.post('/api/sponsorship/children/:id/remove', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  let connection;
+  try {
+    const participantId = Number(req.params.id);
+    if (!Number.isSafeInteger(participantId) || participantId < 1) {
+      return res.status(400).json({ error: 'Select a valid participant' });
+    }
+    const reason = String(req.body.reason || '').trim().slice(0, 1000);
+    const [child] = await getSponsoredParticipationSummaries(participantId);
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    if (child.status !== 'SECOND_CHANCE' || !child.removalEligible) {
+      return res.status(409).json({ error: 'Removal is available after two missed monthly requirements following a second chance' });
+    }
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [result] = await connection.execute(
+      `UPDATE participants SET participation_status = 'REMOVED_FROM_SPONSORSHIP'
+       WHERE id = ? AND participant_type = 'sponsored_child'
+         AND participation_status = 'SECOND_CHANCE' AND status <> 'deleted'`,
+      [participantId],
+    );
+    if (result.affectedRows !== 1) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'The child status changed before removal could be completed' });
+    }
+    await connection.execute(
+      `INSERT INTO sponsored_child_participation_history
+       (participant_id, action_type, previous_status, current_status, reason, absence_count, created_by)
+       VALUES (?, 'removed', 'SECOND_CHANCE', 'REMOVED_FROM_SPONSORSHIP', ?, ?, ?)`,
+      [participantId, reason || 'Failed attendance requirements after second chance', child.lifetime.absent, req.user.id],
+    );
+    await connection.commit();
+    await writeAuditLog(req.user, 'sponsorship.child.removed', 'participant', participantId, {
+      previousStatus: 'SECOND_CHANCE',
+      newStatus: 'REMOVED_FROM_SPONSORSHIP',
+      reason: reason || 'Failed attendance requirements after second chance',
+      absenceCount: child.lifetime.absent,
+      secondChanceGranted: Boolean(child.secondChance),
+      postSecondChanceAbsences: child.postSecondChanceAbsences,
+    });
+    const [updatedChild] = await getSponsoredParticipationSummaries(participantId);
+    res.json(updatedChild);
+  } catch (error) {
+    if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
 });
 
 app.get('/api/sponsorship/children/:id/allowance-transactions', authenticate, checkPermission('sponsorship:view'), async (req, res, next) => {
@@ -3351,37 +3664,20 @@ app.post('/api/public/sponsor-status', guardianRateLimit, async (req, res, next)
     const verification = await verifyPublicSponsoredChild(qrPayload, passcode);
     if (verification.error) return res.status(verification.status).json({ error: verification.error });
     const child = verification.child;
-    await sponsorshipTablesReady;
-    const [disbursements] = await pool.execute(
-      `SELECT id, amount, DATE_FORMAT(disbursed_on, '%Y-%m-%d') AS disbursed_on,
-              receipt_mime
-       FROM sponsorship_disbursements
-       WHERE participant_id = ?
-       ORDER BY disbursed_on DESC, id DESC
-       LIMIT 100`,
-      [child.id],
-    );
+    const [participation] = await getSponsoredParticipationSummaries(Number(child.id));
     res.json({
       child: {
         id: child.id,
         name: decrypt(child.full_name_encrypted),
         participantCode: child.participant_code,
-        schoolName: child.school_name_encrypted
-          ? decrypt(child.school_name_encrypted)
-          : '',
-        schoolAddress: child.school_address_encrypted
-          ? decrypt(child.school_address_encrypted)
-          : '',
-        disbursements: disbursements.map((record) => ({
-          id: record.id,
-          amount: Number(record.amount),
-          disbursedOn: record.disbursed_on,
-          hasReceipt: Boolean(record.receipt_mime),
-        })),
+        participation,
       },
     });
   } catch (error) { next(error); }
 });
+
+app.use('/api/public/sponsor-letters', retiredSponsorshipFeature);
+app.use('/api/public/sponsor-receipt', retiredSponsorshipFeature);
 
 app.post('/api/public/sponsor-letters/list', async (req, res, next) => {
   try {
@@ -3515,7 +3811,7 @@ app.post('/api/participants/:id/profile', authenticate, checkPermission('portal:
     const [qrRows] = await pool.execute('SELECT id FROM qr_codes WHERE participant_id = ? AND qr_uid = ? AND status = \'active\' LIMIT 1', [req.params.id, req.body.qrPayload]);
     const [rows] = await pool.execute('SELECT * FROM participants WHERE id = ? LIMIT 1', [req.params.id]);
     if (!qrRows[0] || !rows[0] || !rows[0].passcode_hash || !(await bcrypt.compare(req.body.passcode || '', rows[0].passcode_hash))) return res.status(403).json({ error: 'QR code and passcode verification failed' });
-    res.json({ participant: participantView(rows[0]) });
+    res.json({ participant: stripFinancialSponsorshipData(participantView(rows[0])) });
   } catch (error) { next(error); }
 });
 
@@ -3856,46 +4152,41 @@ async function computeAttendanceTrends(range, interval, event) {
 }
 
 async function computeSponsoredChildren(filters) {
-  await participantProfileColumnsReady;
-  await sponsorshipTablesReady;
-  const clauses = ["p.participant_type = 'sponsored_child'", "p.status <> 'deleted'"];
-  const params = [];
-  if (filters.educationLevel) { clauses.push('p.education_level = ?'); params.push(filters.educationLevel); }
-  if (filters.gradeLevel) { clauses.push('p.grade_level = ?'); params.push(filters.gradeLevel); }
-  if (filters.sponsorshipStatus && filters.sponsorshipStatus !== 'all') { clauses.push('p.sponsorship_lifecycle = ?'); params.push(filters.sponsorshipStatus); }
-  const [rows] = await pool.execute(
-    `SELECT p.id, p.participant_code, p.full_name_encrypted, p.grade_level, p.education_level,
-            p.sponsorship_lifecycle, p.sponsorship_status,
-            (SELECT COUNT(*) FROM check_in_logs c WHERE c.participant_id = p.id AND c.status = 'checked_in') AS checkInCount,
-            (SELECT MAX(c.checked_in_at) FROM check_in_logs c WHERE c.participant_id = p.id AND c.status = 'checked_in') AS lastCheckIn,
-            r.risk_score, r.risk_level, r.computed_at
-     FROM participants p
-     LEFT JOIN (
-       SELECT s.participant_id, s.risk_score, s.risk_level, s.computed_at
-       FROM predictive_risk_scores s
-       JOIN (SELECT participant_id, MAX(computed_at) AS latest FROM predictive_risk_scores GROUP BY participant_id) l
-         ON l.participant_id = s.participant_id AND l.latest = s.computed_at
-     ) r ON r.participant_id = p.id
-     WHERE ${clauses.join(' AND ')}
-     ORDER BY p.participant_code ASC`,
-    params,
-  );
-  return rows
-    .filter((row) => filters.riskLevel === 'all' || String(row.risk_level || '') === filters.riskLevel)
-    .map((row) => ({
-      id: row.id,
-      participantCode: row.participant_code,
-      name: decrypt(row.full_name_encrypted) || 'Unnamed child',
-      gradeLevel: row.grade_level || '',
-      educationLevel: row.education_level || '',
-      sponsorshipLifecycle: row.sponsorship_lifecycle || 'active',
-      sponsorshipStatus: row.sponsorship_status || 'unknown',
-      checkInCount: Number(row.checkInCount) || 0,
-      lastCheckIn: row.lastCheckIn,
-      riskScore: row.risk_score === null ? null : Number(row.risk_score),
-      riskLevel: row.risk_level || 'not_scored',
-      computedAt: row.computed_at,
-    }));
+  const [children, riskRows] = await Promise.all([
+    getSponsoredParticipationSummaries(),
+    pool.query(
+      `SELECT r.participant_id, r.risk_score, r.risk_level, r.computed_at
+       FROM predictive_risk_scores r
+       JOIN (SELECT participant_id, MAX(computed_at) AS latest
+             FROM predictive_risk_scores GROUP BY participant_id) latest
+         ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at`,
+    ).then(([rows]) => rows),
+  ]);
+  const risksByParticipant = new Map(riskRows.map((row) => [Number(row.participant_id), row]));
+  return children
+    .filter((child) => (!filters.educationLevel || child.educationLevel === filters.educationLevel)
+      && (!filters.gradeLevel || child.gradeLevel === filters.gradeLevel)
+      && (!filters.participationStatus || filters.participationStatus === 'all'
+        || child.status === filters.participationStatus))
+    .map((child) => {
+      const risk = risksByParticipant.get(Number(child.id));
+      return {
+        id: child.id,
+        participantCode: child.participantCode,
+        name: child.name,
+        gradeLevel: child.gradeLevel,
+        educationLevel: child.educationLevel,
+        participationStatus: child.status,
+        monthly: child.monthly,
+        lifetime: child.lifetime,
+        riskScore: risk?.risk_score === null || risk?.risk_score === undefined
+          ? null
+          : Number(risk.risk_score),
+        riskLevel: risk?.risk_level || 'not_scored',
+        computedAt: risk?.computed_at || null,
+      };
+    })
+    .filter((child) => filters.riskLevel === 'all' || child.riskLevel === filters.riskLevel);
 }
 
 function participantOccurrenceSubquery() {
@@ -3919,13 +4210,14 @@ function participantOccurrenceSubquery() {
                occurrence.event_location
              ) AS location
       FROM (
-               SELECT CONVERT(e.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_name,
-                      e.starts_at AS event_date,
-                      CONVERT(e.location USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_location
+               SELECT CONVERT(MIN(e.name) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_name,
+                      MIN(e.starts_at) AS event_date,
+                      CONVERT(MIN(e.location) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_location
                FROM events e
                JOIN participants p ON p.id = ?
                WHERE e.status <> 'cancelled'
                  AND e.starts_at >= p.created_at AND e.starts_at < NOW()
+               GROUP BY LOWER(e.name), DATE(e.starts_at)
                UNION ALL
                SELECT CONVERT(attended.event_name USING utf8mb4) COLLATE utf8mb4_unicode_ci,
                       attended.event_date,
@@ -3951,29 +4243,17 @@ function participantOccurrenceSubquery() {
 
 async function loadParticipantDetailHistory(participantId, options) {
   const [[participantRow]] = await pool.execute(
-    `SELECT p.*,
-            sponsor.name_encrypted AS current_sponsor_name_encrypted,
-            assignment.assigned_at AS current_sponsor_started_at
-     FROM participants p
-     LEFT JOIN sponsorship_assignments assignment ON assignment.participant_id = p.id
-     LEFT JOIN sponsors sponsor ON sponsor.id = assignment.sponsor_id
+    `SELECT p.* FROM participants p
      WHERE p.id = ? AND p.status <> 'deleted'
      LIMIT 1`,
     [participantId],
   );
   if (!participantRow) return null;
   const participant = participantView(participantRow);
-  const [sponsorshipRows] = await pool.execute(
-    `SELECT sponsor_id, sponsor_name_encrypted, started_at, ended_at
-     FROM sponsorship_assignment_history
-     WHERE participant_id = ?
-     ORDER BY started_at DESC, id DESC`,
-    [participantId],
-  );
   const [statusRows] = await pool.execute(
     `SELECT status_type, previous_status, current_status, changed_at
      FROM participant_status_history
-     WHERE participant_id = ?
+     WHERE participant_id = ? AND status_type = 'participant'
      ORDER BY changed_at ASC, id ASC`,
     [participantId],
   );
@@ -4070,20 +4350,6 @@ async function loadParticipantDetailHistory(participantId, options) {
              CAST(NULL AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM sponsored_child_updates updates
       WHERE updates.participant_id = ?
-      UNION ALL
-      SELECT care.recorded_on,
-             CONVERT('care' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CONVERT(CONCAT('Care record: ', care.care_type) USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CONVERT(care.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
-      FROM sponsored_child_care_records care
-      WHERE care.participant_id = ?
-      UNION ALL
-      SELECT disbursement.disbursed_on,
-             CONVERT('sponsorship' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CONVERT('Sponsorship allowance disbursed' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CAST(NULL AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci
-      FROM sponsorship_disbursements disbursement
-      WHERE disbursement.participant_id = ?
     `
     : '';
   const timelineSubquery = `(
@@ -4093,32 +4359,12 @@ async function loadParticipantDetailHistory(participantId, options) {
              CAST(NULL AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci AS description
       FROM participants p WHERE p.id = ?
       UNION ALL
-      SELECT history.started_at,
-             CONVERT('sponsorship' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CONVERT(CASE WHEN EXISTS (
-               SELECT 1 FROM sponsorship_assignment_history previous
-               WHERE previous.participant_id = history.participant_id
-                 AND (previous.started_at < history.started_at
-                   OR (previous.started_at = history.started_at AND previous.id < history.id))
-             ) THEN 'Sponsor changed' ELSE 'Sponsorship assigned' END USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CONVERT(history.sponsor_name_encrypted USING utf8mb4) COLLATE utf8mb4_unicode_ci
-      FROM sponsorship_assignment_history history
-      WHERE history.participant_id = ?
-      UNION ALL
-      SELECT history.ended_at,
-             CONVERT('sponsorship' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CONVERT('Sponsorship ended' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CONVERT(history.sponsor_name_encrypted USING utf8mb4) COLLATE utf8mb4_unicode_ci
-      FROM sponsorship_assignment_history history
-      WHERE history.participant_id = ? AND history.ended_at IS NOT NULL
-      UNION ALL
       SELECT changed.changed_at,
              CONVERT('status' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CONVERT(CASE WHEN changed.status_type = 'sponsorship'
-               THEN 'Sponsorship status changed' ELSE 'Participant status changed' END USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT('Participant status changed' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
              CONVERT(CONCAT(changed.previous_status, ' → ', changed.current_status) USING utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM participant_status_history changed
-      WHERE changed.participant_id = ?
+      WHERE changed.participant_id = ? AND changed.status_type = 'participant'
       ${careTimelineRows}
       UNION ALL
       SELECT event_rows.event_date,
@@ -4134,9 +4380,7 @@ async function loadParticipantDetailHistory(participantId, options) {
   const timelineParams = [
     participantId,
     participantId,
-    participantId,
-    participantId,
-    ...(options.includeCareHistory ? [participantId, participantId, participantId] : []),
+    ...(options.includeCareHistory ? [participantId] : []),
     ...occurrenceParams,
   ];
   const [timelineCountRows] = await pool.execute(
@@ -4150,35 +4394,9 @@ async function loadParticipantDetailHistory(participantId, options) {
      LIMIT ? OFFSET ?`,
     [...timelineParams, options.historyPageSize, (options.historyPage - 1) * options.historyPageSize],
   );
-  const safeDecrypt = (value) => {
-    if (!value) return '';
-    try {
-      return decrypt(value) || '';
-    } catch {
-      return '';
-    }
-  };
-  const sponsorHistory = sponsorshipRows.map((row) => ({
-    sponsorId: row.sponsor_id,
-    sponsor: safeDecrypt(row.sponsor_name_encrypted) || 'Sponsor name unavailable',
-    startedAt: row.started_at,
-    endedAt: row.ended_at,
-    status: row.ended_at ? 'ended' : 'active',
-  }));
-  const currentSponsorRow = sponsorshipRows.find((row) => !row.ended_at);
-  const currentSponsorName = safeDecrypt(participantRow.current_sponsor_name_encrypted)
-    || (currentSponsorRow ? safeDecrypt(currentSponsorRow.sponsor_name_encrypted) : '')
-    || participant.sponsorName
-    || '';
-  const currentSponsorStartedAt = participantRow.current_sponsor_started_at
-    || currentSponsorRow?.started_at
-    || null;
-  const participantStatusType = participant.participant_type === 'sponsored_child'
-    ? 'sponsorship'
-    : 'participant';
-  const initialStatus = statusRows.find((row) => row.status_type === participantStatusType)?.previous_status
-    || (participantStatusType === 'sponsorship'
-      ? participant.sponsorship_lifecycle
+  const initialStatus = statusRows[0]?.previous_status
+    || (participant.participant_type === 'sponsored_child'
+      ? participant.participation_status
       : participant.status)
     || 'unknown';
   const attendanceRate = totalEvents ? Math.round((totalAttended / totalEvents) * 1000) / 10 : 0;
@@ -4188,8 +4406,8 @@ async function loadParticipantDetailHistory(participantId, options) {
       participantCode: participant.participant_code || '',
       name: participant.fullName || 'Unnamed participant',
       participantType: participant.participantType,
-      status: participantStatusType === 'sponsorship'
-        ? participant.sponsorship_lifecycle || 'active'
+      status: participant.participant_type === 'sponsored_child'
+        ? participant.participation_status || 'ACTIVE'
         : participant.status || 'unknown',
       age: Number.isFinite(participant.age) ? participant.age : null,
       dateOfBirth: participant.dateOfBirth || null,
@@ -4206,9 +4424,6 @@ async function loadParticipantDetailHistory(participantId, options) {
       guardianName: participant.emergencyContactName || '',
       emergencyContactPhone: participant.emergencyContactPhone || '',
       medicalConditions: participant.medicalConditions || '',
-      currentSponsor: currentSponsorName
-        ? { name: currentSponsorName, startedAt: currentSponsorStartedAt }
-        : null,
     },
     summary: {
       totalEvents,
@@ -4216,7 +4431,6 @@ async function loadParticipantDetailHistory(participantId, options) {
       totalAbsences: Math.max(0, totalEvents - totalAttended),
       attendanceRate,
       registrationDate: participant.created_at || null,
-      currentSponsorStartedAt,
     },
     attendanceByYear,
     attendanceByMonth,
@@ -4233,7 +4447,6 @@ async function loadParticipantDetailHistory(participantId, options) {
       pageSize: options.pageSize,
       total: Number(attendanceCountRows[0]?.total) || 0,
     },
-    sponsorship: sponsorHistory,
     statusHistory: statusRows.map((row) => ({
       statusType: row.status_type,
       previousStatus: row.previous_status,
@@ -4245,9 +4458,7 @@ async function loadParticipantDetailHistory(participantId, options) {
         eventAt: row.event_at,
         type: row.event_type,
         title: row.title,
-        description: row.event_type === 'sponsorship'
-          ? safeDecrypt(row.description) || 'Sponsor name unavailable'
-          : row.description || '',
+        description: row.description || '',
       })),
       page: options.historyPage,
       pageSize: options.historyPageSize,
@@ -4429,7 +4640,7 @@ app.get('/api/analytics/sponsored-children', authenticate, checkPermission('anal
     res.json({ records: await computeSponsoredChildren({
       educationLevel: String(req.query.educationLevel || '').trim(),
       gradeLevel: String(req.query.gradeLevel || '').trim(),
-      sponsorshipStatus: String(req.query.sponsorshipStatus || '').trim(),
+      participationStatus: String(req.query.participationStatus || '').trim(),
       riskLevel: normalizeRiskFilter(req.query.riskLevel),
     }) });
   } catch (error) { next(error); }

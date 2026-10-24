@@ -47,8 +47,8 @@ const STAFF_PERMISSION_OPTIONS = [
   { key: "analytics:view", label: "Analytics", description: "View and refresh participant analytics." },
   { key: "reports:view", label: "Reports", description: "View and export attendance reports and sponsored-child monitoring data when authorized." },
   { key: "portal:view", label: "Participant QR portal", description: "Look up participant details using a QR code and passcode." },
-  { key: "sponsorship:view", label: "View sponsored care", description: "View allowance balance transactions, disbursements, and letter threads." },
-  { key: "sponsorship:manage", label: "Manage sponsored care", description: "Add or deduct allowance balances, record disbursements, record care updates, and reply to letters." },
+  { key: "sponsorship:view", label: "View sponsored care", description: "View sponsored-child participation and attendance history." },
+  { key: "sponsorship:manage", label: "Manage sponsored care", description: "Grant second chances and record sponsorship removals after attendance review." },
 ];
 const DEFAULT_STAFF_PERMISSION_KEYS = STAFF_PERMISSION_OPTIONS
   .map(({ key }) => key)
@@ -105,19 +105,19 @@ const canAccessPage = (page, user) => {
   if (PAGE_ACCESS[page]) return PAGE_ACCESS[page].includes(role);
   return canAccessPermission(PAGE_PERMISSIONS[page], user);
 };
-const SPONSOR_LIFECYCLE = [
-  { value: "active", label: "Active", description: "Sponsorship is active." },
-  { value: "withdrawn", label: "Withdrawn", description: "The child or guardian voluntarily left the program." },
-  { value: "deceased", label: "Deceased", description: "The child passed away." },
-  { value: "completed", label: "Sponsorship Completed", description: "The child has officially completed the sponsorship program." },
+const PARTICIPATION_STATUSES = [
+  { value: "ACTIVE", label: "Active" },
+  { value: "WARNING", label: "Warning" },
+  { value: "GROUNDS_FOR_DEPARTURE", label: "Grounds for Departure" },
+  { value: "SECOND_CHANCE", label: "Second Chance" },
+  { value: "REMOVED_FROM_SPONSORSHIP", label: "Removed from Sponsorship" },
 ];
-const normalizeSponsorLifecycle = (value) => {
-  if (value === "graduated") return "completed";
-  if (value === "new" || value === "on_hold" || !value) return "active";
-  return value;
+const normalizeParticipationStatus = (value) => {
+  const status = String(value || "ACTIVE").toUpperCase().replaceAll(" ", "_");
+  return PARTICIPATION_STATUSES.some((item) => item.value === status) ? status : "ACTIVE";
 };
-const sponsorLifecycleLabel = (value) =>
-  SPONSOR_LIFECYCLE.find((status) => status.value === normalizeSponsorLifecycle(value))?.label || "Active";
+const participationStatusLabel = (value) =>
+  PARTICIPATION_STATUSES.find((status) => status.value === normalizeParticipationStatus(value))?.label || "Active";
 const EDUCATION_LEVELS = [
   "Elementary",
   "Junior High School",
@@ -1350,8 +1350,9 @@ function formatParticipantHistoryDate(value, options = { year: "numeric", month:
 }
 function participantHistoryStatusLabel(value) {
   if (!value) return "Unknown";
-  if (["active", "withdrawn", "deceased", "completed", "graduated", "new", "on_hold"].includes(value)) {
-    return sponsorLifecycleLabel(value);
+  const normalized = String(value).toUpperCase().replaceAll(" ", "_");
+  if (PARTICIPATION_STATUSES.some((status) => status.value === normalized)) {
+    return participationStatusLabel(normalized);
   }
   return String(value).replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
@@ -1482,10 +1483,8 @@ function ParticipantHistoryPage({ participantId, onBack }) {
       </section>
     );
   }
-  const currentSponsor = participant.currentSponsor;
-  const currentSponsorDuration = currentSponsor?.startedAt
-    ? formatParticipantHistoryDate(currentSponsor.startedAt)
-    : "Not recorded";
+  const isSponsoredChild = participant.participantType === "sponsored_child";
+  const participation = data?.participation;
   return (
     <section className="participant-history-page">
       <button type="button" className="participant-history-back" onClick={onBack}>← Back to Participants</button>
@@ -1498,7 +1497,6 @@ function ParticipantHistoryPage({ participantId, onBack }) {
             <span className="participant-history-status">{participantHistoryStatusLabel(participant.status)}</span>
             <span>{Number.isFinite(participant.age) ? `${participant.age} years old` : "Age not recorded"}</span>
           </div>
-          <p>Current Sponsor: {currentSponsor?.name || "No current sponsor"}</p>
         </div>
       </header>
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
@@ -1506,10 +1504,9 @@ function ParticipantHistoryPage({ participantId, onBack }) {
       <div className="participant-history-summary">
         {[
           ["Registration Date", formatParticipantHistoryDate(summary.registrationDate)],
-          ["Total Events Attended", formatCount(summary.totalAttended)],
-          ["Attendance Rate", `${summary.attendanceRate || 0}%`],
-          ["Current Sponsor", currentSponsor?.name || "None"],
-          ["Sponsored Since", currentSponsorDuration],
+          ["Activities Attended", formatCount(participation?.lifetime.attended ?? summary.totalAttended)],
+          ["Attendance Rate", `${participation?.lifetime.attendanceRate ?? summary.attendanceRate ?? 0}%`],
+          ["Total Absences", formatCount(participation?.lifetime.absent ?? summary.totalAbsences)],
         ].map(([label, value]) => (
           <article className="participant-history-summary-card" key={label}>
             <small>{label}</small>
@@ -1521,7 +1518,7 @@ function ParticipantHistoryPage({ participantId, onBack }) {
         {[
           ["overview", "Overview"],
           ["attendance", "Attendance"],
-          ["sponsorship", "Sponsorship"],
+          ...(isSponsoredChild ? [["sponsorship", "Participation"]] : []),
           ["history", "History"],
         ].map(([value, label]) => (
           <button
@@ -1554,20 +1551,12 @@ function ParticipantHistoryPage({ participantId, onBack }) {
             <article className="surface participant-history-section">
               <h2>Attendance summary</h2>
               <div className="participant-history-attendance-numbers">
-                <div><strong>{formatCount(summary.totalAttended)}</strong><span>Attended</span></div>
-                <div><strong>{formatCount(summary.totalAbsences)}</strong><span>Absent</span></div>
-                <div><strong>{formatCount(summary.totalEvents)}</strong><span>Total events</span></div>
-                <div><strong>{summary.attendanceRate || 0}%</strong><span>Attendance rate</span></div>
+                <div><strong>{formatCount(participation?.lifetime.attended ?? summary.totalAttended)}</strong><span>Attended</span></div>
+                <div><strong>{formatCount(participation?.lifetime.absent ?? summary.totalAbsences)}</strong><span>Absent</span></div>
+                <div><strong>{formatCount(participation?.lifetime.required ?? summary.totalEvents)}</strong><span>Required activities</span></div>
+                <div><strong>{participation?.lifetime.attendanceRate ?? summary.attendanceRate ?? 0}%</strong><span>Attendance rate</span></div>
               </div>
-              {currentSponsor ? (
-                <div className="participant-history-current-sponsor">
-                  <small>Current sponsor</small>
-                  <strong>{currentSponsor.name}</strong>
-                  <span>Sponsored since {currentSponsorDuration}</span>
-                </div>
-              ) : (
-                <p className="text-secondary mb-0">No current sponsor is assigned.</p>
-              )}
+              {isSponsoredChild && <p className="mb-0">Participation status: <strong>{participantHistoryStatusLabel(participant.status)}</strong></p>}
             </article>
           </div>
           <article className="surface participant-history-section">
@@ -1689,53 +1678,32 @@ function ParticipantHistoryPage({ participantId, onBack }) {
           </article>
         </div>
       )}
-      {tab === "sponsorship" && (
+      {tab === "sponsorship" && isSponsoredChild && participation && (
         <div className="participant-history-content">
           <article className="surface participant-history-section">
-            <h2>Current sponsor</h2>
-            {currentSponsor ? (
-              <dl className="participant-history-details">
-                <div><dt>Sponsor</dt><dd>{currentSponsor.name}</dd></div>
-                <div><dt>Start date</dt><dd>{currentSponsorDuration}</dd></div>
-                <div><dt>Current status</dt><dd>{participantHistoryStatusLabel(participant.status)}</dd></div>
-              </dl>
-            ) : <p className="text-secondary mb-0">No current sponsor is assigned.</p>}
+            <h2>Monthly participation</h2>
+            <div className="table-responsive">
+              <table className="table align-middle participant-history-table">
+                <thead><tr><th>Month</th><th>Required</th><th>Attended</th><th>Absent</th><th>Attendance</th><th>Status</th></tr></thead>
+                <tbody>{participation.months.map((month) => (
+                  <tr key={month.key}>
+                    <td>{new Date(`${month.key}-01T00:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" })}</td>
+                    <td>{month.required}</td><td>{month.attended}</td><td>{month.absent}</td><td>{month.attendanceRate}%</td>
+                    <td>{month.status === "ACTIVE" ? "Active" : "Warning"}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
           </article>
           <article className="surface participant-history-section">
-            <h2>Previous sponsors</h2>
-            {data?.sponsorship?.some((record) => record.status === "ended") ? (
-              <div className="table-responsive">
-                <table className="table align-middle participant-history-table">
-                  <thead><tr><th>Sponsor</th><th>Start date</th><th>End date</th><th>Status</th></tr></thead>
-                  <tbody>{data.sponsorship.filter((record) => record.status === "ended").map((record, index) => (
-                    <tr key={`${record.sponsorId}-${record.startedAt}-${index}`}>
-                      <td>{record.sponsor}</td>
-                      <td>{formatParticipantHistoryDate(record.startedAt)}</td>
-                      <td>{formatParticipantHistoryDate(record.endedAt)}</td>
-                      <td><span className="participant-history-record-status ended">Ended</span></td>
-                    </tr>
-                  ))}</tbody>
-                </table>
-              </div>
-            ) : <p className="text-secondary mb-0">{data?.sponsorship?.length ? "No previous sponsorship records." : "No sponsorship records found."}</p>}
-          </article>
-          <article className="surface participant-history-section">
-            <h2>All sponsorship assignments</h2>
-            {data?.sponsorship?.length ? (
-              <div className="table-responsive">
-                <table className="table align-middle participant-history-table">
-                  <thead><tr><th>Sponsor</th><th>Start date</th><th>End date</th><th>Status</th></tr></thead>
-                  <tbody>{data.sponsorship.map((record, index) => (
-                    <tr key={`${record.sponsorId}-${record.startedAt}-${index}`}>
-                      <td>{record.sponsor}</td>
-                      <td>{formatParticipantHistoryDate(record.startedAt)}</td>
-                      <td>{record.endedAt ? formatParticipantHistoryDate(record.endedAt) : "Present"}</td>
-                      <td><span className={`participant-history-record-status ${record.status}`}>{record.status === "active" ? "Active" : "Ended"}</span></td>
-                    </tr>
-                  ))}</tbody>
-                </table>
-              </div>
-            ) : <p className="text-secondary mb-0">No sponsorship records found.</p>}
+            <h2>Participation status history</h2>
+            {participation.history.length ? (
+              <ul className="participation-event-history">
+                {participation.history.map((entry) => (
+                  <li key={entry.id}><span className="attendance-check">✓</span><div><strong>{participantHistoryStatusLabel(entry.currentStatus)}</strong><small>{formatParticipantHistoryDate(entry.createdAt)} · {entry.administrator}{entry.reason ? ` · ${entry.reason}` : ""}</small></div></li>
+                ))}
+              </ul>
+            ) : <p className="text-secondary mb-0">No participation status changes recorded.</p>}
           </article>
         </div>
       )}
@@ -1770,13 +1738,13 @@ function ParticipantHistoryPage({ participantId, onBack }) {
 }
 function Participants({ canManage, user, onViewHistory }) {
   const canViewSponsorship = canAccessPermission("sponsorship:view", user);
-  const canManageSponsorship = canAccessPermission("sponsorship:manage", user);
   const [list, setList] = useState([]);
   const [selected, setSelected] = useState(null);
   const [form, setForm] = useState(null);
   const [editing, setEditing] = useState(false);
   const [query, setQuery] = useState("");
   const [sortBy, setSortBy] = useState("newest");
+  const [genderFilter, setGenderFilter] = useState("all");
   const [message, setMessage] = useState("");
   const [showRegistration, setShowRegistration] = useState(false);
   const [educationFilter, setEducationFilter] = useState("all");
@@ -1830,10 +1798,6 @@ function Participants({ canManage, user, onViewHistory }) {
       setForm({
         ...data.participant,
         participantType: data.participant.participant_type,
-        ...(canViewSponsorship ? {
-          lifecycle: normalizeSponsorLifecycle(data.participant.sponsorship_lifecycle),
-          monthlyAllowance: String(data.participant.monthly_allowance ?? 0),
-        } : {}),
         ...participantNameFields(data.participant),
         passcode: '',
       });
@@ -1874,10 +1838,8 @@ function Participants({ canManage, user, onViewHistory }) {
       delete changes.sponsorName;
       delete changes.sponsorContact;
       delete changes.sponsorshipType;
-      if (!canManageSponsorship) {
-        delete changes.lifecycle;
-        delete changes.monthlyAllowance;
-      }
+      delete changes.lifecycle;
+      delete changes.monthlyAllowance;
       const data = await apiCall(`/participants/${selected}`, {
         method: "PUT",
         body: JSON.stringify(changes),
@@ -1885,10 +1847,6 @@ function Participants({ canManage, user, onViewHistory }) {
       setForm({
         ...data.participant,
         participantType: data.participant.participant_type,
-        ...(canViewSponsorship ? {
-          lifecycle: normalizeSponsorLifecycle(data.participant.sponsorship_lifecycle),
-          monthlyAllowance: String(data.participant.monthly_allowance ?? 0),
-        } : {}),
         ...participantNameFields(data.participant),
       });
       setEditing(false);
@@ -1937,10 +1895,13 @@ function Participants({ canManage, user, onViewHistory }) {
   const visibleParticipants = educationFilter === "all"
     ? list
     : list.filter((item) => item.education_level === educationFilter);
-  const statusVisibleParticipants = childStatusFilter === "all"
+  const genderVisibleParticipants = genderFilter === "all"
     ? visibleParticipants
-    : visibleParticipants.filter((item) =>
-        normalizeSponsorLifecycle(item.sponsorship_lifecycle) === childStatusFilter);
+    : visibleParticipants.filter((item) => String(item.gender || "").toLowerCase() === genderFilter);
+  const statusVisibleParticipants = childStatusFilter === "all"
+    ? genderVisibleParticipants
+    : genderVisibleParticipants.filter((item) =>
+        normalizeParticipationStatus(item.participation_status) === childStatusFilter);
   const filtered = statusVisibleParticipants.filter((item) =>
     `${item.fullName || ""} ${item.participant_code || ""} ${item.participant_type || ""} ${item.gender || ""}`
       .toLocaleLowerCase()
@@ -1969,7 +1930,7 @@ function Participants({ canManage, user, onViewHistory }) {
       <Title
         e="PARTICIPANTS / RECORDS"
         t="Participant directory."
-        d="Explore participant records, review key details, and manage sponsored-child status."
+        d="Explore participant records, review activity history, and monitor sponsored-child participation."
       />
       {canManage && (
         <div className="participant-register-action">
@@ -1978,6 +1939,11 @@ function Participants({ canManage, user, onViewHistory }) {
           </button>
         </div>
       )}
+      <section className="participant-gender-summary" aria-label="Participant gender totals">
+        <article className="surface"><small>Total participants</small><strong>{list.length}</strong></article>
+        <article className="surface"><small>Male</small><strong>{list.filter((item) => String(item.gender || "").toLowerCase() === "male").length}</strong></article>
+        <article className="surface"><small>Female</small><strong>{list.filter((item) => String(item.gender || "").toLowerCase() === "female").length}</strong></article>
+      </section>
       <div className="row g-4">
         <div className="col-12">
           <div className="surface directory-panel participant-directory-panel">
@@ -2006,9 +1972,17 @@ function Participants({ canManage, user, onViewHistory }) {
                   ))}
                 </select>
               </div>
+              <div className="participant-filter-field">
+                <label className="form-label" htmlFor="participants-gender">Gender</label>
+                <select id="participants-gender" className="form-select" value={genderFilter} onChange={(event) => setGenderFilter(event.target.value)}>
+                  <option value="all">All</option>
+                  <option value="male">Male</option>
+                  <option value="female">Female</option>
+                </select>
+              </div>
               {canViewSponsorship && (
                 <div className="participant-filter-field">
-                  <label className="form-label" htmlFor="participants-child-status">Child status</label>
+                  <label className="form-label" htmlFor="participants-child-status">Participation status</label>
                   <select
                     id="participants-child-status"
                     className="form-select"
@@ -2016,7 +1990,7 @@ function Participants({ canManage, user, onViewHistory }) {
                     onChange={(event) => setChildStatusFilter(event.target.value)}
                   >
                     <option value="all">All statuses</option>
-                    {SPONSOR_LIFECYCLE.map(({ value, label }) => (
+                    {PARTICIPATION_STATUSES.map(({ value, label }) => (
                       <option key={value} value={value}>{label}</option>
                     ))}
                   </select>
@@ -2059,19 +2033,16 @@ function Participants({ canManage, user, onViewHistory }) {
                       : "Goer"}{" "}
                     · {item.gender || "Sex not set"}
                   </small>
-                  {item.participant_type === "goer" && (
-                    <small className="participant-allowance-summary">Registration status: {item.status || "active"}</small>
-                  )}
                   {canViewSponsorship && item.participant_type === "sponsored_child" && (
-                    <small className="participant-allowance-summary">
-                      Monthly: {formatCurrency(item.monthly_allowance)} · Available balance: {formatCurrency(item.available_allowance_balance)}
+                    <small className="participant-attendance-summary">
+                      Monthly: {item.monthly_participation?.attended || 0}/2 attended · {item.monthly_participation?.absent ?? 2} absent
                     </small>
                   )}
                 </span>
                 <span className="directory-row-end">
                   {canViewSponsorship && item.participant_type === "sponsored_child" && (
-                    <span className={`lifecycle-badge ${normalizeSponsorLifecycle(item.sponsorship_lifecycle)}`}>
-                      {sponsorLifecycleLabel(item.sponsorship_lifecycle)}
+                    <span className={`participation-status-badge ${String(item.participation_status || "ACTIVE").toLowerCase().replaceAll("_", "-")}`}>
+                      {participationStatusLabel(item.participation_status)}
                     </span>
                   )}
                   <span className="directory-arrow">→</span>
@@ -2102,7 +2073,7 @@ function Participants({ canManage, user, onViewHistory }) {
                   <h2 id="participant-profile-title">{form.fullName}</h2>
                   <p className="text-secondary mb-0">
                     {form.participantType === "sponsored_child"
-                      ? `Sponsored Child · ${sponsorLifecycleLabel(form.sponsorship_lifecycle)}`
+                      ? `Sponsored Child · ${participationStatusLabel(form.participation_status)}`
                       : `Goer · ${form.status}`}
                   </p>
                   <p className="text-secondary mt-2 mb-0">{form.participant_code} · <AgeValue dateOfBirth={form.dateOfBirth} /></p>
@@ -2145,9 +2116,9 @@ function Participants({ canManage, user, onViewHistory }) {
               {message && <div className="alert alert-info mt-3 mb-0" role="status">{message}</div>}
               {canViewSponsorship && form.participantType === "sponsored_child" && (
                 <div className="profile-grid mt-4">
-                  <div><small>Child status</small><strong>{sponsorLifecycleLabel(form.sponsorship_lifecycle)}</strong></div>
-                  <div><small>Monthly allowance</small><strong>{formatCurrency(form.monthly_allowance)}</strong></div>
-                  <div><small>Available sponsorship allowance balance</small><strong>{formatCurrency(form.available_allowance_balance)}</strong></div>
+                  <div><small>Participation status</small><strong>{participationStatusLabel(form.participation_status)}</strong></div>
+                  <div><small>Monthly activities attended</small><strong>{form.monthly_participation?.attended || 0} / 2</strong></div>
+                  <div><small>Monthly absences</small><strong>{form.monthly_participation?.absent ?? 2}</strong></div>
                 </div>
               )}
               {canViewPasscode && form.participantType === "sponsored_child" && (
@@ -2196,7 +2167,6 @@ function Participants({ canManage, user, onViewHistory }) {
                     ["Guardian Name", form.emergencyContactName],
                     ["Emergency phone", form.emergencyContactPhone],
                     ["Medical conditions", form.medicalConditions],
-                    ["Sponsor", form.sponsorName],
                   ].map(([label, value]) => (
                     <div key={label}>
                       <small>{label}</small>
@@ -2245,20 +2215,6 @@ function Participants({ canManage, user, onViewHistory }) {
                   value={form.gender}
                   onChange={update("gender")}
                 />
-                {canManageSponsorship && form.participantType === "sponsored_child" && (
-                  <>
-                    <div className="col-12 col-md-6">
-                      <label className="form-label" htmlFor="edit-child-lifecycle">Child status</label>
-                      <select id="edit-child-lifecycle" className="form-select" value={normalizeSponsorLifecycle(form.lifecycle)} onChange={update("lifecycle")}>
-                        {SPONSOR_LIFECYCLE.map(({ value, label }) => <option value={value} key={value}>{label}</option>)}
-                      </select>
-                      <small className="participant-status-description">
-                        {SPONSOR_LIFECYCLE.find(({ value }) => value === normalizeSponsorLifecycle(form.lifecycle))?.description}
-                      </small>
-                    </div>
-                    <Field label="Monthly allowance (PHP)" type="number" min="0" max="1000000" step="0.01" value={form.monthlyAllowance ?? "0"} onChange={update("monthlyAllowance")} />
-                  </>
-                )}
                 <Field
                   label="Address"
                   value={form.address || ""}
@@ -2734,105 +2690,11 @@ function PublicLookup({ onBack }) {
   );
 }
 function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
-  const [section, setSection] = useState("allowance");
-  const [threads, setThreads] = useState([]);
-  const [threadId, setThreadId] = useState(null);
-  const [subject, setSubject] = useState("");
-  const [message, setMessage] = useState("");
-  const [loadingLetters, setLoadingLetters] = useState(true);
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState("");
-  const [proof, setProof] = useState(null);
+  const [section, setSection] = useState("attendance");
   const [updates, setUpdates] = useState([]);
   const [loadingUpdates, setLoadingUpdates] = useState(false);
   const [updatesLoaded, setUpdatesLoaded] = useState(false);
-  const selectedThread = threads.find((thread) => Number(thread.id) === Number(threadId));
-
-  const loadThreads = useCallback(async () => {
-    const response = await fetch(`${api}/public/sponsor-letters/list`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ qrPayload, passcode }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "Could not load your letters.");
-    setThreads(data.threads || []);
-    setThreadId((current) => {
-      if (current && (data.threads || []).some((thread) => Number(thread.id) === Number(current))) return current;
-      return data.threads?.[0]?.id || null;
-    });
-  }, [qrPayload, passcode]);
-
-  useEffect(() => {
-    let active = true;
-    fetch(`${api}/public/sponsor-letters/list`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ qrPayload, passcode }),
-    })
-      .then(async (response) => {
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(data.error || "Could not load your letters.");
-        return data;
-      })
-      .then((data) => {
-        if (!active) return;
-        setThreads(data.threads || []);
-        setThreadId((current) => {
-          if (current && (data.threads || []).some((thread) => Number(thread.id) === Number(current))) return current;
-          return data.threads?.[0]?.id || null;
-        });
-      })
-      .catch((loadError) => { if (active) setError(loadError.message); })
-      .finally(() => { if (active) setLoadingLetters(false); });
-    return () => { active = false; };
-  }, [qrPayload, passcode]);
-
-  const sendLetter = async (event) => {
-    event.preventDefault();
-    setSending(true);
-    setError("");
-    try {
-      const response = await fetch(`${api}/public/sponsor-letters`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          qrPayload,
-          passcode,
-          ...(selectedThread && selectedThread.status !== "closed" ? { threadId: selectedThread.id } : { subject }),
-          message,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || "Could not send your letter.");
-      setSubject("");
-      setMessage("");
-      await loadThreads();
-      setThreadId(data.threadId);
-    } catch (sendError) {
-      setError(sendError.message);
-    } finally {
-      setSending(false);
-    }
-  };
-
-  const viewReceipt = async (record) => {
-    setError("");
-    setProof(null);
-    try {
-      const response = await fetch(`${api}/public/sponsor-receipt`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ qrPayload, passcode, disbursementId: record.id }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || "Could not load receipt proof.");
-      setProof({ ...data, name: `Receipt for ${record.disbursedOn}` });
-    } catch (proofError) {
-      setError(proofError.message);
-    }
-  };
-
+  const [error, setError] = useState("");
   const loadUpdates = async () => {
     if (updatesLoaded || loadingUpdates) return;
     setLoadingUpdates(true);
@@ -2844,167 +2706,77 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
         body: JSON.stringify({ qrPayload, passcode }),
       });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || "Could not load your child's updates.");
+      if (!response.ok) throw new Error(data.error || "Could not load your child's growth updates.");
       setUpdates(data.updates || []);
       setUpdatesLoaded(true);
-    } catch (loadError) {
-      setError(loadError.message);
+    } catch (requestError) {
+      setError(requestError.message);
     } finally {
       setLoadingUpdates(false);
     }
   };
+  const participation = child.participation;
+  const statusClass = String(participation?.status || "WARNING").toLowerCase().replaceAll("_", "-");
 
   return (
     <div className="guardian-sponsored-details">
-      <div className="guardian-portal-tabs" role="tablist" aria-label="Sponsored child information">
-        <button type="button" className={section === "allowance" ? "active" : ""} role="tab" aria-selected={section === "allowance"} onClick={() => setSection("allowance")}>Allowance &amp; gifts</button>
-        <button type="button" className={section === "updates" ? "active" : ""} role="tab" aria-selected={section === "updates"} onClick={() => { setSection("updates"); loadUpdates(); }}>Updates</button>
-        <button type="button" className={section === "letters" ? "active" : ""} role="tab" aria-selected={section === "letters"} onClick={() => setSection("letters")}>Letters {threads.length > 0 && <span>{threads.length}</span>}</button>
+      <div className="guardian-portal-tabs" role="tablist" aria-label="Child participation information">
+        <button type="button" className={section === "attendance" ? "active" : ""} role="tab" aria-selected={section === "attendance"} onClick={() => setSection("attendance")}>Monthly activities</button>
+        <button type="button" className={section === "updates" ? "active" : ""} role="tab" aria-selected={section === "updates"} onClick={() => { setSection("updates"); loadUpdates(); }}>Growth updates</button>
       </div>
       {error && <div className="alert alert-danger mt-3" role="alert">{error}</div>}
-      {section === "allowance" ? (
-        <section className="guardian-allowance-section">
-          <h3 className="public-attendance-title">Allowance and gifts</h3>
-          {child.disbursements?.length ? (
-            <div className="table-responsive">
-              <table className="table align-middle">
-                <thead><tr><th>Date</th><th>Amount</th><th>Proof</th></tr></thead>
-                <tbody>{child.disbursements.map((record) => (
-                  <tr key={record.id}>
-                    <td>{new Date(record.disbursedOn).toLocaleDateString()}</td>
-                    <td>{formatCurrency(record.amount)}</td>
-                    <td>{record.hasReceipt ? <button className="btn btn-sm btn-outline-primary" onClick={() => viewReceipt(record)}>View receipt</button> : "—"}</td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-          ) : <p className="text-secondary">No allowance or gift records are available yet.</p>}
-          {proof && (
-            <div className="guardian-receipt-preview">
-              <div className="guardian-receipt-heading"><strong>{proof.name}</strong><button type="button" className="btn-close" aria-label="Close receipt" onClick={() => setProof(null)} /></div>
-              {proof.mimeType.startsWith("image/") ? <img src={`data:${proof.mimeType};base64,${proof.data}`} alt="Receipt proof" /> : <a href={`data:${proof.mimeType};base64,${proof.data}`} target="_blank" rel="noreferrer">Open PDF receipt proof ↗</a>}
-            </div>
-          )}
-        </section>
-      ) : section === "updates" ? (
+      {section === "attendance" ? (
         <section className="guardian-updates-section">
-          <div className="guardian-updates-heading">
-            <div>
-              <h3>Growth &amp; activity</h3>
-              <p>Measurements, activities attended, and care notes recorded for {child.name}.</p>
-            </div>
+          <div className="participation-detail-status">
+            <span className={`participation-status-badge ${statusClass}`}>{PARTICIPATION_STATUS_LABELS[participation?.status] || participation?.status || "Warning"}</span>
+            <span>Two activities are expected each month.</span>
           </div>
-          {loadingUpdates ? (
-            <p role="status">Loading updates...</p>
-          ) : updates.length ? (
+          <div className="participation-number-grid">
+            {[["Required", participation?.monthly.required ?? 2], ["Attended", participation?.monthly.attended ?? 0], ["Absent", participation?.monthly.absent ?? 2], ["Attendance", `${participation?.monthly.attendanceRate ?? 0}%`]].map(([label, value]) => (
+              <div key={label}><small>{label}</small><strong>{value}</strong></div>
+            ))}
+          </div>
+          <h3 className="public-attendance-title">Monthly attendance history</h3>
+          <div className="table-responsive">
+            <table className="table align-middle">
+              <thead><tr><th>Month</th><th>Required</th><th>Attended</th><th>Absent</th><th>Status</th></tr></thead>
+              <tbody>{(participation?.months || []).map((month) => (
+                <tr key={month.key}>
+                  <td>{new Date(`${month.key}-01T00:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" })}</td>
+                  <td>{month.required}</td><td>{month.attended}</td><td>{month.absent}</td><td>{month.status === "ACTIVE" ? "Active" : "Warning"}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+          <ul className="participation-event-history">
+            {(participation?.months || []).flatMap((month) => month.events).sort((first, second) => second.date.localeCompare(first.date)).slice(0, 30).map((activity, index) => (
+              <li key={`${activity.name}-${activity.date}-${index}`}>
+                <span className={activity.attended ? "attendance-check" : "attendance-missed"}>{activity.attended ? "✓" : "×"}</span>
+                <div><strong>{activity.attended ? "Attended" : "Missed"} {activity.name}</strong><small>{formatParticipantHistoryDate(activity.date)}</small></div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : (
+        <section className="guardian-updates-section">
+          <h3>Growth &amp; activity</h3>
+          <p>Growth measurements and care notes shared for {child.name}.</p>
+          {loadingUpdates ? <p role="status">Loading updates...</p> : updates.length ? (
             <div className="guardian-update-list">
               {updates.map((update) => (
                 <article className={`guardian-update-card update-${update.type}`} key={update.id}>
-                  <div className="guardian-update-icon" aria-hidden="true">
-                    {update.type === "growth" ? "✦" : update.type === "activity" ? "▣" : "✎"}
-                  </div>
                   <div className="guardian-update-body">
                     <div className="guardian-update-top">
-                      <strong>{update.type === "growth" ? "Growth measurement" : update.type === "activity" ? "Activity attended" : "Care note"}</strong>
+                      <strong>{update.type === "growth" ? "Growth measurement" : update.type === "activity" ? "Activity update" : "Care note"}</strong>
                       <time>{new Date(`${update.recordedOn}T00:00:00`).toLocaleDateString()}</time>
                     </div>
-                    {update.type === "growth" && (update.heightCm || update.weightKg) && (
-                      <div className="guardian-update-metrics">
-                        {update.heightCm && <span className="metric-height">{update.heightCm} cm</span>}
-                        {update.weightKg && <span className="metric-weight">{update.weightKg} kg</span>}
-                      </div>
-                    )}
-                    {update.type === "activity" && update.activity && (
-                      <p className="guardian-update-activity">{update.activity}</p>
-                    )}
-                    {update.note && <p className="guardian-update-note">{update.note}</p>}
+                    {update.type === "growth" && (update.heightCm || update.weightKg) && <p>{update.heightCm ? `${update.heightCm} cm` : ""}{update.heightCm && update.weightKg ? " · " : ""}{update.weightKg ? `${update.weightKg} kg` : ""}</p>}
+                    {update.note && <p>{update.note}</p>}
                   </div>
                 </article>
               ))}
             </div>
-          ) : (
-            <p className="text-secondary">No growth, activity, or care updates recorded yet.</p>
-          )}
-        </section>
-      ) : (
-        <section className="guardian-letters-section">
-          <div className="guardian-letters-heading">
-            <div>
-              <h3>Letters</h3>
-              <p>View past messages with the church, or write a new letter.</p>
-            </div>
-            <button type="button" className="guardian-new-letter-btn" onClick={() => setThreadId(null)}>
-              <span aria-hidden="true">✉</span> New letter
-            </button>
-          </div>
-          <div className="guardian-letters-body">
-            <div className="guardian-letter-list">
-              {loadingLetters ? <p role="status">Loading your letters...</p> : threads.map((thread) => (
-                <button type="button" className={`sponsorship-thread-row ${Number(threadId) === Number(thread.id) ? "selected" : ""}`} key={thread.id} onClick={() => setThreadId(thread.id)}>
-                  <strong>{thread.subject}</strong><span>{thread.status}</span><small>{new Date(thread.updated_at).toLocaleDateString()}{thread.messages?.length ? ` · ${thread.messages.length} message${thread.messages.length === 1 ? "" : "s"}` : ""}</small>
-                </button>
-              ))}
-              {!loadingLetters && !threads.length && <p className="text-secondary">No letters yet. Send a message to get started.</p>}
-            </div>
-            {selectedThread ? (
-              <div className="guardian-thread-conversation">
-                <h3>{selectedThread.subject}</h3>
-                <div className="sponsorship-messages">{selectedThread.messages.map((entry) => (
-                  <div className={`sponsorship-message ${entry.sender_type}`} key={entry.id}>
-                    <span>{entry.sender_type === "staff" ? "Church staff" : "You"} · {new Date(entry.created_at).toLocaleString()}</span>
-                    <p>{entry.message}</p>
-                  </div>
-                ))}</div>
-              </div>
-            ) : (
-              !loadingLetters && threads.length > 0 && (
-                <div className="guardian-no-selection">Select a letter on the left to view past messages, or tap <strong>New letter</strong> to write one.</div>
-              )
-            )}
-          </div>
-          <form className="guardian-letter-form" onSubmit={sendLetter}>
-            <div className="sponsor-letter-paper">
-              <header className="sponsor-letter-paper-header">
-                <div className="sponsor-letter-recipient">
-                  <strong>{child.name}</strong>
-                  <span>Participant ID: {child.participantCode}</span>
-                </div>
-                <div className="sponsor-letter-date">
-                  <span>Date</span>
-                  <time>{new Date().toLocaleDateString()}</time>
-                </div>
-              </header>
-              <div className="sponsor-letter-paper-title">
-                <span className={`guardian-letter-mode ${selectedThread && selectedThread.status !== "closed" ? "mode-reply" : "mode-new"}`}>
-                  {selectedThread && selectedThread.status !== "closed" ? "Reply to thread" : "New letter for your child"}
-                </span>
-                <h3>Mensahe para sa aking sponsor</h3>
-                <p>(A message to my sponsor)</p>
-              </div>
-              {(!selectedThread || selectedThread.status === "closed") && (
-                <div className="sponsor-letter-subject">
-                  <label className="form-label" htmlFor="guardian-letter-subject">Paksa / Subject</label>
-                  <input id="guardian-letter-subject" className="form-control" maxLength={160} required value={subject} onChange={(event) => setSubject(event.target.value)} placeholder="What would you like to share?" />
-                </div>
-              )}
-              <div className="sponsor-letter-writing">
-                <label className="form-label" htmlFor="guardian-letter-message">
-                  {selectedThread && selectedThread.status !== "closed" ? "Reply / Sagot" : "Mensahe / Message"}
-                </label>
-                <textarea
-                  id="guardian-letter-message"
-                  className="form-control sponsor-letter-message"
-                  rows="12"
-                  maxLength={5000}
-                  required
-                  value={message}
-                  onChange={(event) => setMessage(event.target.value)}
-                  placeholder="Isulat ang iyong mensahe dito…"
-                />
-              </div>
-            </div>
-            <button className="btn btn-dark sponsor-letter-send" disabled={sending}>{sending ? "Sending…" : selectedThread && selectedThread.status !== "closed" ? "Send reply" : "Send letter"}</button>
-          </form>
+          ) : <p className="text-secondary">No growth updates recorded yet.</p>}
         </section>
       )}
     </div>
@@ -3741,7 +3513,7 @@ function Analytics({ user }) {
   const [riskRows, setRiskRows] = useState([]);
   const [riskLevel, setRiskLevel] = useState("all");
   const [riskLoading, setRiskLoading] = useState(true);
-  const [sponsoredFilters, setSponsoredFilters] = useState({ educationLevel: "", gradeLevel: "", sponsorshipStatus: "", riskLevel: "" });
+  const [sponsoredFilters, setSponsoredFilters] = useState({ educationLevel: "", gradeLevel: "", participationStatus: "", riskLevel: "" });
   const [sponsoredRows, setSponsoredRows] = useState([]);
   const [sponsoredLoading, setSponsoredLoading] = useState(true);
   const [history, setHistory] = useState(null);
@@ -3797,7 +3569,7 @@ function Analytics({ user }) {
     setSponsoredLoading(true);
     Promise.all([
       apiCall("/risk-scores/validation"),
-      ...(canViewSponsorship ? [apiCall(`/analytics/sponsored-children?educationLevel=${encodeURIComponent(sponsoredFilters.educationLevel)}&gradeLevel=${encodeURIComponent(sponsoredFilters.gradeLevel)}&sponsorshipStatus=${encodeURIComponent(sponsoredFilters.sponsorshipStatus)}&riskLevel=${sponsoredFilters.riskLevel}`)] : []),
+      ...(canViewSponsorship ? [apiCall(`/analytics/sponsored-children?educationLevel=${encodeURIComponent(sponsoredFilters.educationLevel)}&gradeLevel=${encodeURIComponent(sponsoredFilters.gradeLevel)}&participationStatus=${encodeURIComponent(sponsoredFilters.participationStatus)}&riskLevel=${sponsoredFilters.riskLevel}`)] : []),
     ])
       .then(([validationReport, sponsored]) => {
         if (!mounted) return;
@@ -3807,7 +3579,7 @@ function Analytics({ user }) {
       .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
       .finally(() => { if (mounted) setSponsoredLoading(false); });
     return () => { mounted = false; };
-  }, [canViewSponsorship, sponsoredFilters.educationLevel, sponsoredFilters.gradeLevel, sponsoredFilters.sponsorshipStatus, sponsoredFilters.riskLevel]);
+  }, [canViewSponsorship, sponsoredFilters.educationLevel, sponsoredFilters.gradeLevel, sponsoredFilters.participationStatus, sponsoredFilters.riskLevel]);
 
   useEffect(() => {
     if (!history && !historyLoading) return undefined;
@@ -3983,7 +3755,7 @@ function Analytics({ user }) {
   const educationOptions = [...new Set(sponsoredRows.map((row) => row.educationLevel).filter(Boolean))].sort();
   const gradeOptions = [...new Set(sponsoredRows.map((row) => row.gradeLevel).filter(Boolean))].sort();
   const riskFilterOptions = [["all", "All levels"], ["high", "High"], ["medium", "Medium"], ["low", "Low"]];
-  const sponsorshipStatusOptions = [["all", "Any status"], ["active", "Active"], ["withdrawn", "Withdrawn"], ["completed", "Completed"], ["graduated", "Graduated"], ["deceased", "Deceased"], ["new", "New"]];
+  const participationStatusOptions = [["", "Any status"], ...PARTICIPATION_STATUSES.map(({ value, label }) => [value, label])];
   return (
     <>
       <Title
@@ -4213,7 +3985,7 @@ function Analytics({ user }) {
           <div className="analytics-section-heading">
             <div>
               <h2>Sponsored-child analytics</h2>
-              <p className="analytics-section-sub">Participation trends and attendance summaries for each sponsored child, with education-year, grade-level, and sponsorship filters.</p>
+              <p className="analytics-section-sub">Monthly activity compliance and yearly absence summaries for each sponsored child.</p>
             </div>
             <div className="analytics-filters">
               <div className="analytics-filter-field">
@@ -4231,9 +4003,9 @@ function Analytics({ user }) {
                 </select>
               </div>
               <div className="analytics-filter-field">
-                <label className="form-label" htmlFor="sponsored-status">Sponsorship status</label>
-                <select id="sponsored-status" className="form-select" value={sponsoredFilters.sponsorshipStatus} onChange={(event) => setSponsoredFilters({ ...sponsoredFilters, sponsorshipStatus: event.target.value })}>
-                  {sponsorshipStatusOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                <label className="form-label" htmlFor="sponsored-status">Participation status</label>
+                <select id="sponsored-status" className="form-select" value={sponsoredFilters.participationStatus} onChange={(event) => setSponsoredFilters({ ...sponsoredFilters, participationStatus: event.target.value })}>
+                  {participationStatusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}
                 </select>
               </div>
               <div className="analytics-filter-field">
@@ -4256,9 +4028,11 @@ function Analytics({ user }) {
                     <th>Child</th>
                     <th>Education</th>
                     <th>Grade</th>
-                    <th>Sponsorship</th>
-                    <th>Check-ins</th>
-                    <th>Last attended</th>
+                    <th>Monthly attendance</th>
+                    <th>Attended</th>
+                    <th>Absent</th>
+                    <th>Yearly absences</th>
+                    <th>Current status</th>
                     <th>Risk</th>
                     <th aria-label="Actions" />
                   </tr>
@@ -4272,9 +4046,11 @@ function Analytics({ user }) {
                       </td>
                       <td>{row.educationLevel || "—"}</td>
                       <td>{row.gradeLevel || "—"}</td>
-                      <td><span className="status-pill">{row.sponsorshipLifecycle}</span></td>
-                      <td>{formatCount(row.checkInCount)}</td>
-                      <td>{row.lastCheckIn ? new Date(row.lastCheckIn).toLocaleDateString() : "Never"}</td>
+                      <td>{row.monthly.key}</td>
+                      <td>{row.monthly.attended} / {row.monthly.required}</td>
+                      <td>{row.monthly.absent}</td>
+                      <td>{row.lifetime.absent}</td>
+                      <td><span className="status-pill">{PARTICIPATION_STATUS_LABELS[row.participationStatus] || row.participationStatus}</span></td>
                       <td>{row.riskScore === null ? <span className="insufficient-badge">Not scored</span> : <Badge level={row.riskLevel} />}</td>
                       <td>
                         <button className="btn btn-sm btn-outline-dark" type="button" onClick={() => openHistory(row.id)}>History</button>
@@ -4421,104 +4197,104 @@ function Analytics({ user }) {
   );
 }
 function Reports({ user }) {
-  const canExportChildUpdates = canAccessPermission("sponsorship:view", user);
+  const canViewParticipation = canAccessPermission("sponsorship:view", user);
   const [range, setRange] = useState("weekly");
   const [children, setChildren] = useState([]);
-  const [selectedChildId, setSelectedChildId] = useState("");
-  const [childExportError, setChildExportError] = useState("");
-  const [childExportBusy, setChildExportBusy] = useState(false);
+  const [loadingParticipation, setLoadingParticipation] = useState(false);
+  const [participationError, setParticipationError] = useState("");
+
   useEffect(() => {
-    if (!canExportChildUpdates) return;
+    if (!canViewParticipation) return;
+    setLoadingParticipation(true);
     apiCall("/sponsorship/children")
       .then(setChildren)
-      .catch((loadError) => setChildExportError(loadError.message));
-  }, [canExportChildUpdates]);
-  const download = async (format) => {
-    let r = await fetch(
+      .catch((loadError) => setParticipationError(loadError.message))
+      .finally(() => setLoadingParticipation(false));
+  }, [canViewParticipation]);
+
+  const downloadAttendance = async (format) => {
+    const token = localStorage.getItem("token");
+    const response = await fetch(
       `${api}/reports/attendance?range=${range}&format=${format}`,
-      { headers: { Authorization: `Bearer ${localStorage.token}` } },
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
     );
-    let u = URL.createObjectURL(await r.blob());
-    let a = document.createElement("a");
-    a.href = u;
-    a.download = `attendance-${range}.${format}`;
-    a.click();
-    URL.revokeObjectURL(u);
-  };
-  const downloadChildUpdates = async () => {
-    setChildExportError("");
-    setChildExportBusy(true);
-    try {
-      const response = await fetch(
-        `${api}/reports/sponsored-child-updates?participantId=${encodeURIComponent(selectedChildId)}`,
-        { headers: { Authorization: `Bearer ${localStorage.token}` } },
-      );
-      if (!response.ok) {
-        const result = await response.json().catch(() => ({}));
-        throw new Error(result.error || "Could not export sponsored-child updates.");
-      }
-      const url = URL.createObjectURL(await response.blob());
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `sponsored-child-updates-${selectedChildId}.csv`;
-      anchor.click();
-      URL.revokeObjectURL(url);
-    } catch (exportError) {
-      setChildExportError(exportError.message);
-    } finally {
-      setChildExportBusy(false);
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || "Could not export attendance.");
     }
+    const url = URL.createObjectURL(await response.blob());
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `attendance-${range}.${format}`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   };
+  const downloadParticipation = () => {
+    const columns = [
+      "Participant", "Participant ID", "Gender", "Current Status",
+      "Month", "Required Activities", "Attended", "Absent", "Attendance Rate",
+      "Year", "Yearly Required", "Yearly Attended", "Yearly Absences", "Yearly Attendance Rate",
+    ];
+    const escapeCsv = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+    const data = children.map((child) => [
+      child.name, child.participantCode, child.gender,
+      PARTICIPATION_STATUS_LABELS[child.status] || child.status,
+      child.monthly.key, child.monthly.required, child.monthly.attended,
+      child.monthly.absent, `${child.monthly.attendanceRate}%`,
+      child.currentYear.year, child.currentYear.required, child.currentYear.attended,
+      child.currentYear.absent, `${child.currentYear.attendanceRate}%`,
+    ]);
+    const csv = [columns, ...data].map((row) => row.map(escapeCsv).join(",")).join("\r\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "sponsored-child-participation.csv";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <>
       <Title
         e="REPORTING"
         t="Turn activity into clarity."
-        d="Export attendance records and, with sponsored-care access, child growth and activity history."
+        d="Export attendance records and participation-based monthly and yearly sponsored-child reports."
       />
       <div className="surface report-panel">
         <label className="form-label">Reporting range</label>
-        <select
-          className="form-select mb-3"
-          value={range}
-          onChange={(e) => setRange(e.target.value)}
-        >
+        <select className="form-select mb-3" value={range} onChange={(event) => setRange(event.target.value)}>
           <option value="weekly">Weekly</option>
           <option value="monthly">Monthly</option>
         </select>
-        <button className="btn btn-dark me-2" onClick={() => download("pdf")}>
-          Download PDF ↓
-        </button>
-        <button
-          className="btn btn-outline-dark"
-          onClick={() => download("csv")}
-        >
-          Download CSV ↓
-        </button>
+        <button className="btn btn-dark me-2" onClick={() => downloadAttendance("pdf")}>Download PDF ↓</button>
+        <button className="btn btn-outline-dark" onClick={() => downloadAttendance("csv")}>Download CSV ↓</button>
       </div>
-      {canExportChildUpdates && (
+      {canViewParticipation && (
         <div className="surface report-panel mt-4">
-          <h2>Sponsored-child monitoring</h2>
-          <p>Export dated growth, activity, and care-note records for one child.</p>
-          {childExportError && <div className="alert alert-danger" role="alert">{childExportError}</div>}
-          <label className="form-label" htmlFor="child-updates-report">Sponsored child</label>
-          <select
-            id="child-updates-report"
-            className="form-select mb-3"
-            value={selectedChildId}
-            onChange={(event) => setSelectedChildId(event.target.value)}
-          >
-            <option value="">Select a child</option>
-            {children.map((child) => (
-              <option key={child.id} value={child.id}>{child.name} ({child.participantCode})</option>
-            ))}
-          </select>
-          <button
-            className="btn btn-outline-dark"
-            disabled={!selectedChildId || childExportBusy}
-            onClick={downloadChildUpdates}
-          >
-            {childExportBusy ? "Preparing CSV…" : "Download child updates CSV ↓"}
+          <h2>Sponsored-child participation</h2>
+          <p>Monthly compliance, yearly attendance, absence counts, and current status.</p>
+          {participationError && <div className="alert alert-danger" role="alert">{participationError}</div>}
+          <div className="participant-gender-summary">
+            <article className="surface"><small>Children monitored</small><strong>{loadingParticipation ? "—" : children.length}</strong></article>
+            <article className="surface"><small>Male</small><strong>{children.filter((child) => child.gender.toLowerCase() === "male").length}</strong></article>
+            <article className="surface"><small>Female</small><strong>{children.filter((child) => child.gender.toLowerCase() === "female").length}</strong></article>
+          </div>
+          <div className="table-responsive mt-3">
+            <table className="table align-middle">
+              <thead><tr><th>Child</th><th>Month</th><th>Required</th><th>Attended</th><th>Absent</th><th>Attendance</th><th>Yearly absences</th><th>Status</th></tr></thead>
+              <tbody>{children.map((child) => (
+                <tr key={child.id}>
+                  <td>{child.name}<small className="d-block text-secondary">{child.participantCode}</small></td>
+                  <td>{child.monthly.key}</td><td>{child.monthly.required}</td><td>{child.monthly.attended}</td>
+                  <td>{child.monthly.absent}</td><td>{child.monthly.attendanceRate}%</td>
+                  <td>{child.currentYear.absent}</td><td>{PARTICIPATION_STATUS_LABELS[child.status] || child.status}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+            {!children.length && !loadingParticipation && <p className="text-secondary mb-0">No sponsored children found.</p>}
+          </div>
+          <button className="btn btn-outline-dark" disabled={!children.length || loadingParticipation} onClick={downloadParticipation}>
+            Download participation CSV ↓
           </button>
         </div>
       )}
@@ -4594,7 +4370,10 @@ function AuditHistory() {
                 const details = entry.details && typeof entry.details === "object"
                   ? entry.details
                   : {};
-                const detailText = details.changedFields?.join(", ") || details.eventName || "—";
+                const detailText = details.changedFields?.join(", ")
+                  || details.eventName
+                  || (details.reason ? `${details.reason}${details.absenceCount === undefined ? "" : ` · ${details.absenceCount} absences`}` : "")
+                  || (details.absenceCount === undefined ? "—" : `${details.absenceCount} absences`);
                 return (
                   <tr key={entry.id}>
                     <td>{new Date(entry.created_at).toLocaleString()}</td>
@@ -4631,1178 +4410,413 @@ const formatCurrency = (value) => new Intl.NumberFormat(undefined, {
   currency: "PHP",
 }).format(Number(value || 0));
 
-function SponsoredCare({ user }) {
-  const isGoer = String(user?.role || "").toLowerCase() === GOER_ROLE;
+const PARTICIPATION_STATUS_LABELS = {
+  ACTIVE: "Active",
+  WARNING: "Warning",
+  GROUNDS_FOR_DEPARTURE: "Grounds for Departure",
+  SECOND_CHANCE: "Second Chance",
+  REMOVED_FROM_SPONSORSHIP: "Removed from Sponsorship",
+};
+
+function SponsoredCare({ user, onViewHistory }) {
   const canManage = canAccessPermission("sponsorship:manage", user);
-  const canRecordCare = canManage ||
-    (isGoer && user?.permissions?.includes("goer-care:record"));
-  const canViewUpdates = !isGoer && canAccessPermission("sponsorship:view", user);
+  const isGoer = String(user?.role || "").toLowerCase() === GOER_ROLE;
   const [children, setChildren] = useState([]);
-  const [letters, setLetters] = useState([]);
-  const [sponsors, setSponsors] = useState([]);
-  const [showCreateSponsor, setShowCreateSponsor] = useState(false);
-  const [selectedSponsor, setSelectedSponsor] = useState(null);
-  const [unassigningSponsor, setUnassigningSponsor] = useState(false);
-  const [sponsorModalMessage, setSponsorModalMessage] = useState("");
-  const [sponsorModalError, setSponsorModalError] = useState("");
-  const [sponsorForm, setSponsorForm] = useState({ familyName: "", sex: "", sponsorType: "" });
-  const [sponsorFormError, setSponsorFormError] = useState("");
-  const [sponsorFieldErrors, setSponsorFieldErrors] = useState({});
-  const [creatingSponsor, setCreatingSponsor] = useState(false);
-  const [selectedChildId, setSelectedChildId] = useState(null);
-  const disbursementRequestRef = useRef(null);
-  const disbursementSubmissionRef = useRef(false);
-  const [savingDisbursement, setSavingDisbursement] = useState(false);
-  const [disbursements, setDisbursements] = useState([]);
-  const [allowanceTransactions, setAllowanceTransactions] = useState([]);
-  const [allowanceAmount, setAllowanceAmount] = useState("");
-  const [allowanceAction, setAllowanceAction] = useState("add");
-  const [childUpdates, setChildUpdates] = useState([]);
-  const [staffProof, setStaffProof] = useState(null);
-  const [query, setQuery] = useState("");
-  const [gift, setGift] = useState({ careType: "allowance", amount: "", disbursedOn: new Date().toISOString().slice(0, 10), description: "", receiptData: "" });
-  const [childUpdate, setChildUpdate] = useState({
+  const [selectedId, setSelectedId] = useState(null);
+  const [details, setDetails] = useState(null);
+  const [growthUpdates, setGrowthUpdates] = useState([]);
+  const [growthUpdatesLoading, setGrowthUpdatesLoading] = useState(false);
+  const [growthFormOpen, setGrowthFormOpen] = useState(false);
+  const [growthSaving, setGrowthSaving] = useState(false);
+  const [growthFormError, setGrowthFormError] = useState("");
+  const childDetailsRequest = useRef(0);
+  const [growthForm, setGrowthForm] = useState({
+    recordedOn: new Date().toLocaleDateString("en-CA"),
     type: "growth",
-    recordedOn: new Date().toISOString().slice(0, 10),
     activity: "",
     heightCm: "",
     weightKg: "",
     note: "",
   });
-  const [receiptName, setReceiptName] = useState("");
-  const [reply, setReply] = useState("");
-  const [letterSubject, setLetterSubject] = useState("");
-  const [letterMessage, setLetterMessage] = useState("");
-  const [selectedThreadId, setSelectedThreadId] = useState(null);
+  const [query, setQuery] = useState("");
+  const [secondChanceReason, setSecondChanceReason] = useState("");
+  const [removalReason, setRemovalReason] = useState("");
+  const [confirmRemoval, setConfirmRemoval] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [showChildModal, setShowChildModal] = useState(false);
-  const [activeAction, setActiveAction] = useState(null);
-  const [showAllowanceEditor, setShowAllowanceEditor] = useState(false);
-  const [monthlyAllowanceDraft, setMonthlyAllowanceDraft] = useState("");
-  const [savingAllowance, setSavingAllowance] = useState(false);
-  const [sponsorAssignment, setSponsorAssignment] = useState(null);
-  const [sponsorDraft, setSponsorDraft] = useState("");
-  const [loadingSponsorAssignment, setLoadingSponsorAssignment] = useState(false);
-  const [savingSponsorAssignment, setSavingSponsorAssignment] = useState(false);
-  const [sponsorAssignmentError, setSponsorAssignmentError] = useState("");
-  const [giftRecord, setGiftRecord] = useState({ giftsFrom: "", amount: "", description: "" });
-  const [savingGiftRecord, setSavingGiftRecord] = useState(false);
 
+  const refresh = async () => {
+    const rows = await apiCall("/sponsorship/children");
+    setChildren(rows);
+  };
   useEffect(() => {
     let mounted = true;
-    Promise.all([
-      apiCall("/sponsorship/children"),
-      apiCall("/sponsorship/letters"),
-      canManage ? apiCall("/sponsorship/sponsors") : Promise.resolve([]),
-    ])
-      .then(([childRows, letterRows, sponsorRows]) => {
-        if (!mounted) return;
-        setChildren(childRows);
-        setLetters(letterRows);
-        setSponsors(sponsorRows);
-      })
-      .catch((loadError) => {
-        if (mounted) setError(loadError.message);
-      })
-      .finally(() => {
-        if (mounted) setLoading(false);
-      });
+    apiCall("/sponsorship/children")
+      .then((rows) => { if (mounted) setChildren(rows); })
+      .catch((requestError) => { if (mounted) setError(requestError.message); })
+      .finally(() => { if (mounted) setLoading(false); });
     return () => { mounted = false; };
-  }, [canManage]);
+  }, []);
 
-  const createSponsor = async (event) => {
-    event.preventDefault();
-    setSponsorFieldErrors({});
-    setSponsorFormError("");
+  const selectedChild = children.find((child) => Number(child.id) === Number(selectedId));
+  const child = details && Number(details.id) === Number(selectedId) ? details : selectedChild;
+  const visibleChildren = children.filter((entry) =>
+    `${entry.name} ${entry.participantCode || ""}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  );
+  const statusClass = (status) => String(status || "WARNING").toLowerCase().replaceAll("_", "-");
+  const openChild = async (entry) => {
+    const requestId = ++childDetailsRequest.current;
+    setSelectedId(entry.id);
+    setDetails(null);
+    setGrowthUpdates([]);
+    setGrowthUpdatesLoading(true);
+    setGrowthFormOpen(false);
+    setSecondChanceReason("");
     setError("");
-    setCreatingSponsor(true);
+    setMessage("");
     try {
-      const { sponsor } = await apiCall("/sponsorship/sponsors", {
-        method: "POST",
-        body: JSON.stringify(sponsorForm),
-      });
-      setSponsors((current) => [sponsor, ...current]);
-      setSponsorAssignment((current) => current
-        ? { ...current, availableSponsors: [sponsor, ...current.availableSponsors] }
-        : current);
-      setSponsorForm({ familyName: "", sex: "", sponsorType: "" });
-      setShowCreateSponsor(false);
-      setMessage("Sponsor created.");
-    } catch (saveError) {
-      setError(saveError.message);
-      setSponsorFormError(saveError.message);
-      setSponsorFieldErrors(saveError.errors || {});
-    } finally {
-      setCreatingSponsor(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!showCreateSponsor) return undefined;
-    const closeOnEscape = (event) => {
-      if (event.key === "Escape" && !creatingSponsor) setShowCreateSponsor(false);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [creatingSponsor, showCreateSponsor]);
-
-  useEffect(() => {
-    if (!selectedSponsor) return undefined;
-    const closeOnEscape = (event) => {
-      if (event.key === "Escape" && !unassigningSponsor) setSelectedSponsor(null);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [selectedSponsor, unassigningSponsor]);
-
-  const selectChild = async (child) => {
-    setSelectedChildId(child.id);
-    setShowChildModal(true);
-    setActiveAction(null);
-    setShowAllowanceEditor(false);
-    setMonthlyAllowanceDraft(String(child.monthlyAllowance ?? 0));
-    setDisbursements([]);
-    setAllowanceTransactions([]);
-    setChildUpdates([]);
-    setStaffProof(null);
-    setSelectedThreadId(null);
-    setError("");
-    setSponsorAssignment(null);
-    setSponsorDraft("");
-    setSponsorAssignmentError("");
-    setLoadingSponsorAssignment(canManage);
-    try {
-      const [records, updates, transactions] = await Promise.all([
-        apiCall(`/sponsorship/children/${child.id}/disbursements`),
-        canViewUpdates
-          ? apiCall(`/sponsorship/children/${child.id}/updates`)
-          : Promise.resolve([]),
-        canViewUpdates
-          ? apiCall(`/sponsorship/children/${child.id}/allowance-transactions`)
-          : Promise.resolve([]),
+      const [history, updates] = await Promise.all([
+        apiCall(`/sponsorship/children/${entry.id}/history`),
+        apiCall(`/sponsorship/children/${entry.id}/updates`),
       ]);
-      setDisbursements(records);
-      setChildUpdates(updates);
-      setAllowanceTransactions(transactions);
-    } catch (loadError) {
-      setError(loadError.message);
-    }
-    if (canManage) {
-      try {
-        const childSponsors = await apiCall(`/sponsorship/children/${child.id}/sponsor-assignment`);
-        setSponsorAssignment(childSponsors);
-        setSponsorDraft("");
-      } catch (loadError) {
-        setSponsorAssignmentError(loadError.message);
-      } finally {
-        setLoadingSponsorAssignment(false);
-      }
-    } else {
-      setLoadingSponsorAssignment(false);
-    }
-  };
-
-  const assignSponsorToChild = async (event) => {
-    event.preventDefault();
-    if (!selectedChildId || !sponsorDraft) return;
-    setSavingSponsorAssignment(true);
-    setSponsorAssignmentError("");
-    setMessage("");
-    try {
-      const assignment = await apiCall(`/sponsorship/children/${selectedChildId}/sponsor-assignment`, {
-        method: "PUT",
-        body: JSON.stringify({ sponsorId: Number(sponsorDraft) }),
-      });
-      const previousSponsorId = sponsorAssignment?.assignedSponsor?.id;
-      setSponsors((current) => current.map((sponsor) => ({
-        ...sponsor,
-        sponsoredChild: Number(sponsor.id) === Number(assignment.assignedSponsor?.id)
-          ? { id: selectedChildId, name: selectedChild?.name || "", participantCode: selectedChild?.participantCode }
-          : Number(sponsor.id) === Number(previousSponsorId)
-            ? null
-            : sponsor.sponsoredChild,
-      })));
-      setSponsorAssignment(assignment);
-      setSponsorDraft("");
-      setMessage(`Sponsor assigned to ${selectedChild?.name}.`);
-    } catch (saveError) {
-      setSponsorAssignmentError(saveError.message);
+      if (requestId !== childDetailsRequest.current) return;
+      setDetails(history);
+      setGrowthUpdates(updates);
+    } catch (requestError) {
+      if (requestId === childDetailsRequest.current) setError(requestError.message);
     } finally {
-      setSavingSponsorAssignment(false);
+      if (requestId === childDetailsRequest.current) setGrowthUpdatesLoading(false);
     }
   };
-
-  const unassignSponsorFromChild = async (sponsor) => {
-    if (!sponsor.sponsoredChild || unassigningSponsor) return;
-    setUnassigningSponsor(true);
-    setSponsorModalError("");
-    setSponsorModalMessage("");
-    try {
-      const assignment = await apiCall(`/sponsorship/children/${sponsor.sponsoredChild.id}/sponsor-assignment`, {
-        method: "DELETE",
-      });
-      setSponsors((current) => current.map((item) =>
-        Number(item.id) === Number(sponsor.id) ? { ...item, sponsoredChild: null } : item,
-      ));
-      setSelectedSponsor((current) => current && Number(current.id) === Number(sponsor.id)
-        ? { ...current, sponsoredChild: null }
-        : current);
-      if (Number(selectedChildId) === Number(sponsor.sponsoredChild.id)) {
-        setSponsorAssignment(assignment);
-      }
-      setSponsorModalMessage(`${sponsor.familyName} has been unassigned from ${sponsor.sponsoredChild.name}.`);
-    } catch (saveError) {
-      setSponsorModalError(saveError.message);
-    } finally {
-      setUnassigningSponsor(false);
-    }
+  const closeChild = () => {
+    childDetailsRequest.current += 1;
+    setSelectedId(null);
+    setGrowthFormOpen(false);
   };
-
-  const recordGift = async (event) => {
+  const addGrowthUpdate = async (event) => {
     event.preventDefault();
-    if (!selectedChildId) return;
-    setSavingGiftRecord(true);
-    setError("");
-    setMessage("");
+    if (!child) return;
+    setGrowthSaving(true);
+    setGrowthFormError("");
     try {
-      const result = await apiCall(`/sponsorship/children/${selectedChildId}/gifts`, {
+      await apiCall(`/sponsorship/children/${child.id}/updates`, {
         method: "POST",
-        body: JSON.stringify(giftRecord),
+        body: JSON.stringify(growthForm),
       });
-      setDisbursements(await apiCall(`/sponsorship/children/${selectedChildId}/disbursements`));
-      setGiftRecord({ giftsFrom: "", amount: "", description: "" });
-      setActiveAction(null);
-      setMessage(`Gift of ${formatCurrency(result.amount)} from ${result.giftsFrom} recorded.`);
-    } catch (saveError) {
-      setError(saveError.message);
-    } finally {
-      setSavingGiftRecord(false);
-    }
-  };
-
-  const saveMonthlyAllowance = async (event) => {
-    event.preventDefault();
-    if (!selectedChildId) return;
-    const amount = Number(monthlyAllowanceDraft);
-    if (!Number.isFinite(amount) || amount < 0 || amount > 1000000) {
-      setError("Monthly allowance must be between 0 and 1,000,000.");
-      return;
-    }
-    setSavingAllowance(true);
-    setError("");
-    setMessage("");
-    try {
-      await apiCall(`/sponsorship/children/${selectedChildId}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          lifecycle: normalizeSponsorLifecycle(selectedChild?.lifecycle) || "active",
-          monthlyAllowance: amount,
-        }),
-      });
-      setChildren((current) => current.map((child) => (child.id === selectedChildId
-        ? { ...child, monthlyAllowance: amount }
-        : child)));
-      setMessage(`Monthly allowance set to ${formatCurrency(amount)}.`);
-    } catch (saveError) {
-      setError(saveError.message);
-    } finally {
-      setSavingAllowance(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!showChildModal && !activeAction) return undefined;
-    const closeOnEscape = (event) => {
-      if (event.key === "Escape") {
-        if (activeAction) setActiveAction(null);
-        else setShowChildModal(false);
-      }
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [showChildModal, activeAction]);
-
-  const addChildUpdate = async (event) => {
-    event.preventDefault();
-    setError("");
-    setMessage("");
-    try {
-      const result = await apiCall(`/sponsorship/children/${selectedChildId}/updates`, {
-        method: "POST",
-        body: JSON.stringify(childUpdate),
-      });
-      setChildUpdate({
+      setGrowthUpdates(await apiCall(`/sponsorship/children/${child.id}/updates`));
+      setGrowthFormOpen(false);
+      setGrowthForm({
+        recordedOn: new Date().toLocaleDateString("en-CA"),
         type: "growth",
-        recordedOn: new Date().toISOString().slice(0, 10),
         activity: "",
         heightCm: "",
         weightKg: "",
         note: "",
       });
-      setChildUpdates(await apiCall(`/sponsorship/children/${selectedChildId}/updates`));
-      setActiveAction(null);
-      const smsStatus = {
-        sent: "Guardian SMS sent to the carrier.",
-        accepted: "Guardian SMS accepted for delivery.",
-        failed: "Guardian SMS could not be sent.",
-        not_configured: "Guardian SMS was not sent because SMS is not configured.",
-        invalid_number: "Guardian SMS was not sent because the guardian mobile number is missing or invalid.",
-      }[result.notification?.status] || "Guardian SMS status is unavailable.";
-      setMessage(`Sponsored child update recorded. ${smsStatus}`);
-    } catch (saveError) {
-      setError(saveError.message);
-    }
-  };
-
-  const recordDisbursement = async (event) => {
-    event.preventDefault();
-    if (!selectedChildId) return;
-    if (allowanceAction === "deduct" && !window.confirm("Confirm deducting this amount from the child’s available balance?")) return;
-    if (disbursementSubmissionRef.current) return;
-    disbursementSubmissionRef.current = true;
-    setSavingDisbursement(true);
-    setError("");
-    setMessage("");
-    try {
-      let result;
-      if (allowanceAction === "add") {
-        result = await apiCall(`/sponsorship/children/${selectedChildId}/allowance-transactions`, {
-          method: "POST",
-          body: JSON.stringify({ type: "add", amount: allowanceAmount }),
-        });
-        setChildren((current) => current.map((child) => child.id === selectedChildId
-          ? { ...child, availableBalance: result.transaction.updatedBalance }
-          : child));
-      } else {
-        const requestFingerprint = JSON.stringify([
-          selectedChildId,
-          allowanceAmount,
-          gift.disbursedOn,
-          gift.receiptData,
-        ]);
-        let idempotencyKey;
-        if (disbursementRequestRef.current?.fingerprint === requestFingerprint) {
-          idempotencyKey = disbursementRequestRef.current.key;
-        } else {
-          idempotencyKey = window.crypto.randomUUID();
-          disbursementRequestRef.current = { fingerprint: requestFingerprint, key: idempotencyKey };
-        }
-        result = await apiCall(`/sponsorship/children/${selectedChildId}/disbursements`, {
-          method: "POST",
-          body: JSON.stringify({ amount: allowanceAmount, disbursedOn: gift.disbursedOn, receiptData: gift.receiptData, idempotencyKey }),
-        });
-        setChildren((current) => current.map((child) => child.id === selectedChildId
-          ? { ...child, availableBalance: result.updatedBalance }
-          : child));
-        setDisbursements(await apiCall(`/sponsorship/children/${selectedChildId}/disbursements`));
-        disbursementRequestRef.current = null;
-      }
-      setAllowanceTransactions(await apiCall(`/sponsorship/children/${selectedChildId}/allowance-transactions`));
-      setAllowanceAmount("");
-      setAllowanceAction("add");
-      setGift({ careType: "allowance", amount: "", disbursedOn: new Date().toISOString().slice(0, 10), description: "", receiptData: "" });
-      setReceiptName("");
-      setActiveAction(null);
-      setMessage(allowanceAction === "add"
-        ? `Allowance added. Updated balance: ${formatCurrency(result.transaction.updatedBalance)}.`
-        : `Sponsorship disbursement of ${formatCurrency(result.amount)} recorded. Updated balance: ${formatCurrency(result.updatedBalance)}.`);
-    } catch (saveError) {
-      setError(saveError.message);
+      setMessage("Growth & Activity update added and recorded in audit history.");
+    } catch (requestError) {
+      setGrowthFormError(requestError.message);
     } finally {
-      disbursementSubmissionRef.current = false;
-      setSavingDisbursement(false);
+      setGrowthSaving(false);
     }
   };
-  const reverseAllowanceTransaction = async (transaction) => {
-    if (!window.confirm("Create a reversal transaction? The original transaction will remain in the audit history.")) return;
-    setError("");
-    setMessage("");
-    try {
-      const result = await apiCall(
-        `/sponsorship/children/${selectedChildId}/allowance-transactions/${transaction.id}/reverse`,
-        { method: "POST" },
-      );
-      setChildren((current) => current.map((child) => child.id === selectedChildId
-        ? { ...child, availableBalance: result.transaction.updatedBalance }
-        : child));
-      setAllowanceTransactions(await apiCall(`/sponsorship/children/${selectedChildId}/allowance-transactions`));
-      setMessage(`Reversal recorded. Updated balance: ${formatCurrency(result.transaction.updatedBalance)}.`);
-    } catch (saveError) {
-      setError(saveError.message);
-    }
-  };
-
-  const openStaffReceipt = async (id) => {
-    try {
-      const proof = await apiCall(`/sponsorship/disbursements/${id}/receipt`, {
-        method: "POST",
-      });
-      setStaffProof(proof);
-    } catch (loadError) {
-      setError(loadError.message);
-    }
-  };
-
-  const refreshLetters = async () => {
-    const fresh = await apiCall("/sponsorship/letters");
-    setLetters(fresh);
-  };
-  const sendStaffReply = async (event) => {
+  const grantSecondChance = async (event) => {
     event.preventDefault();
-    if (!selectedThreadId) return;
-    try {
-      await apiCall(`/sponsorship/letters/${selectedThreadId}/reply`, {
-        method: "POST",
-        body: JSON.stringify({ message: reply }),
-      });
-      setReply("");
-      await refreshLetters();
-      setActiveAction(null);
-      setMessage(isGoer ? "Reply sent to the sponsor." : "Reply sent to the guardian.");
-    } catch (replyError) {
-      setError(replyError.message);
-    }
-  };
-  const sendGoerLetter = async (event) => {
-    event.preventDefault();
-    if (!selectedChildId) return;
+    if (!selectedChild) return;
+    setSaving(true);
     setError("");
-    setMessage("");
     try {
-      const result = await apiCall(`/sponsorship/children/${selectedChildId}/letters`, {
+      setDetails(await apiCall(`/sponsorship/children/${selectedChild.id}/second-chance`, {
         method: "POST",
-        body: JSON.stringify({ subject: letterSubject, message: letterMessage }),
-      });
-      setLetterSubject("");
-      setLetterMessage("");
-      await refreshLetters();
-      setSelectedThreadId(result.threadId);
-      setActiveAction(null);
-      setMessage("Letter sent to the sponsor.");
-    } catch (letterError) {
-      setError(letterError.message);
+        body: JSON.stringify({ reason: secondChanceReason }),
+      }));
+      await refresh();
+      setSecondChanceReason("");
+      setMessage("Second chance granted and recorded in audit history.");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
     }
   };
-  const updateThreadStatus = async (threadId, nextStatus) => {
+  const removeChild = async () => {
+    if (!selectedChild) return;
+    setSaving(true);
+    setError("");
     try {
-      await apiCall(`/sponsorship/letters/${threadId}/status`, {
-        method: "PUT",
-        body: JSON.stringify({ status: nextStatus }),
-      });
-      await refreshLetters();
-    } catch (statusError) {
-      setError(statusError.message);
+      setDetails(await apiCall(`/sponsorship/children/${selectedChild.id}/remove`, {
+        method: "POST",
+        body: JSON.stringify({ reason: removalReason }),
+      }));
+      await refresh();
+      setConfirmRemoval(false);
+      setRemovalReason("");
+      setMessage("Child removed from active sponsorship. Historical records remain available.");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
     }
   };
-  const visibleChildren = children.filter((child) =>
-    `${child.name} ${child.participantCode}`.toLowerCase().includes(query.toLowerCase()),
-  );
-  const selectedChild = children.find((child) => child.id === selectedChildId);
-  const selectedThread = letters.find((thread) =>
-    Number(thread.id) === Number(selectedThreadId) &&
-    Number(thread.participantId) === Number(selectedChildId),
-  );
-  const selectedChildInitials = selectedChild?.name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join("")
-    .toUpperCase();
-  const sponsorshipOverview = [
-    { label: "Total Elementary", level: "Elementary", icon: "E" },
-    { label: "Total High School", level: "Junior High School", icon: "H", detail: "Junior High School" },
-    { label: "Total Senior High", level: "Senior High School", icon: "S" },
-    { label: "Total College", level: "College", icon: "C" },
-  ];
+  const initials = child?.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+  const monthly = child?.monthly;
 
   return (
     <>
-      <section className={`sponsorship-page-hero${isGoer ? " goer" : ""}`}>
+      <section className="sponsorship-page-hero">
         <div className="sponsorship-page-hero-copy">
-          <span className="sponsorship-page-eyebrow"><span aria-hidden="true">✦</span> {isGoer ? "YOUR CARE GROUP" : "CHILDREN · CARE · CONNECTION"}</span>
-          <h1>{isGoer ? "Care starts with you." : "Every child, moving forward."}</h1>
-          <p>{isGoer
-            ? `Keep care moving for the ${user.goerEducationLevel} group. Record what children receive and stay connected with their sponsors.`
-            : "A clearer view of every sponsorship journey—from school details and allowances to the little moments that matter."}</p>
+          <span className="sponsorship-page-eyebrow">PARTICIPATION / ATTENDANCE</span>
+          <h1>Every activity counts.</h1>
+          <p>Monitor each sponsored child's monthly participation using existing Events and Check-in records.</p>
         </div>
         <div className="sponsorship-hero-art" aria-hidden="true">
-          <span className="sponsorship-hero-orbit sponsorship-hero-orbit-one" />
-          <span className="sponsorship-hero-orbit sponsorship-hero-orbit-two" />
-          <span className="sponsorship-hero-heart">♡</span>
-          <span className="sponsorship-hero-note">{children.length}<small>{isGoer ? "children in your group" : "children in care"}</small></span>
+          <span className="sponsorship-hero-note">2<small>activities each month</small></span>
         </div>
       </section>
-      {canManage && (
-        <section className="sponsorship-overview" aria-labelledby="sponsorship-overview-title">
-          <div className="sponsorship-overview-heading">
-            <div>
-              <span className="sponsorship-section-eyebrow">PROGRAM OVERVIEW</span>
-              <h2 id="sponsorship-overview-title">Dashboard overview</h2>
-            </div>
-          </div>
-          <div className="sponsorship-summary-grid">
-            {sponsorshipOverview.map((item) => (
-              <article className="surface sponsorship-summary-card sponsorship-overview-card" key={item.level}>
-                <span><i aria-hidden="true">{item.icon}</i>{item.label}</span>
-                <strong>{loading ? "—" : formatCount(children.filter((child) => child.educationLevel === item.level).length)}</strong>
-                {item.detail && <small>{item.detail}</small>}
-              </article>
-            ))}
-            <article className="surface sponsorship-summary-card sponsorship-overview-card summary-sponsors">
-              <span><i aria-hidden="true">+</i>Total Sponsors</span>
-              <strong>{loading ? "—" : formatCount(sponsors.length)}</strong>
-            </article>
-          </div>
-        </section>
-      )}
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
       {message && <div className="alert alert-success" role="status">{message}</div>}
-      {canManage && (
-        <section className="surface sponsorship-directory-panel">
-          <div className="sponsorship-list-heading">
-            <div>
-              <span className="sponsorship-section-eyebrow">SPONSOR DIRECTORY</span>
-              <h2>Sponsors</h2>
-            </div>
-            <button type="button" className="btn btn-dark" onClick={() => {
-              setError("");
-              setSponsorFormError("");
-              setSponsorFieldErrors({});
-              setShowCreateSponsor(true);
-            }}>+ Create sponsor</button>
-          </div>
-          {sponsors.length ? (
-            <div className="sponsorship-sponsor-list">
-              {sponsors.map((sponsor) => (
-                <button type="button" className="sponsorship-sponsor-card" key={sponsor.id} onClick={() => {
-                  setSponsorModalMessage("");
-                  setSponsorModalError("");
-                  setSelectedSponsor(sponsor);
-                }}>
-                  <span className="sponsorship-child-avatar" aria-hidden="true">
-                    {sponsor.familyName.trim().slice(0, 1).toUpperCase()}
-                  </span>
-                  <div>
-                    <strong>{sponsor.familyName}</strong>
-                    <small>{sponsor.sponsorType} · {sponsor.sex}</small>
-                    <small>{sponsor.sponsoredChild ? `Sponsoring ${sponsor.sponsoredChild.name}` : "No child assigned"}</small>
-                  </div>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p className="text-secondary mb-0">No sponsors have been created yet.</p>
-          )}
-        </section>
-      )}
-      {selectedSponsor && createPortal((
-        <div className="participant-modal-backdrop sponsor-profile-backdrop" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !unassigningSponsor) setSelectedSponsor(null);
-        }}>
-          <section className="participant-modal sponsor-profile-modal" role="dialog" aria-modal="true" aria-labelledby="sponsor-profile-title">
-            <header className="participant-modal-header">
-              <div className="sponsorship-profile-summary">
-                <span className="sponsorship-profile-avatar" aria-hidden="true">
-                  {selectedSponsor.familyName.trim().slice(0, 1).toUpperCase()}
-                </span>
-                <div>
-                  <span className="sponsorship-section-eyebrow">SPONSOR PROFILE</span>
-                  <h2 id="sponsor-profile-title">{selectedSponsor.familyName}</h2>
-                  <span className="sponsorship-profile-caption">{selectedSponsor.sponsorType} · {selectedSponsor.sex}</span>
-                </div>
-              </div>
-              <button type="button" className="btn-close" aria-label="Close sponsor profile" onClick={() => setSelectedSponsor(null)} disabled={unassigningSponsor} />
-            </header>
-            <div className="sponsor-profile-assignment">
-              {sponsorModalError && <div className="alert alert-danger" role="alert">{sponsorModalError}</div>}
-              {sponsorModalMessage && <div className="alert alert-success" role="status">{sponsorModalMessage}</div>}
-              <span className="sponsorship-section-eyebrow">SPONSORING</span>
-              {selectedSponsor.sponsoredChild ? (
-                <>
-                  <h3>{selectedSponsor.sponsoredChild.name}</h3>
-                  <p>{selectedSponsor.sponsoredChild.participantCode || `Child #${selectedSponsor.sponsoredChild.id}`}</p>
-                  <div className="sponsor-profile-actions">
-                    <button type="button" className="btn btn-outline-primary" onClick={() => {
-                      const child = children.find((item) => Number(item.id) === Number(selectedSponsor.sponsoredChild.id));
-                      setSelectedSponsor(null);
-                      if (child) selectChild(child);
-                    }}>View child profile</button>
-                    <button type="button" className="btn btn-outline-danger" disabled={unassigningSponsor} onClick={() => unassignSponsorFromChild(selectedSponsor)}>
-                      {unassigningSponsor ? "Unassigning…" : "Unassign sponsor"}
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <p className="mb-0 text-secondary">This sponsor is not currently assigned to a child.</p>
-              )}
-            </div>
-          </section>
-        </div>
-      ), document.body)}
-      {showCreateSponsor && createPortal((
-        <div className="participant-modal-backdrop" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !creatingSponsor) setShowCreateSponsor(false);
-        }}>
-          <section className="participant-modal sponsor-create-modal" role="dialog" aria-modal="true" aria-labelledby="create-sponsor-title">
-            <header className="participant-modal-header">
-              <div>
-                <span className="eyebrow">SPONSOR DIRECTORY / NEW RECORD</span>
-                <h2 id="create-sponsor-title">Create a sponsor</h2>
-                <p>Add a sponsor profile to the care directory.</p>
-              </div>
-              <button type="button" className="btn-close" aria-label="Close sponsor form" disabled={creatingSponsor} onClick={() => setShowCreateSponsor(false)} />
-            </header>
-            <form className="sponsor-create-form" onSubmit={createSponsor}>
-              {sponsorFormError && <div className="alert alert-danger mb-0" role="alert">{sponsorFormError}</div>}
-              <div>
-                <label className="form-label" htmlFor="sponsor-family-name">Family name <span aria-hidden="true">*</span></label>
-                <input
-                  id="sponsor-family-name"
-                  className={`form-control${sponsorFieldErrors.familyName ? " is-invalid" : ""}`}
-                  value={sponsorForm.familyName}
-                  onChange={(event) => setSponsorForm((current) => ({ ...current, familyName: event.target.value }))}
-                  maxLength={100}
-                  required
-                  aria-invalid={sponsorFieldErrors.familyName ? "true" : undefined}
-                />
-                {sponsorFieldErrors.familyName && <div className="invalid-feedback d-block">{sponsorFieldErrors.familyName}</div>}
-              </div>
-              <div>
-                <label className="form-label" htmlFor="sponsor-sex">Sex <span aria-hidden="true">*</span></label>
-                <select
-                  id="sponsor-sex"
-                  className={`form-select${sponsorFieldErrors.sex ? " is-invalid" : ""}`}
-                  value={sponsorForm.sex}
-                  onChange={(event) => setSponsorForm((current) => ({ ...current, sex: event.target.value }))}
-                  required
-                  aria-invalid={sponsorFieldErrors.sex ? "true" : undefined}
-                >
-                  <option value="">Select sex</option>
-                  <option value="Male">Male</option>
-                  <option value="Female">Female</option>
-                </select>
-                {sponsorFieldErrors.sex && <div className="invalid-feedback d-block">{sponsorFieldErrors.sex}</div>}
-              </div>
-              <div>
-                <label className="form-label" htmlFor="sponsor-type">Type of sponsor <span aria-hidden="true">*</span></label>
-                <select
-                  id="sponsor-type"
-                  className={`form-select${sponsorFieldErrors.sponsorType ? " is-invalid" : ""}`}
-                  value={sponsorForm.sponsorType}
-                  onChange={(event) => setSponsorForm((current) => ({ ...current, sponsorType: event.target.value }))}
-                  required
-                  aria-invalid={sponsorFieldErrors.sponsorType ? "true" : undefined}
-                >
-                  <option value="">Select sponsor type</option>
-                  <option value="Individual">Individual</option>
-                  <option value="Family">Family</option>
-                  <option value="Couple">Couple</option>
-                </select>
-                {sponsorFieldErrors.sponsorType && <div className="invalid-feedback d-block">{sponsorFieldErrors.sponsorType}</div>}
-              </div>
-              <footer className="sponsor-create-footer">
-                <button type="button" className="btn btn-outline-secondary" disabled={creatingSponsor} onClick={() => setShowCreateSponsor(false)}>Cancel</button>
-                <button type="submit" className="btn btn-dark" disabled={creatingSponsor}>{creatingSponsor ? "Creating…" : "Create sponsor"}</button>
-              </footer>
-            </form>
-          </section>
-        </div>
-      ), document.body)}
-      <div className="sponsorship-workspace">
+      <section className="sponsorship-summary-grid participation-summary-grid" aria-label="Participation overview">
+        {[
+          ["Active sponsored children", children.filter((entry) => entry.status === "ACTIVE").length],
+          ["Meeting monthly requirements", children.filter((entry) => entry.monthly.attended >= 2).length],
+          ["Attendance warnings", children.filter((entry) => entry.status === "WARNING").length],
+          ["Grounds for departure", children.filter((entry) => entry.status === "GROUNDS_FOR_DEPARTURE").length],
+          ["Second chance", children.filter((entry) => entry.status === "SECOND_CHANCE").length],
+        ].map(([label, count]) => (
+          <article className="surface sponsorship-summary-card participation-summary-card" key={label}>
+            <span>{label}</span><strong>{loading ? "—" : formatCount(count)}</strong>
+          </article>
+        ))}
+      </section>
+      <div className="sponsorship-workspace participation-workspace">
         <section className="surface sponsorship-child-list">
           <div className="sponsorship-list-heading">
-            <div><span className="sponsorship-section-eyebrow">{isGoer ? "YOUR ROSTER" : "CARE DIRECTORY"}</span><h2>Children</h2></div>
+            <div><span className="sponsorship-section-eyebrow">{isGoer ? "YOUR GROUP" : "PARTICIPANT MONITORING"}</span><h2>Sponsored children</h2></div>
             <span className="sponsorship-list-count">{visibleChildren.length} <small>shown</small></span>
           </div>
           <div className="sponsorship-search-wrap">
             <span aria-hidden="true">⌕</span>
             <input className="form-control" aria-label="Search sponsored children" placeholder="Find a child by name or ID" value={query} onChange={(event) => setQuery(event.target.value)} />
           </div>
-          {loading ? <div className="sponsorship-loading" role="status"><span /> Loading your children...</div> : visibleChildren.map((child) => (
-            <button className={`sponsorship-child-row ${Number(selectedChildId) === Number(child.id) ? "selected" : ""}`} key={child.id} onClick={() => selectChild(child)}>
-              <span className="sponsorship-child-avatar" aria-hidden="true">{child.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
-              <span className="sponsorship-child-copy"><strong>{child.name}</strong><small>{child.participantCode || `Child #${child.id}`}</small></span>
-              <span className="sponsorship-child-arrow" aria-hidden="true">›</span>
+          {loading ? <div className="sponsorship-loading" role="status"><span /> Loading participation records...</div> : visibleChildren.map((entry) => (
+            <button type="button" className={`sponsorship-child-row ${Number(selectedId) === Number(entry.id) ? "selected" : ""}`} key={entry.id} onClick={() => openChild(entry)}>
+              <span className="sponsorship-child-avatar" aria-hidden="true">{entry.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
+              <span className="sponsorship-child-copy">
+                <strong>{entry.name}</strong>
+                <small>{entry.participantCode || `Child #${entry.id}`} · {entry.age ?? "Age not recorded"} years · {entry.gender || "Sex not set"}</small>
+                <small>{entry.monthly.key}: Required 2 · Attended {entry.monthly.attended} · Absent {entry.monthly.absent} · {entry.monthly.attendanceRate}%</small>
+              </span>
+              <span className={`participation-status-badge ${statusClass(entry.status)}`}>{PARTICIPATION_STATUS_LABELS[entry.status] || entry.status}</span>
             </button>
           ))}
-          {!loading && !visibleChildren.length && <div className="sponsorship-no-results"><span aria-hidden="true">⌕</span><strong>No children found</strong><p>Try a different name search.</p></div>}
+          {!loading && !visibleChildren.length && <div className="sponsorship-no-results"><strong>No sponsored children found</strong><p>Try a different name or participant ID.</p></div>}
         </section>
       </div>
-      {showChildModal && selectedChild && createPortal((
+      {child && createPortal((
         <div className="participant-modal-backdrop child-profile-backdrop" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !activeAction) setShowChildModal(false);
+          if (event.target === event.currentTarget && !confirmRemoval) closeChild();
         }}>
-          <section className="participant-modal child-profile-modal" role="dialog" aria-modal="true" aria-labelledby="child-profile-title">
+          <section className="participant-modal child-profile-modal participation-profile-modal" role="dialog" aria-modal="true" aria-labelledby="participation-profile-title">
             <header className="participant-modal-header">
               <div className="sponsorship-profile-summary">
-                <span className="sponsorship-profile-avatar">{selectedChildInitials}</span>
+                <span className="sponsorship-profile-avatar">{initials}</span>
                 <div>
-                  <span className="sponsorship-section-eyebrow">{selectedChild.participantCode || `CHILD #${selectedChild.id}`}</span>
-                  <h2 id="child-profile-title">{selectedChild.name}</h2>
-                  <span className="sponsorship-profile-caption">{isGoer ? `Care group · ${user.goerEducationLevel}` : "Growing with a community behind them"}</span>
+                  <span className="sponsorship-section-eyebrow">{child.participantCode || `CHILD #${child.id}`}</span>
+                  <h2 id="participation-profile-title">{child.name}</h2>
+                  <span className="sponsorship-profile-caption">{child.age ?? "Age not recorded"} years old · {child.gender || "Sex not set"}</span>
                 </div>
               </div>
-              <button type="button" className="btn-close" aria-label="Close child profile" onClick={() => (activeAction ? setActiveAction(null) : setShowChildModal(false))} />
+              <button type="button" className="btn-close" aria-label="Close child history" onClick={closeChild} />
             </header>
-            {!isGoer && (
-              <div className="child-profile-stats">
-                <div className="child-profile-stat">
-                  <small>Available balance</small>
-                  <strong>{formatCurrency(selectedChild.availableBalance)}</strong>
-                </div>
-                <div className="child-profile-stat">
-                  <small>Monthly allowance</small>
-                  <strong>{formatCurrency(selectedChild.monthlyAllowance)}</strong>
-                </div>
-                <div className="child-profile-stat">
-                  <small>Child status</small>
-                  <strong>{sponsorLifecycleLabel(selectedChild.lifecycle)}</strong>
-                </div>
+            <div className="participation-detail-status">
+              <span className={`participation-status-badge ${statusClass(child.status)}`}>{PARTICIPATION_STATUS_LABELS[child.status] || child.status}</span>
+              <span>Registered {formatParticipantHistoryDate(child.registrationDate)}</span>
+            </div>
+            {error && <div className="alert alert-danger" role="alert">{error}</div>}
+            {message && <div className="alert alert-success" role="status">{message}</div>}
+            <section className="surface participation-month-card">
+              <div className="participant-history-section-heading">
+                <div><span className="sponsorship-section-eyebrow">MONTHLY ACTIVITY</span><h3>{monthly.key}</h3></div>
+                <span className={`participation-status-badge ${statusClass(monthly.status)}`}>{monthly.status === "ACTIVE" ? "Compliant" : "Warning"}</span>
               </div>
-            )}
-            {canManage && (
-              <section className="child-sponsor-assignment" aria-labelledby="child-sponsor-title">
-                <div className="child-sponsor-heading">
-                  <div>
-                    <span className="sponsorship-section-eyebrow">SPONSOR MATCH</span>
-                    <h3 id="child-sponsor-title">Child sponsor</h3>
-                  </div>
-                  {sponsorAssignment?.assignedSponsor && (
-                    <span className="child-sponsor-status">Assigned</span>
-                  )}
-                </div>
-                {sponsorAssignmentError && (
-                  <div className="alert alert-danger mb-3" role="alert">{sponsorAssignmentError}</div>
-                )}
-                {loadingSponsorAssignment ? (
-                  <p className="text-secondary mb-0" role="status">Loading sponsor options…</p>
-                ) : sponsorAssignment?.assignedSponsor ? (
-                  <div className="child-sponsor-current">
-                    <span className="sponsorship-child-avatar" aria-hidden="true">
-                      {sponsorAssignment.assignedSponsor.familyName.trim().slice(0, 1).toUpperCase()}
-                    </span>
-                    <div>
-                      <strong>{sponsorAssignment.assignedSponsor.familyName}</strong>
-                      <small>{sponsorAssignment.assignedSponsor.sponsorType} · {sponsorAssignment.assignedSponsor.sex}</small>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-secondary mb-3">No sponsor has been assigned to this child yet.</p>
-                )}
-                {!loadingSponsorAssignment && sponsorAssignment && (
-                  sponsorAssignment.availableSponsors.length ? (
-                    <form className="child-sponsor-form" onSubmit={assignSponsorToChild}>
-                      <label className="form-label" htmlFor={`child-sponsor-select-${selectedChild.id}`}>
-                        {sponsorAssignment.assignedSponsor ? "Assign a different sponsor" : "Choose an available sponsor"}
-                      </label>
-                      <div className="child-sponsor-controls">
-                        <select
-                          id={`child-sponsor-select-${selectedChild.id}`}
-                          className="form-select"
-                          value={sponsorDraft}
-                          onChange={(event) => setSponsorDraft(event.target.value)}
-                          required
-                          disabled={savingSponsorAssignment}
-                        >
-                          <option value="">Select sponsor</option>
-                          {sponsorAssignment.availableSponsors.map((sponsor) => (
-                            <option key={sponsor.id} value={sponsor.id}>
-                              {sponsor.familyName} · {sponsor.sponsorType}
-                            </option>
-                          ))}
-                        </select>
-                        <button className="btn btn-dark" type="submit" disabled={!sponsorDraft || savingSponsorAssignment}>
-                          {savingSponsorAssignment ? "Assigning…" : "Assign sponsor"}
-                        </button>
-                      </div>
-                    </form>
-                  ) : (
-                    <p className="child-sponsor-empty mb-0">
-                      {sponsorAssignment.assignedSponsor
-                        ? "There are no other available sponsors."
-                        : "There are no unassigned sponsors available."}
-                    </p>
-                  )
+              <div className="participation-number-grid">
+                {[["Required activities", monthly.required], ["Attended", monthly.attended], ["Absent", monthly.absent], ["Attendance", `${monthly.attendanceRate}%`]].map(([label, value]) => (
+                  <div key={label}><small>{label}</small><strong>{value}</strong></div>
+                ))}
+              </div>
+            </section>
+            <section className="surface participation-month-card">
+              <div className="participant-history-section-heading"><h3>Yearly attendance</h3><strong>{child.currentYear.year}</strong></div>
+              <div className="participation-number-grid">
+                {[["Required", child.currentYear.required], ["Attended", child.currentYear.attended], ["Absences", child.currentYear.absent], ["Attendance", `${child.currentYear.attendanceRate}%`]].map(([label, value]) => (
+                  <div key={label}><small>{label}</small><strong>{value}</strong></div>
+                ))}
+              </div>
+              <p className="participation-lifetime">Lifetime absences: <strong>{child.lifetime.absent}</strong></p>
+            </section>
+            {child.status === "GROUNDS_FOR_DEPARTURE" && (
+              <section className="participation-action-panel grounds-action-panel">
+                <h3>Grounds for Departure</h3>
+                <p>Total absences: <strong>{child.lifetime.absent}</strong>. This child is not automatically removed.</p>
+                {canManage && (
+                  <form onSubmit={grantSecondChance}>
+                    <label className="form-label" htmlFor="second-chance-reason">Reason or notes (optional)</label>
+                    <textarea id="second-chance-reason" className="form-control" rows="2" maxLength="1000" value={secondChanceReason} onChange={(event) => setSecondChanceReason(event.target.value)} />
+                    <button type="submit" className="btn btn-primary mt-3" disabled={saving}>{saving ? "Saving..." : "Give Second Chance"}</button>
+                  </form>
                 )}
               </section>
             )}
-            {canManage && (
-              <div className="child-allowance-set">
-                {showAllowanceEditor ? (
-                  <form className="child-allowance-form" onSubmit={saveMonthlyAllowance}>
-                    <div className="child-allowance-field">
-                      <label className="form-label" htmlFor="child-monthly-allowance">Monthly allowance (PHP)</label>
-                      <input id="child-monthly-allowance" className="form-control" type="number" min="0" max="1000000" step="0.01" required autoFocus value={monthlyAllowanceDraft} onChange={(event) => setMonthlyAllowanceDraft(event.target.value)} />
-                    </div>
-                    <div className="child-allowance-actions">
-                      <button className="btn child-allowance-save" type="submit" disabled={savingAllowance}>{savingAllowance ? "Saving…" : "Save allowance"}</button>
-                      <button className="btn btn-outline-secondary" type="button" onClick={() => setShowAllowanceEditor(false)}>Cancel</button>
-                    </div>
-                  </form>
-                ) : (
-                  <button type="button" className="btn child-allowance-toggle" onClick={() => {
-                    setMonthlyAllowanceDraft(String(selectedChild.monthlyAllowance ?? 0));
-                    setShowAllowanceEditor(true);
+            {child.secondChance && (
+              <section className="participation-action-panel second-chance-action-panel">
+                <h3>Second Chance Monitoring</h3>
+                <p>Granted {formatParticipantHistoryDate(child.secondChance.createdAt)} by {child.secondChance.administrator}.</p>
+                <p>Absences at grant: {child.secondChance.absenceCount} · Post-second-chance absences: {child.postSecondChanceAbsences} / 2</p>
+                <p>Removal becomes available after two missed monthly requirements following a second chance.</p>
+                {child.secondChance.reason && <p>Notes: {child.secondChance.reason}</p>}
+                {canManage && child.status === "SECOND_CHANCE" && child.removalEligible && (
+                  <button type="button" className="btn btn-outline-danger" onClick={() => setConfirmRemoval(true)}>Remove from Sponsorship</button>
+                )}
+              </section>
+            )}
+            <section className="surface participation-history-section growth-activity-section">
+              <div className="participant-history-section-heading">
+                <div>
+                  <h3>Growth &amp; Activity</h3>
+                  <p>Record growth measurements, activities attended, and care notes.</p>
+                </div>
+                {canManage && (
+                  <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => {
+                    setGrowthFormError("");
+                    setGrowthFormOpen(true);
                   }}>
-                    <span aria-hidden="true">₱</span> Set monthly allowance
+                    + Add Update
                   </button>
                 )}
               </div>
-            )}
-            {!isGoer && (
-              <div className="sponsorship-school-readonly child-school">
-                <p><strong>School name:</strong> {selectedChild.schoolName || "Not provided"}</p>
-                <p><strong>School address:</strong> {selectedChild.schoolAddress || "Not provided"}</p>
-              </div>
-            )}
-            <div className="child-action-grid">
-              {canManage && (
-                <button type="button" className="child-action-card card-growth" onClick={() => setActiveAction("growth")}>
-                  <span className="action-icon" aria-hidden="true">✦</span>
-                  <strong>Growth &amp; activity</strong>
-                  <small>Record growth measurements, activities attended, and care notes.</small>
-                </button>
-              )}
-              {canManage && (
-                <button type="button" className="child-action-card card-disbursement" onClick={() => setActiveAction("disbursement")}>
-                  <span className="action-icon" aria-hidden="true">₱</span>
-                  <strong>Disbursement</strong>
-                  <small>Add to or deduct from the child's available balance.</small>
-                </button>
-              )}
-              {canManage && (
-                <button type="button" className="child-action-card card-gift" onClick={() => setActiveAction("gift")}>
-                  <span className="action-icon" aria-hidden="true">♡</span>
-                  <strong>Gifts</strong>
-                  <small>Record a gift received by {selectedChild.name}.</small>
-                </button>
-              )}
-              {canRecordCare && (
-                <button type="button" className="child-action-card card-letter" onClick={() => setActiveAction("letter")}>
-                  <span className="action-icon" aria-hidden="true">✉</span>
-                  <strong>Letter</strong>
-                  <small>{isGoer ? "Write a new letter to the sponsor." : "Reply to the sponsor’s letter thread."}</small>
-                </button>
-              )}
-            </div>
-            <div className="child-modal-history">
-              {canViewUpdates && (
-                <div className="sponsorship-detail-section">
-                  <div className="sponsorship-list-heading">
-                    <div>
-                      <h3>Growth and activity history</h3>
-                      <span>Private notes and physical measurements are encrypted at rest.</span>
-                    </div>
-                    <span>{childUpdates.length} updates</span>
-                  </div>
-                  {childUpdates.length ? (
-                    <div className="child-update-history">
-                      {childUpdates.map((update) => (
-                        <article className="child-update-row" key={update.id}>
-                          <div>
-                            <strong>{update.type === "growth" ? "Growth measurement" : update.type === "activity" ? update.activity : "Care note"}</strong>
-                            <small>{new Date(`${update.recordedOn}T00:00:00`).toLocaleDateString()}</small>
-                          </div>
-                          {update.type === "growth" && (
-                            <span>
-                              {update.heightCm ? `${update.heightCm} cm` : ""}
-                              {update.heightCm && update.weightKg ? " · " : ""}
-                              {update.weightKg ? `${update.weightKg} kg` : ""}
-                            </span>
-                          )}
-                          {update.note && <p>{update.note}</p>}
-                        </article>
-                      ))}
-                    </div>
-                  ) : <p className="text-secondary mt-3 mb-0">No growth, activity, or care updates recorded.</p>}
+              <p className="growth-activity-count">{growthUpdates.length} {growthUpdates.length === 1 ? "update" : "updates"}</p>
+              {growthUpdatesLoading ? <p role="status" className="text-secondary">Loading Growth &amp; Activity updates...</p> : growthUpdates.length ? (
+                <div className="guardian-update-list">
+                  {growthUpdates.map((update) => (
+                    <article className={`guardian-update-card update-${update.type}`} key={update.id}>
+                      <div className="guardian-update-body">
+                        <div className="guardian-update-top">
+                          <strong>{update.type === "growth" ? "Growth" : update.type === "activity" ? "Activity" : "Care note"}</strong>
+                          <time>{formatParticipantHistoryDate(update.recordedOn)}</time>
+                        </div>
+                        {update.type === "growth" && (update.heightCm || update.weightKg) && (
+                          <p className="guardian-update-metrics">
+                            {update.heightCm && <span className="metric-height">Height: {update.heightCm} cm</span>}
+                            {update.weightKg && <span className="metric-weight">Weight: {update.weightKg} kg</span>}
+                          </p>
+                        )}
+                        {update.activity && <p className="guardian-update-activity">{update.activity}</p>}
+                        {update.note && <p className="guardian-update-note">{update.note}</p>}
+                      </div>
+                    </article>
+                  ))}
                 </div>
-              )}
-              {!isGoer && (
-                <div className="sponsorship-detail-section">
-                  <h3>Available sponsorship allowance</h3>
-                  <div className="allowance-balance-card">
-                    <span>Available balance</span>
-                    <strong>{formatCurrency(selectedChild.availableBalance)}</strong>
-                  </div>
-                  <h4 className="sponsorship-subheading">Allowance transaction history</h4>
-                  <div className="table-responsive">
-                    <table className="table align-middle">
-                      <thead><tr><th>Date</th><th>Transaction ID</th><th>Transaction</th><th>Amount</th><th>Previous balance</th><th>Balance after</th><th>Recorded by</th><th /></tr></thead>
-                      <tbody>{allowanceTransactions.map((transaction) => (
-                        <tr key={transaction.id}>
-                          <td>{new Date(transaction.createdAt).toLocaleString()}</td>
-                          <td>{transaction.id}</td>
-                          <td>{transaction.type === "reversal" ? "Reversal" : transaction.type === "add" ? "Addition" : transaction.disbursementId ? `Disbursement #${transaction.disbursementId}` : "Deduction"}</td>
-                          <td>{formatCurrency(transaction.amount)}</td>
-                          <td>{formatCurrency(transaction.previousBalance)}</td>
-                          <td>{formatCurrency(transaction.updatedBalance)}</td>
-                          <td>{transaction.createdByName || (transaction.createdBy ? `Staff #${transaction.createdBy}` : "System")}{transaction.createdByRole ? ` · ${transaction.createdByRole}` : ""}</td>
-                          <td>{canManage && transaction.type !== "reversal" && !transaction.relatedTransactionId && (
-                            <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => reverseAllowanceTransaction(transaction)}>Reverse</button>
-                          )}</td>
-                        </tr>
-                      ))}{!allowanceTransactions.length && <tr><td colSpan="8" className="text-secondary">No balance transactions recorded.</td></tr>}</tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-              <div className="sponsorship-detail-section">
-                <h4 className="sponsorship-subheading">{isGoer ? "Received allowance and gifts" : "Sponsorship disbursements"}</h4>
-                <div className="table-responsive mt-3">
-                  <table className="table align-middle">
-                    <thead><tr><th>Date</th><th>Record</th><th>Gifts from</th><th>Amount</th><th>Description</th><th>Proof</th></tr></thead>
-                    <tbody>{disbursements.map((record) => (
-                      <tr key={record.id}><td>{new Date(record.recorded_on).toLocaleDateString()}</td><td>{record.recordType === "received" ? `${record.care_type[0].toUpperCase()}${record.care_type.slice(1)} received` : "Sponsor disbursement"}</td><td>{record.giftsFrom || "—"}</td><td>{formatCurrency(record.amount)}</td><td>{record.recordType === "received" ? record.description || "—" : "—"}</td><td>{record.hasReceipt ? (isGoer ? "Receipt on file" : <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => openStaffReceipt(String(record.id).replace(/^disbursement-/, ""))}>View proof</button>) : "—"}</td></tr>
-                    ))}{!disbursements.length && <tr><td colSpan="6" className="text-secondary">No allowance or gift records.</td></tr>}</tbody>
-                  </table>
-                </div>
-                {staffProof && (
-                  <div className="guardian-receipt-preview">
-                    <div className="guardian-receipt-heading"><strong>Receipt proof</strong><button type="button" className="btn-close" aria-label="Close receipt proof" onClick={() => setStaffProof(null)} /></div>
-                    {staffProof.mimeType.startsWith("image/")
-                      ? <img src={`data:${staffProof.mimeType};base64,${staffProof.data}`} alt="Receipt proof" />
-                      : <a href={`data:${staffProof.mimeType};base64,${staffProof.data}`} target="_blank" rel="noreferrer">Open PDF receipt proof ↗</a>}
-                  </div>
-                )}
+              ) : <p className="text-secondary">No Growth &amp; Activity updates recorded yet.</p>}
+            </section>
+            <section className="surface participation-history-section">
+              <h3>Monthly attendance history</h3>
+              <div className="table-responsive">
+                <table className="table align-middle participant-history-table">
+                  <thead><tr><th>Month</th><th>Required</th><th>Attended</th><th>Absent</th><th>Attendance</th><th>Status</th></tr></thead>
+                  <tbody>{child.months.map((entry) => (
+                    <tr key={entry.key}><td>{new Date(`${entry.key}-01T00:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" })}</td><td>{entry.required}</td><td>{entry.attended}</td><td>{entry.absent}</td><td>{entry.attendanceRate}%</td><td>{entry.status === "ACTIVE" ? "Active" : "Warning"}</td></tr>
+                  ))}</tbody>
+                </table>
               </div>
-            </div>
-            <div className="child-history-strip" role="status">
-              {!isGoer && <span>{childUpdates.length} growth updates</span>}
-              {!isGoer && <span>{allowanceTransactions.length} balance transactions</span>}
-              <span>{disbursements.length} {isGoer ? "care records" : "disbursements"}</span>
-              <span>{letters.filter((thread) => Number(thread.participantId) === Number(selectedChild.id)).length} letters</span>
-            </div>
-          </section>
-        </div>
-      ), document.body)}
-      {activeAction === "growth" && canManage && createPortal((
-        <div className="participant-modal-backdrop action-backdrop" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setActiveAction(null);
-        }}>
-          <section className="participant-modal action-modal" role="dialog" aria-modal="true" aria-labelledby="growth-action-title">
-            <header className="participant-modal-header">
-              <div>
-                <span className="eyebrow">CARE ACTIONS / GROWTH</span>
-                <h2 id="growth-action-title">Growth &amp; activity</h2>
-                <p>Record a measurement, activity, or care note for {selectedChild.name}.</p>
+            </section>
+            <section className="surface participation-history-section">
+              <div className="participant-history-section-heading">
+                <h3>Participant history</h3>
+                {onViewHistory && <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => { closeChild(); onViewHistory(child.id); }}>View full participant history</button>}
               </div>
-              <button type="button" className="btn-close" aria-label="Close growth form" onClick={() => setActiveAction(null)} />
-            </header>
-            <form className="child-update-form" onSubmit={addChildUpdate}>
-              <div className="row g-3">
-                <div className="col-12 col-md-4">
-                  <label className="form-label" htmlFor="child-update-type">Update type</label>
-                  <select
-                    id="child-update-type"
-                    className="form-select"
-                    value={childUpdate.type}
-                    onChange={(event) => setChildUpdate({ ...childUpdate, type: event.target.value })}
-                  >
-                    <option value="growth">Growth measurement</option>
-                    <option value="activity">Activity attended</option>
-                    <option value="note">Care note</option>
-                  </select>
-                </div>
-                <div className="col-12 col-md-4">
-                  <label className="form-label" htmlFor="child-update-date">Date</label>
-                  <input
-                    id="child-update-date"
-                    className="form-control"
-                    type="date"
-                    max={new Date().toISOString().slice(0, 10)}
-                    required
-                    value={childUpdate.recordedOn}
-                    onChange={(event) => setChildUpdate({ ...childUpdate, recordedOn: event.target.value })}
-                  />
-                </div>
-                {childUpdate.type === "growth" && (
-                  <>
-                    <div className="col-12 col-md-4">
-                      <label className="form-label" htmlFor="child-update-height">Height (cm)</label>
-                      <input
-                        id="child-update-height"
-                        className="form-control"
-                        type="number"
-                        min="30"
-                        max="260"
-                        step="0.1"
-                        value={childUpdate.heightCm}
-                        onChange={(event) => setChildUpdate({ ...childUpdate, heightCm: event.target.value })}
-                      />
-                    </div>
-                    <div className="col-12 col-md-4">
-                      <label className="form-label" htmlFor="child-update-weight">Weight (kg)</label>
-                      <input
-                        id="child-update-weight"
-                        className="form-control"
-                        type="number"
-                        min="1"
-                        max="300"
-                        step="0.1"
-                        value={childUpdate.weightKg}
-                        onChange={(event) => setChildUpdate({ ...childUpdate, weightKg: event.target.value })}
-                      />
-                    </div>
-                  </>
-                )}
-                {childUpdate.type === "activity" && (
-                  <div className="col-12 col-md-8">
-                    <label className="form-label" htmlFor="child-update-activity">Activity</label>
-                    <input
-                      id="child-update-activity"
-                      className="form-control"
-                      maxLength={120}
-                      required
-                      value={childUpdate.activity}
-                      onChange={(event) => setChildUpdate({ ...childUpdate, activity: event.target.value })}
-                      placeholder="Activity or program attended"
-                    />
-                  </div>
-                )}
-                <div className="col-12">
-                  <label className="form-label" htmlFor="child-update-note">
-                    {childUpdate.type === "note" ? "Care note" : "Additional notes (optional)"}
-                  </label>
-                  <textarea
-                    id="child-update-note"
-                    className="form-control"
-                    rows="2"
-                    maxLength={2000}
-                    required={childUpdate.type === "note"}
-                    value={childUpdate.note}
-                    onChange={(event) => setChildUpdate({ ...childUpdate, note: event.target.value })}
-                  />
-                </div>
-                <div className="col-12">
-                  <button className="btn btn-dark" type="submit">Record update</button>
-                </div>
-              </div>
-            </form>
-          </section>
-        </div>
-      ), document.body)}
-      {activeAction === "disbursement" && canManage && createPortal((
-        <div className="participant-modal-backdrop action-backdrop" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setActiveAction(null);
-        }}>
-          <section className="participant-modal action-modal" role="dialog" aria-modal="true" aria-labelledby="disbursement-action-title">
-            <header className="participant-modal-header">
-              <div>
-                <span className="eyebrow">CARE ACTIONS / DISBURSEMENT</span>
-                <h2 id="disbursement-action-title">Disbursement</h2>
-                <p>Add to or deduct from {selectedChild.name}'s available balance. Deductions require a receipt or proof.</p>
-              </div>
-              <button type="button" className="btn-close" aria-label="Close disbursement form" onClick={() => setActiveAction(null)} />
-            </header>
-            <form className="sponsorship-gift-form" onSubmit={recordDisbursement}>
-              <div><label className="form-label" htmlFor="disbursement-type">Transaction</label><select id="disbursement-type" className="form-select" value={allowanceAction} onChange={(event) => setAllowanceAction(event.target.value)}><option value="add">Add to balance</option><option value="deduct">Deduct from balance</option></select></div>
-              <div><label className="form-label" htmlFor="disbursement-amount">Amount (PHP)</label><input id="disbursement-amount" className="form-control" type="number" min="0.01" max="1000000" step="0.01" required value={allowanceAmount} onChange={(event) => setAllowanceAmount(event.target.value)} /></div>
-              {allowanceAction === "deduct" && <div><label className="form-label" htmlFor="disbursement-date">Date</label><input id="disbursement-date" className="form-control" type="date" required value={gift.disbursedOn} onChange={(event) => setGift({ ...gift, disbursedOn: event.target.value })} /></div>}
-              {allowanceAction === "deduct" && <div className="sponsorship-gift-description"><label className="form-label" htmlFor="disbursement-receipt">Receipt proof (JPG, PNG, PDF; max 4 MB)</label><input id="disbursement-receipt" className="form-control" type="file" accept="image/jpeg,image/png,application/pdf" required onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (!file) return;
-                if (file.size > 4 * 1024 * 1024) {
-                  setGift((previous) => ({ ...previous, receiptData: "" }));
-                  setReceiptName("");
-                  setError("Receipt must be no larger than 4 MB.");
-                  event.target.value = "";
-                  return;
-                }
-                setGift((previous) => ({ ...previous, receiptData: "" }));
-                setReceiptName("");
-                const reader = new FileReader();
-                reader.onload = () => {
-                  setGift((previous) => ({ ...previous, receiptData: String(reader.result || "") }));
-                  setReceiptName(file.name);
-                  setError("");
-                };
-                reader.onerror = () => setError("Unable to read the receipt file. Try a different file.");
-                reader.readAsDataURL(file);
-              }} />{receiptName && <small className="text-secondary">{receiptName}</small>}</div>}
-              <button className="btn btn-outline-dark" type="submit" disabled={(allowanceAction === "deduct" && !gift.receiptData) || savingDisbursement}>{savingDisbursement ? "Saving…" : allowanceAction === "add" ? "Add to balance" : "Record disbursement"}</button>
-            </form>
-            <p className="text-secondary">Current available balance: {formatCurrency(selectedChild.availableBalance)}. Deductions require a receipt or proof before they are recorded.</p>
-          </section>
-        </div>
-      ), document.body)}
-      {activeAction === "gift" && canManage && createPortal((
-        <div className="participant-modal-backdrop action-backdrop" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !savingGiftRecord) setActiveAction(null);
-        }}>
-          <section className="participant-modal action-modal" role="dialog" aria-modal="true" aria-labelledby="gift-action-title">
-            <header className="participant-modal-header">
-              <div>
-                <span className="eyebrow">CARE ACTIONS / GIFTS</span>
-                <h2 id="gift-action-title">Record a gift</h2>
-                <p>Record a gift received by {selectedChild.name}. This does not change the available sponsorship balance.</p>
-              </div>
-              <button type="button" className="btn-close" aria-label="Close gift form" disabled={savingGiftRecord} onClick={() => setActiveAction(null)} />
-            </header>
-            <form className="child-gift-form" onSubmit={recordGift}>
-              <div>
-                <label className="form-label" htmlFor="gift-from">Gifts from</label>
-                <input id="gift-from" className="form-control" maxLength="100" required value={giftRecord.giftsFrom} onChange={(event) => setGiftRecord((current) => ({ ...current, giftsFrom: event.target.value }))} />
-              </div>
-              <div>
-                <label className="form-label" htmlFor="gift-amount">Amount (PHP)</label>
-                <input id="gift-amount" className="form-control" type="number" min="0.01" max="1000000" step="0.01" required value={giftRecord.amount} onChange={(event) => setGiftRecord((current) => ({ ...current, amount: event.target.value }))} />
-              </div>
-              <div>
-                <label className="form-label" htmlFor="gift-description">Description</label>
-                <textarea id="gift-description" className="form-control" rows="3" maxLength="255" value={giftRecord.description} onChange={(event) => setGiftRecord((current) => ({ ...current, description: event.target.value }))} placeholder="Optional details about the gift" />
-              </div>
-              <button type="submit" className="btn btn-dark" disabled={savingGiftRecord}>{savingGiftRecord ? "Recording…" : "Record gift"}</button>
-            </form>
-          </section>
-        </div>
-      ), document.body)}
-      {activeAction === "letter" && canRecordCare && createPortal((
-        <div className="participant-modal-backdrop action-backdrop" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setActiveAction(null);
-        }}>
-          <section className="participant-modal action-modal action-modal-letter" role="dialog" aria-modal="true" aria-labelledby="letter-action-title">
-            <header className="participant-modal-header">
-              <div>
-                <span className="eyebrow">CARE ACTIONS / LETTERS</span>
-                <h2 id="letter-action-title">Letters</h2>
-                <p>{isGoer ? `Write to the sponsor of ${selectedChild.name}.` : `Reply to the sponsor of ${selectedChild.name}.`}</p>
-              </div>
-              <button type="button" className="btn-close" aria-label="Close letters" onClick={() => setActiveAction(null)} />
-            </header>
-            <div className="sponsorship-letter-layout">
-              <div className="sponsorship-thread-list">
-                {letters.filter((thread) => Number(thread.participantId) === Number(selectedChild.id)).map((thread) => (
-                  <button className={`sponsorship-thread-row ${Number(selectedThreadId) === Number(thread.id) ? "selected" : ""}`} key={thread.id} onClick={() => setSelectedThreadId(thread.id)}>
-                    <strong>{thread.subject}</strong><span>{thread.status}</span><small>{new Date(thread.updatedAt).toLocaleDateString()}</small>
-                  </button>
+              <ul className="participation-event-history">
+                {child.months.flatMap((entry) => entry.events).sort((first, second) => second.date.localeCompare(first.date)).slice(0, 30).map((activity, index) => (
+                  <li key={`${activity.name}-${activity.date}-${index}`}>
+                    <span className={activity.attended ? "attendance-check" : "attendance-missed"}>{activity.attended ? "✓" : "×"}</span>
+                    <div><strong>{activity.attended ? "Attended" : "Missed"} {activity.name}</strong><small>{formatParticipantHistoryDate(activity.date)}{activity.location ? ` · ${activity.location}` : ""}</small></div>
+                  </li>
                 ))}
-                {!letters.some((thread) => Number(thread.participantId) === Number(selectedChild.id)) && <p className="text-secondary">No letters yet.</p>}
+                {!child.months.some((entry) => entry.events.length) && <li className="text-secondary">No event records found.</li>}
+              </ul>
+            </section>
+            {child.history.length > 0 && (
+              <section className="surface participation-history-section">
+                <h3>Status history</h3>
+                <ul className="participation-event-history">
+                  {child.history.map((entry) => (
+                    <li key={entry.id}><span className="attendance-check">✓</span><div><strong>{PARTICIPATION_STATUS_LABELS[entry.currentStatus] || entry.currentStatus}</strong><small>{formatParticipantHistoryDate(entry.createdAt)} · {entry.administrator}{entry.reason ? ` · ${entry.reason}` : ""}</small></div></li>
+                  ))}
+                </ul>
+              </section>
+            )}
+          </section>
+        </div>
+      ), document.body)}
+      {growthFormOpen && child && createPortal((
+        <div className="participant-modal-backdrop growth-update-backdrop" role="presentation">
+          <section className="participant-modal growth-update-modal" role="dialog" aria-modal="true" aria-labelledby="growth-update-title">
+            <header className="participant-modal-header">
+              <div>
+                <span className="sponsorship-section-eyebrow">CHILD OBSERVATIONS</span>
+                <h2 id="growth-update-title">Add Growth &amp; Activity Update</h2>
               </div>
-              {selectedThread && Number(selectedThread.participantId) === Number(selectedChild.id) && (
-                <div className="sponsorship-thread-detail">
-                  <div className="sponsorship-thread-title"><h4>{selectedThread.subject}</h4>
-                    {canManage && <select className="form-select form-select-sm" aria-label="Update letter status" value={selectedThread.status} onChange={(event) => updateThreadStatus(selectedThread.id, event.target.value)}><option value="open">Open</option><option value="replied">Replied</option><option value="closed">Closed</option></select>}
-                  </div>
-                  <div className="sponsorship-messages">{selectedThread.messages.map((entry) => <div className={`sponsorship-message ${entry.sender_type}`} key={entry.id}><span>{entry.sender_type === "staff" ? "Staff" : "Guardian"} · {new Date(entry.created_at).toLocaleString()}</span><p>{entry.message}</p></div>)}</div>
-                  {canRecordCare && selectedThread.status !== "closed" && <form onSubmit={sendStaffReply}><label className="visually-hidden" htmlFor="staff-letter-reply">Reply to sponsor</label><textarea id="staff-letter-reply" className="form-control mb-2" rows="3" maxLength={5000} required value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply to the sponsor" /><button className="btn btn-sm btn-dark">Send reply</button></form>}
+              <button type="button" className="btn-close" aria-label="Close update form" disabled={growthSaving} onClick={() => setGrowthFormOpen(false)} />
+            </header>
+            <form className="growth-update-form" onSubmit={addGrowthUpdate}>
+              <label className="form-label" htmlFor="growth-update-date">Date</label>
+              <input id="growth-update-date" className="form-control" type="date" max={new Date().toLocaleDateString("en-CA")} required value={growthForm.recordedOn} onChange={(event) => setGrowthForm({ ...growthForm, recordedOn: event.target.value })} />
+              <label className="form-label" htmlFor="growth-update-type">Update type</label>
+              <select id="growth-update-type" className="form-select" value={growthForm.type} onChange={(event) => setGrowthForm({ ...growthForm, type: event.target.value })}>
+                <option value="growth">Growth</option>
+                <option value="activity">Activity</option>
+                <option value="note">Care note</option>
+              </select>
+              {growthForm.type === "growth" && (
+                <div className="growth-measurement-fields">
+                  <div><label className="form-label" htmlFor="growth-update-height">Height (cm)</label><input id="growth-update-height" className="form-control" type="number" min="30" max="260" step="0.1" value={growthForm.heightCm} onChange={(event) => setGrowthForm({ ...growthForm, heightCm: event.target.value })} /></div>
+                  <div><label className="form-label" htmlFor="growth-update-weight">Weight (kg)</label><input id="growth-update-weight" className="form-control" type="number" min="1" max="300" step="0.1" value={growthForm.weightKg} onChange={(event) => setGrowthForm({ ...growthForm, weightKg: event.target.value })} /></div>
                 </div>
               )}
-              {isGoer && (!selectedThread || selectedThread.status === "closed") && (
-                <form className="guardian-letter-form" onSubmit={sendGoerLetter}>
-                  <div>
-                    <label className="form-label" htmlFor="goer-letter-subject">Subject</label>
-                    <input id="goer-letter-subject" className="form-control" maxLength={160} required value={letterSubject} onChange={(event) => setLetterSubject(event.target.value)} placeholder="A short subject for the sponsor" />
-                  </div>
-                  <div>
-                    <label className="form-label" htmlFor="goer-letter-message">Letter to sponsor</label>
-                    <textarea id="goer-letter-message" className="form-control" rows="5" maxLength={5000} required value={letterMessage} onChange={(event) => setLetterMessage(event.target.value)} placeholder="Write an update or message to the sponsor" />
-                  </div>
-                  <button className="btn btn-dark" type="submit">Send letter</button>
-                </form>
+              {growthForm.type === "activity" && (
+                <>
+                  <label className="form-label" htmlFor="growth-update-activity">Activity</label>
+                  <input id="growth-update-activity" className="form-control" maxLength="120" required value={growthForm.activity} onChange={(event) => setGrowthForm({ ...growthForm, activity: event.target.value })} />
+                </>
               )}
+              <label className="form-label" htmlFor="growth-update-note">{growthForm.type === "note" ? "Care note" : "Notes"}</label>
+              <textarea id="growth-update-note" className="form-control" rows="4" maxLength="2000" required={growthForm.type === "note"} value={growthForm.note} onChange={(event) => setGrowthForm({ ...growthForm, note: event.target.value })} />
+              {growthFormError && <div className="alert alert-danger" role="alert">{growthFormError}</div>}
+              <div className="growth-update-actions">
+                <button type="button" className="btn btn-outline-secondary" disabled={growthSaving} onClick={() => setGrowthFormOpen(false)}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={growthSaving}>{growthSaving ? "Saving..." : "Save Update"}</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ), document.body)}
+      {confirmRemoval && child && createPortal((
+        <div className="participant-modal-backdrop" role="presentation">
+          <section className="participant-modal participation-removal-modal" role="alertdialog" aria-modal="true" aria-labelledby="remove-child-title">
+            <h2 id="remove-child-title">Remove child from sponsorship?</h2>
+            <dl className="participation-removal-details">
+              <div><dt>Child</dt><dd>{child.name}</dd></div>
+              <div><dt>Total absences</dt><dd>{child.lifetime.absent}</dd></div>
+              <div><dt>Second chance</dt><dd>Granted</dd></div>
+              <div><dt>Post-second-chance absences</dt><dd>{child.postSecondChanceAbsences}</dd></div>
+            </dl>
+            <p className="alert alert-warning">This action will remove the child from active sponsorship. The child's historical records will be preserved.</p>
+            <label className="form-label" htmlFor="removal-reason">Reason</label>
+            <textarea id="removal-reason" className="form-control" rows="2" maxLength="1000" value={removalReason} onChange={(event) => setRemovalReason(event.target.value)} />
+            <div className="participation-removal-actions">
+              <button type="button" className="btn btn-outline-secondary" disabled={saving} onClick={() => setConfirmRemoval(false)}>Cancel</button>
+              <button type="button" className="btn btn-danger" disabled={saving} onClick={removeChild}>{saving ? "Removing..." : "Remove from Sponsorship"}</button>
             </div>
           </section>
         </div>
@@ -5816,30 +4830,52 @@ function PermissionCheckboxes({ idPrefix, selected, onChange }) {
       ? [...new Set([...selected, key])]
       : selected.filter((permission) => permission !== key));
   };
+  const moduleLabels = {
+    dashboard: "Dashboard",
+    participants: "Participants",
+    events: "Events",
+    checkin: "Check-in",
+    analytics: "Analytics",
+    reports: "Reports",
+    portal: "Child portal",
+    sponsorship: "Sponsored care",
+  };
+  const modules = [...new Set(STAFF_PERMISSION_OPTIONS.map(({ key }) => key.split(":")[0]))];
   return (
-    <div className="staff-permission-list">
-      {STAFF_PERMISSION_OPTIONS.map(({ key, label, description }) => (
-        <label className="staff-permission-option" htmlFor={`${idPrefix}-${key}`} key={key}>
-          <input
-            id={`${idPrefix}-${key}`}
-            className="form-check-input"
-            type="checkbox"
-            checked={selected.includes(key)}
-            onChange={(event) => toggle(key, event.target.checked)}
-          />
-          <span>
-            <strong>{label}</strong>
-            <small>{description}</small>
-          </span>
-        </label>
+    <div className="staff-permission-modules">
+      {modules.map((module) => (
+        <section className="staff-permission-module" key={module}>
+          <h3>{moduleLabels[module] || module}</h3>
+          <div className="staff-permission-list">
+            {STAFF_PERMISSION_OPTIONS.filter(({ key }) => key.startsWith(`${module}:`)).map(({ key, label, description }) => (
+              <label className="staff-permission-option" htmlFor={`${idPrefix}-${key}`} key={key}>
+                <input
+                  id={`${idPrefix}-${key}`}
+                  className="form-check-input"
+                  type="checkbox"
+                  checked={selected.includes(key)}
+                  onChange={(event) => toggle(key, event.target.checked)}
+                />
+                <span>
+                  <strong>{label}</strong>
+                  <small>{description}</small>
+                </span>
+              </label>
+            ))}
+          </div>
+        </section>
       ))}
     </div>
   );
 }
-function StaffAccounts() {
+function StaffAccounts({ user }) {
   const [staff, setStaff] = useState([]);
   const [goers, setGoers] = useState([]);
+  const [educationLevels, setEducationLevels] = useState(EDUCATION_LEVELS);
   const [goerGroups, setGoerGroups] = useState({});
+  const [search, setSearch] = useState("");
+  const [accountTypeFilter, setAccountTypeFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [goerForm, setGoerForm] = useState({
     firstName: "",
     middleName: "",
@@ -5864,6 +4900,10 @@ function StaffAccounts() {
   const [message, setMessage] = useState("");
   const [permissionEditor, setPermissionEditor] = useState(null);
   const [permissionDraft, setPermissionDraft] = useState([]);
+  const [detailsAccount, setDetailsAccount] = useState(null);
+  const [recentActivity, setRecentActivity] = useState([]);
+  const [loadingActivity, setLoadingActivity] = useState(false);
+  const [confirmation, setConfirmation] = useState(null);
 
   useEffect(() => {
     if (!permissionEditor) return undefined;
@@ -5887,11 +4927,24 @@ function StaffAccounts() {
   }, [registrationType, saving]);
 
   useEffect(() => {
+    if (!confirmation && !detailsAccount) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape" && !saving) {
+        setConfirmation(null);
+        setDetailsAccount(null);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [confirmation, detailsAccount, saving]);
+
+  useEffect(() => {
     let mounted = true;
     Promise.all([apiCall("/staff"), apiCall("/goers")])
       .then(([staffResult, goerResult]) => {
         if (!mounted) return;
         setStaff(staffResult.staff);
+        setEducationLevels(goerResult.educationLevels || EDUCATION_LEVELS);
         setPermissionsById(Object.fromEntries(
           staffResult.staff.map((account) => [account.id, account.permissions]),
         ));
@@ -5924,7 +4977,7 @@ function StaffAccounts() {
       });
       setForm({ firstName: "", middleName: "", lastName: "", email: "", password: "" });
       setNewPermissions([]);
-      setMessage("Church Administrator account created.");
+      setMessage("Account created successfully.");
       setStaff((previous) => [...previous, result.staff].sort((left, right) =>
         left.fullName.localeCompare(right.fullName),
       ));
@@ -5934,7 +4987,7 @@ function StaffAccounts() {
       }));
       setRegistrationType(null);
     } catch (createError) {
-      setError(createError.message);
+      setError(createError.message || "Unable to create account. Please check the information and try again.");
     } finally {
       setSaving(false);
     }
@@ -5965,10 +5018,10 @@ function StaffAccounts() {
         password: "",
         educationLevel: EDUCATION_LEVELS[0],
       });
-      setMessage(`${result.goer.goerEducationLevel} Goer account created.`);
+      setMessage("Account created successfully.");
       setRegistrationType(null);
     } catch (createError) {
-      setError(createError.message);
+      setError(createError.message || "Unable to create account. Please check the information and try again.");
     } finally {
       setSaving(false);
     }
@@ -5987,9 +5040,9 @@ function StaffAccounts() {
       setGoers((previous) => previous.map((item) =>
         item.id === account.id ? { ...item, goerEducationLevel: result.educationLevel } : item,
       ));
-      setMessage(`${account.fullName} is assigned to ${result.educationLevel}.`);
+      setMessage("Education group updated successfully.");
     } catch (saveError) {
-      setError(saveError.message);
+      setError(saveError.message || "Unable to update education group.");
     } finally {
       setSaving(false);
     }
@@ -6008,9 +5061,9 @@ function StaffAccounts() {
       setGoers((previous) => previous.map((item) =>
         item.id === account.id ? { ...item, status } : item,
       ));
-      setMessage(`${account.fullName} is now ${status}.`);
+      setMessage(status === "active" ? "Account reactivated successfully." : "Account deactivated successfully.");
     } catch (statusError) {
-      setError(statusError.message);
+      setError(statusError.message || "Unable to update account status.");
     } finally {
       setSaving(false);
     }
@@ -6029,10 +5082,10 @@ function StaffAccounts() {
       setStaff((previous) => previous.map((item) =>
         item.id === account.id ? { ...item, permissions } : item,
       ));
-      setMessage(`Permissions saved for ${account.fullName}.`);
+      setMessage("Permissions updated successfully.");
       setPermissionEditor(null);
     } catch (saveError) {
-      setError(saveError.message);
+      setError(saveError.message || "Unable to update permissions.");
     } finally {
       setSaving(false);
     }
@@ -6062,10 +5115,14 @@ function StaffAccounts() {
     .map(({ label }) => label);
 
   const toggleStatus = async (account) => {
+    const status = account.status === "active" ? "inactive" : "active";
+    if (status === "inactive" && String(account.id) === String(user?.id)) {
+      setError("You cannot deactivate the account you are currently using.");
+      return;
+    }
     setSaving(true);
     setError("");
     setMessage("");
-    const status = account.status === "active" ? "inactive" : "active";
     try {
       await apiCall(`/staff/${account.id}/status`, {
         method: "PUT",
@@ -6074,23 +5131,127 @@ function StaffAccounts() {
       setStaff((previous) => previous.map((item) =>
         item.id === account.id ? { ...item, status } : item,
       ));
-      setMessage(`${account.fullName} is now ${status}.`);
+      setMessage(status === "active" ? "Account reactivated successfully." : "Account deactivated successfully.");
     } catch (statusError) {
-      setError(statusError.message);
+      setError(statusError.message || "Unable to update account status.");
     } finally {
       setSaving(false);
     }
   };
+
+  const openAccountDetails = async (account, type) => {
+    setError("");
+    setDetailsAccount({ ...account, accountType: type });
+    setRecentActivity([]);
+    setLoadingActivity(true);
+    try {
+      const result = await apiCall("/audit-logs?limit=100");
+      setRecentActivity(result.entries.filter((entry) =>
+        entry.entity_type === "user" && String(entry.entity_id) === String(account.id),
+      ).slice(0, 5));
+    } catch (activityError) {
+      setError(activityError.message || "Unable to load account activity.");
+    } finally {
+      setLoadingActivity(false);
+    }
+  };
+
+  const matchesSearch = (account) => {
+    const query = search.trim().toLowerCase();
+    return !query || [account.fullName, account.email, account.username]
+      .some((value) => String(value || "").toLowerCase().includes(query));
+  };
+  const matchesStatus = (account) => statusFilter === "all" || account.status === statusFilter;
+  const filteredGoers = goers.filter((account) =>
+    (accountTypeFilter === "all" || accountTypeFilter === "goer") &&
+    matchesStatus(account) && matchesSearch(account),
+  );
+  const filteredStaff = staff.filter((account) =>
+    (accountTypeFilter === "all" || accountTypeFilter === "staff") &&
+    matchesStatus(account) && matchesSearch(account),
+  );
+  const hasSearchResults = filteredGoers.length + filteredStaff.length > 0;
+  const requestGroupSave = (account) => setConfirmation({
+    title: "Change this Goer's assigned education group?",
+    message: `Save ${goerGroups[account.id]} as ${account.fullName}'s assigned education group?`,
+    confirmLabel: "Save group",
+    onConfirm: () => saveGoerGroup(account),
+  });
+  const requestStatusChange = (account, type) => {
+    const activating = account.status !== "active";
+    if (!activating && type === "staff" && String(account.id) === String(user?.id)) {
+      setError("You cannot deactivate the account you are currently using.");
+      return;
+    }
+    const accountType = type === "goer" ? "Goer" : "Church Administrator";
+    setConfirmation({
+      title: `${activating ? "Reactivate" : "Deactivate"} this ${accountType} account?`,
+      message: activating ? "" : "This account will no longer be able to sign in.",
+      confirmLabel: activating ? "Reactivate Account" : "Deactivate Account",
+      onConfirm: () => type === "goer" ? toggleGoerStatus(account) : toggleStatus(account),
+    });
+  };
+  const displayAccountDate = (value) => {
+    if (!value) return "Not available";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "Not available" : date.toLocaleString();
+  };
+  const activityLabel = (action) => ({
+    "goer.created": "Account created",
+    "staff.created": "Account created",
+    "goer.group.updated": "Education group changed",
+    "staff.permissions.updated": "Permissions updated",
+    "goer.inactive": "Account deactivated",
+    "staff.inactive": "Account deactivated",
+    "goer.active": "Account reactivated",
+    "staff.active": "Account reactivated",
+  }[action] || String(action || "Account activity").replaceAll(".", " "));
 
   return (
     <>
       <Title
         e="STAFF ADMINISTRATION"
         t="Manage accounts."
-        d="Create permission-based Church Administrator accounts or attendance-only Goer accounts assigned to one education group."
+        d="Create and manage Church Administrator and Goer accounts, permissions, account status, and education-group assignments."
       />
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
       {message && <div className="alert alert-success" role="status">{message}</div>}
+      {!loading && (
+        <section className="staff-account-summary" aria-label="Account summary">
+          <article><span>Total accounts</span><strong>{staff.length + goers.length}</strong></article>
+          <article><span>Active accounts</span><strong>{staff.filter((account) => account.status === "active").length + goers.filter((account) => account.status === "active").length}</strong></article>
+          <article><span>Goer accounts</span><strong>{goers.length}</strong></article>
+          <article><span>Church Administrators</span><strong>{staff.length}</strong></article>
+        </section>
+      )}
+      <section className="surface staff-account-filters" aria-label="Filter accounts">
+        <label>
+          <span className="visually-hidden">Search accounts</span>
+          <input
+            className="form-control"
+            type="search"
+            placeholder="Search accounts..."
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </label>
+        <label>
+          <span>Account type</span>
+          <select className="form-select" value={accountTypeFilter} onChange={(event) => setAccountTypeFilter(event.target.value)}>
+            <option value="all">All</option>
+            <option value="goer">Goer</option>
+            <option value="staff">Church Administrator</option>
+          </select>
+        </label>
+        <label>
+          <span>Status</span>
+          <select className="form-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+            <option value="all">All</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+        </label>
+      </section>
       <section className="surface form-surface staff-create-panel">
         <div className="panel-title"><h2>Register account</h2></div>
         <p className="text-secondary">Choose the account type to open its registration form.</p>
@@ -6099,15 +5260,19 @@ function StaffAccounts() {
           <button className="btn btn-outline-primary" type="button" onClick={() => openRegistrationModal("goer")}>Register Goer</button>
         </div>
       </section>
+      {loading && <p className="staff-account-loading" role="status">Loading accounts...</p>}
+      {!loading && search.trim() && !hasSearchResults && (
+        <p className="alert alert-info" role="status">No accounts match your search.</p>
+      )}
       <section className="surface table-surface staff-list-panel">
-        <div className="panel-title"><h2>Goer accounts</h2><span>{goers.length} accounts</span></div>
-        {loading ? <p role="status">Loading Goer accounts...</p> : goers.length ? (
+        <div className="panel-title"><h2>Goer accounts</h2><span>{filteredGoers.length} accounts</span></div>
+        {!loading && filteredGoers.length ? (
           <div className="staff-account-list">
-            {goers.map((account) => (
+            {filteredGoers.map((account) => (
               <article className="staff-account-card" key={account.id}>
                 <div className="staff-account-heading">
                   <div><h3>{account.fullName}</h3><p>{account.email} · Goer</p></div>
-                  <span className={`staff-account-status ${account.status}`}>{account.status}</span>
+                  <span className={`staff-account-status ${account.status}`}>● {account.status === "active" ? "Active" : "Inactive"}</span>
                 </div>
                 <div className="row g-2 align-items-end">
                   <div className="col-12 col-sm-7">
@@ -6122,7 +5287,7 @@ function StaffAccounts() {
                       }))}
                     >
                       <option value="" disabled>Select education group</option>
-                      {EDUCATION_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
+                      {educationLevels.map((level) => <option key={level} value={level}>{level}</option>)}
                     </select>
                   </div>
                   <div className="col-12 col-sm-auto">
@@ -6130,39 +5295,52 @@ function StaffAccounts() {
                       className="btn btn-outline-primary btn-sm"
                       type="button"
                       disabled={saving || goerGroups[account.id] === account.goerEducationLevel}
-                      onClick={() => saveGoerGroup(account)}
+                      onClick={() => requestGroupSave(account)}
                     >
                       Save group
                     </button>
                   </div>
                 </div>
                 <div className="staff-account-actions">
-                  <button className={`btn btn-sm ${account.status === "active" ? "btn-outline-danger" : "btn-outline-success"}`} disabled={saving} onClick={() => toggleGoerStatus(account)}>
-                    {account.status === "active" ? "Deactivate account" : "Activate account"}
+                  <button className="btn btn-sm btn-outline-primary" type="button" onClick={() => openAccountDetails(account, "Goer")}>View Details</button>
+                  <button className={`btn btn-sm ${account.status === "active" ? "btn-outline-danger" : "btn-outline-success"}`} disabled={saving} onClick={() => requestStatusChange(account, "goer")}>
+                    {account.status === "active" ? "Deactivate account" : "Reactivate account"}
                   </button>
                 </div>
               </article>
             ))}
           </div>
-        ) : <p className="text-secondary">No Goer accounts are registered.</p>}
+        ) : !loading && (
+          <p className="text-secondary">{goers.length ? "No Goer accounts match the current filters." : "No Goer accounts found."}</p>
+        )}
       </section>
       <section className="surface table-surface staff-list-panel">
-        <div className="panel-title"><h2>Church Administrator accounts</h2><span>{staff.length} accounts</span></div>
-        {loading ? <p role="status">Loading staff accounts...</p> : staff.length ? (
+        <div className="panel-title"><h2>Church Administrator accounts</h2><span>{filteredStaff.length} accounts</span></div>
+        {!loading && filteredStaff.length ? (
           <div className="staff-account-list">
-            {staff.map((account) => (
+            {filteredStaff.map((account) => (
               <article className="staff-account-card" key={account.id}>
                 <div className="staff-account-heading">
                   <div>
                     <h3>{account.fullName}</h3>
                     <p>{account.email} · {account.role}</p>
                   </div>
-                  <span className={`staff-account-status ${account.status}`}>{account.status}</span>
+                  <span className={`staff-account-status ${account.status}`}>● {account.status === "active" ? "Active" : "Inactive"}</span>
                 </div>
                 <div className="staff-account-permissions">
                   <div>
                     <strong>{(permissionsById[account.id] || []).length} permissions assigned</strong>
-                    <span>{selectedPermissionLabels(permissionsById[account.id] || []).join(" · ") || "No page access assigned"}</span>
+                    <div className="staff-permission-badges">
+                      {selectedPermissionLabels(permissionsById[account.id] || []).slice(0, 3).map((label) => (
+                        <span className="staff-permission-badge" key={label}>{label}</span>
+                      ))}
+                      {(permissionsById[account.id] || []).length > 3 && (
+                        <button type="button" className="staff-more-permissions" onClick={() => openAccountDetails(account, "Church Administrator")}>
+                          +{(permissionsById[account.id] || []).length - 3} more
+                        </button>
+                      )}
+                      {!(permissionsById[account.id] || []).length && <span>No page access assigned</span>}
+                    </div>
                   </div>
                   <button
                     className="btn btn-outline-primary btn-sm"
@@ -6173,14 +5351,17 @@ function StaffAccounts() {
                   </button>
                 </div>
                 <div className="staff-account-actions">
-                  <button className={`btn btn-sm ${account.status === "active" ? "btn-outline-danger" : "btn-outline-success"}`} disabled={saving} onClick={() => toggleStatus(account)}>
-                    {account.status === "active" ? "Deactivate account" : "Activate account"}
+                  <button className="btn btn-sm btn-outline-primary" type="button" onClick={() => openAccountDetails(account, "Church Administrator")}>View Details</button>
+                  <button className={`btn btn-sm ${account.status === "active" ? "btn-outline-danger" : "btn-outline-success"}`} disabled={saving} onClick={() => requestStatusChange(account, "staff")}>
+                    {account.status === "active" ? "Deactivate account" : "Reactivate account"}
                   </button>
                 </div>
               </article>
             ))}
           </div>
-        ) : <p className="text-secondary">No Church Administrator accounts are registered.</p>}
+        ) : !loading && (
+          <p className="text-secondary">{staff.length ? "No Church Administrator accounts match the current filters." : "No Church Administrator accounts found."}</p>
+        )}
       </section>
       {registrationType && createPortal(
         <div
@@ -6252,7 +5433,7 @@ function StaffAccounts() {
                     value={goerForm.educationLevel}
                     onChange={(event) => setGoerForm({ ...goerForm, educationLevel: event.target.value })}
                   >
-                    {EDUCATION_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
+                    {educationLevels.map((level) => <option key={level} value={level}>{level}</option>)}
                   </select>
                 </div>
               ) : (
@@ -6274,6 +5455,112 @@ function StaffAccounts() {
                 </button>
               </footer>
             </form>
+          </section>
+        </div>,
+        document.body,
+      )}
+      {detailsAccount && createPortal(
+        <div
+          className="staff-permission-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setDetailsAccount(null);
+          }}
+        >
+          <section
+            className="staff-permission-modal staff-account-details-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="staff-account-details-title"
+          >
+            <header className="staff-permission-modal-header">
+              <div>
+                <span className="eyebrow">ACCOUNT DETAILS</span>
+                <h2 id="staff-account-details-title">{detailsAccount.fullName}</h2>
+                <p>{detailsAccount.accountType} account</p>
+              </div>
+              <button type="button" className="btn-close" aria-label="Close account details" onClick={() => setDetailsAccount(null)} />
+            </header>
+            <dl className="staff-account-detail-grid">
+              <div><dt>Name</dt><dd>{detailsAccount.fullName || "—"}</dd></div>
+              {detailsAccount.accountType === "Church Administrator" && (
+                <div><dt>Username</dt><dd>{detailsAccount.username || "Not available"}</dd></div>
+              )}
+              <div><dt>Email</dt><dd>{detailsAccount.email || "—"}</dd></div>
+              <div><dt>Account type</dt><dd>{detailsAccount.accountType}</dd></div>
+              <div><dt>Status</dt><dd>{detailsAccount.status === "active" ? "Active" : "Inactive"}</dd></div>
+              <div><dt>Created</dt><dd>{displayAccountDate(detailsAccount.createdAt)}</dd></div>
+              <div><dt>Last login</dt><dd>{displayAccountDate(detailsAccount.lastLoginAt)}</dd></div>
+              {detailsAccount.accountType === "Goer" && (
+                <div><dt>Assigned education group</dt><dd>{detailsAccount.goerEducationLevel || "Not assigned"}</dd></div>
+              )}
+            </dl>
+            {detailsAccount.accountType === "Church Administrator" && (
+              <section className="staff-detail-permissions">
+                <h3>Permissions</h3>
+                <div className="staff-permission-badges">
+                  {selectedPermissionLabels(permissionsById[detailsAccount.id] || []).map((label) => (
+                    <span className="staff-permission-badge" key={label}>{label}</span>
+                  ))}
+                  {!(permissionsById[detailsAccount.id] || []).length && <span>No page access assigned</span>}
+                </div>
+              </section>
+            )}
+            <section className="staff-detail-activity">
+              <h3>Recent activity</h3>
+              {loadingActivity ? <p role="status">Loading recent activity...</p> : recentActivity.length ? (
+                <ul>
+                  {recentActivity.map((entry) => (
+                    <li key={entry.id}>
+                      <span>{activityLabel(entry.action)}</span>
+                      <small>{entry.username} · {displayAccountDate(entry.created_at)}</small>
+                    </li>
+                  ))}
+                </ul>
+              ) : <p className="text-secondary">No recent account activity found.</p>}
+            </section>
+            <footer className="staff-permission-modal-footer">
+              <button type="button" className="btn btn-outline-secondary" onClick={() => setDetailsAccount(null)}>Close</button>
+            </footer>
+          </section>
+        </div>,
+        document.body,
+      )}
+      {confirmation && createPortal(
+        <div
+          className="staff-permission-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !saving) setConfirmation(null);
+          }}
+        >
+          <section
+            className="staff-permission-modal staff-confirmation-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="staff-confirmation-title"
+          >
+            <header className="staff-permission-modal-header">
+              <div>
+                <span className="eyebrow">CONFIRM ACCOUNT CHANGE</span>
+                <h2 id="staff-confirmation-title">{confirmation.title}</h2>
+                {confirmation.message && <p>{confirmation.message}</p>}
+              </div>
+              <button type="button" className="btn-close" aria-label="Close confirmation" disabled={saving} onClick={() => setConfirmation(null)} />
+            </header>
+            <footer className="staff-permission-modal-footer">
+              <button type="button" className="btn btn-outline-secondary" disabled={saving} onClick={() => setConfirmation(null)}>Cancel</button>
+              <button
+                type="button"
+                className={`btn ${confirmation.confirmLabel === "Deactivate Account" ? "btn-danger" : "btn-primary"}`}
+                disabled={saving}
+                onClick={() => {
+                  const confirmAction = confirmation.onConfirm;
+                  setConfirmation(null);
+                  confirmAction();
+                }}
+              >
+                {saving ? "Saving…" : confirmation.confirmLabel}
+              </button>
+            </footer>
           </section>
         </div>,
         document.body,
@@ -6440,7 +5727,7 @@ function App() {
     events: <Events canManage={canAccessPermission("events:manage", user)} />,
     scanner: <Scanner user={user} />,
     portal: <Scanner portal />,
-    sponsorship: <SponsoredCare user={user} />,
+    sponsorship: <SponsoredCare user={user} onViewHistory={openParticipantHistory} />,
     analytics: <Analytics user={user} />,
     reports: <Reports user={user} />,
   };
@@ -6449,7 +5736,7 @@ function App() {
   }
   if (String(user.role).toLowerCase() === "system administrator") {
     pages.audit = <AuditHistory />;
-    pages.staff = <StaffAccounts />;
+    pages.staff = <StaffAccounts user={user} />;
   }
   const availablePages = Object.keys(pages).filter((key) => canAccessPage(key, user));
   const visiblePage = canAccessPage(page, user) ? page : availablePages[0];

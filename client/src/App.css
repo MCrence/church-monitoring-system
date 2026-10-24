@@ -111,6 +111,8 @@
 @media(prefers-reduced-motion:reduce){.public-access-card,.public-access-card::after,.public-home-primary-action,.public-home-secondary-action{transition:none}}
 .staff-create-panel,.staff-list-panel{margin-bottom:24px}
 .staff-permission-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.staff-permission-modules{display:grid;gap:18px}
+.staff-permission-module h3{margin:0 0 9px;color:#17395e;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 .staff-permission-option{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--line);border-radius:9px;background:#fff;cursor:pointer}
 .staff-permission-option .form-check-input{flex:0 0 auto;margin-top:4px}
 .staff-permission-option span{display:flex;flex-direction:column;gap:3px}
@@ -125,6 +127,29 @@
 .staff-account-status.active{color:#287a27}
 .staff-account-status.inactive{color:#9a3d32}
 .staff-account-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+.staff-account-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:0 0 18px}
+.staff-account-summary article{display:grid;gap:4px;padding:16px 18px;border:1px solid var(--line);border-radius:12px;background:#fff}
+.staff-account-summary span{color:#61758a;font-size:12px;font-weight:600}
+.staff-account-summary strong{color:#12365c;font:600 25px 'Space Grotesk'}
+.staff-account-filters{display:grid;grid-template-columns:minmax(220px,1fr) minmax(150px,220px) minmax(130px,180px);align-items:end;gap:14px;margin-bottom:24px;padding:16px}
+.staff-account-filters label{display:grid;gap:5px;min-width:0}
+.staff-account-filters label>span:not(.visually-hidden){color:#52657b;font-size:12px;font-weight:600}
+.staff-account-loading{padding:22px;text-align:center;color:#52657b}
+.staff-permission-badges{display:flex;flex-wrap:wrap;gap:7px;min-width:0}
+.staff-permission-badge{display:inline-flex;padding:5px 9px;border:1px solid #d8e5f1;border-radius:20px;background:#eef5fb;color:#17395e;font-size:12px;font-weight:600}
+.staff-more-permissions{padding:4px 8px;border:0;border-radius:20px;background:#e5edf5;color:#17395e;font-size:12px;font-weight:700}
+.staff-account-detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:0}
+.staff-account-detail-grid>div{min-width:0;padding:11px 13px;border:1px solid #e0e9f2;border-radius:10px;background:#f8fbfd}
+.staff-account-detail-grid dt{margin-bottom:3px;color:#61758a;font-size:11px;font-weight:700}
+.staff-account-detail-grid dd{margin:0;color:#17395e;overflow-wrap:anywhere;font-size:13px}
+.staff-detail-permissions,.staff-detail-activity{margin-top:20px}
+.staff-detail-permissions h3,.staff-detail-activity h3{margin:0 0 10px;color:#17395e;font-size:15px;font-weight:700}
+.staff-detail-activity ul{display:grid;gap:8px;margin:0;padding:0;list-style:none}
+.staff-detail-activity li{display:grid;gap:3px;padding:10px 12px;border:1px solid #e0e9f2;border-radius:9px;background:#f8fbfd}
+.staff-detail-activity li span{color:#17395e;font-size:13px;font-weight:600}
+.staff-detail-activity li small{color:#61758a;font-size:11px;overflow-wrap:anywhere}
+.staff-account-details-modal{width:min(100%,680px)}
+.staff-confirmation-modal{width:min(100%,520px)}
 @media(max-width:640px){.staff-permission-list{grid-template-columns:1fr}.staff-account-heading{flex-direction:column}}
 .staff-create-permissions,.staff-account-permissions{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 16px;border:1px solid #e0e9f2;border-radius:12px;background:#f8fbfd}
 .staff-create-permissions{margin:2px 0}
@@ -141,6 +166,11 @@
 .staff-permission-modal .staff-permission-option:has(.form-check-input:checked){border-color:#9dc97c;background:#f3faec}
 .staff-permission-modal-footer{display:flex;justify-content:flex-end;gap:10px;margin-top:22px;padding-top:17px;border-top:1px solid #e0e9f2}
 @media(max-width:640px){
+  .staff-account-summary{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+  .staff-account-summary article{padding:13px}
+  .staff-account-summary strong{font-size:22px}
+  .staff-account-filters{grid-template-columns:1fr;padding:13px}
+  .staff-account-detail-grid{grid-template-columns:1fr}
   .staff-create-permissions,.staff-account-permissions{align-items:stretch;flex-direction:column}
   .staff-create-permissions .btn,.staff-account-permissions .btn{align-self:flex-start}
   .staff-permission-modal-backdrop{padding:12px}
@@ -482,6 +512,71 @@
 .participant-passcode-panel{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-top:18px;padding:15px;border:1px solid #cfe1ef;border-radius:12px;background:#f2f8fc}
 .participant-passcode-panel h3{margin:4px 0 0;color:#17395e;font:600 16px 'Space Grotesk'}
 .participant-passcode-value{display:flex;align-items:center;gap:12px}
+.participant-gender-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 18px}
+.participant-gender-summary>.surface{display:flex;min-height:76px;flex-direction:column;justify-content:center;gap:5px;padding:13px 17px}
+.participant-gender-summary small{color:#607489;font-size:11px}
+.participant-gender-summary strong{color:#123c68;font:600 25px 'Space Grotesk'}
+.participation-summary-grid{grid-template-columns:repeat(5,minmax(0,1fr))}
+.participation-summary-card{min-height:90px;padding:15px}
+.participation-summary-card>span{color:#61758a;font-size:11px}
+.participation-summary-card>strong{margin-top:8px;color:#123c68;font:600 28px 'Space Grotesk'}
+.participation-workspace{display:block}
+.participation-workspace .sponsorship-child-list{max-height:none}
+.participation-workspace .sponsorship-child-row{justify-content:flex-start}
+.participation-workspace .sponsorship-child-copy{min-width:0;flex:1}
+.participation-status-badge{display:inline-flex;align-items:center;flex:0 0 auto;padding:5px 9px;border-radius:999px;background:#e5f4e8;color:#26643b;font-size:10px;font-weight:700;line-height:1.25;text-transform:uppercase}
+.participation-status-badge.warning{background:#fff2d1;color:#875900}
+.participation-status-badge.grounds-for-departure,.participation-status-badge.removed-from-sponsorship{background:#fde5e5;color:#a12d31}
+.participation-status-badge.second-chance{background:#e7efff;color:#284f94}
+.participation-detail-status{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 14px;color:#607489;font-size:12px}
+.participation-month-card,.participation-history-section{margin:0 0 14px;padding:17px}
+.participation-month-card h3,.participation-history-section h3{margin:0;color:#17395e;font:600 17px 'Space Grotesk'}
+.participation-number-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:15px}
+.participation-number-grid>div{display:grid;gap:5px;padding:11px;border-radius:9px;background:#f0f6fb}
+.participation-number-grid small{color:#61758a;font-size:10px}
+.participation-number-grid strong{color:#123c68;font:600 20px 'Space Grotesk'}
+.participation-lifetime{margin:12px 0 0;color:#50657b;font-size:12px}
+.participation-action-panel{margin:0 0 14px;padding:17px;border:1px solid #e6b754;border-radius:12px;background:#fff8e8}
+.participation-action-panel h3{margin:0 0 7px;font:600 18px 'Space Grotesk'}
+.participation-action-panel p{margin:0 0 10px;color:#5d5360;font-size:13px}
+.participation-action-panel .form-control{background:#fff}
+.grounds-action-panel{border-color:#e6b754;background:#fff8e8}
+.grounds-action-panel h3{color:#8b5200}
+.second-chance-action-panel{border-color:#aac4ed;background:#f2f6ff}
+.second-chance-action-panel h3{color:#284f94}
+.participation-event-history{display:grid;gap:0;margin:12px 0 0;padding:0;list-style:none}
+.participation-event-history li{display:flex;align-items:flex-start;gap:11px;padding:11px 0;border-bottom:1px solid #e7edf3}
+.participation-event-history li:last-child{border-bottom:0}
+.participation-event-history li>div{display:grid;gap:3px;min-width:0}
+.participation-event-history strong{color:#17395e;font-size:12px}
+.participation-event-history small{color:#697b8d;font-size:10px}
+.attendance-check,.attendance-missed{display:grid;width:22px;height:22px;flex:0 0 22px;place-items:center;border-radius:50%;background:#e5f4e8;color:#26643b;font-size:14px;font-weight:700}
+.attendance-missed{background:#fde5e5;color:#a12d31}
+.participation-removal-modal{width:min(100%,520px);padding:25px}
+.participation-removal-modal h2{margin:0 0 17px;color:#17395e;font:600 22px 'Space Grotesk'}
+.participation-removal-details{display:grid;gap:0;margin:0 0 13px}
+.participation-removal-details>div{display:flex;justify-content:space-between;gap:15px;padding:8px 0;border-bottom:1px solid #e8eef4}
+.participation-removal-details dt{color:#61758a;font-size:12px}
+.participation-removal-details dd{margin:0;color:#17395e;font-size:12px;font-weight:700;text-align:right}
+.participation-removal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:17px}
+.growth-activity-section .participant-history-section-heading{align-items:flex-start}
+.growth-activity-section .participant-history-section-heading p{margin:5px 0 0;color:#61758a;font-size:12px}
+.growth-activity-count{margin:12px 0;color:#61758a;font-size:11px;font-weight:700}
+.growth-activity-section .guardian-update-list{margin-top:8px}
+.growth-activity-section .guardian-update-card{background:linear-gradient(145deg,#f5faff,#fff)}
+.growth-activity-section .guardian-update-top time{white-space:nowrap}
+.growth-update-modal{width:min(100%,560px);padding:25px}
+.growth-update-backdrop{z-index:1600}
+.growth-update-modal .participant-modal-header{margin-bottom:18px}
+.growth-update-modal .participant-modal-header h2{margin:5px 0 0;color:#17395e;font:600 21px 'Space Grotesk'}
+.growth-update-form{display:grid;gap:9px}
+.growth-update-form .form-label{margin:3px 0 0;color:#50677f;font-size:12px;font-weight:700}
+.growth-update-form .form-control,.growth-update-form .form-select{border-color:#dce6ef;border-radius:10px}
+.growth-measurement-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.growth-measurement-fields>div{display:grid;gap:8px}
+.growth-update-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:10px}
+@media(max-width:850px){.participation-summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:640px){.participant-gender-summary{gap:8px}.participant-gender-summary>.surface{padding:10px}.participant-gender-summary strong{font-size:21px}.participation-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.participation-workspace .sponsorship-child-row{align-items:flex-start}.participation-workspace .participation-status-badge{max-width:112px;white-space:normal}.participation-number-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.participation-detail-status{align-items:flex-start;flex-direction:column}.participation-removal-modal,.growth-update-modal{padding:18px}.participation-removal-actions,.growth-update-actions{flex-wrap:wrap}.growth-measurement-fields{grid-template-columns:1fr}}
 .participant-passcode-value strong{color:#0c416c;font:700 24px 'Space Grotesk';letter-spacing:4px}
 @media(max-width:640px){.participant-register-action{margin:-10px 0 18px}.participant-modal-backdrop{align-items:center;padding:16px}.participant-modal{max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);padding:20px 17px;border-radius:16px}.participant-modal-header h2{font-size:22px}}
 
@@ -797,7 +892,7 @@ label.form-label:has(+ textarea[required])::after{
 .participant-register-action{gap:10px;flex-wrap:wrap}
 .participant-register-action .btn{border:0;border-radius:12px;min-height:44px;padding:10px 22px;font-weight:700;background:linear-gradient(135deg,#0c315d,#1a5a96);box-shadow:0 8px 20px rgba(12,49,93,.25);transition:transform .18s,box-shadow .18s,background .18s}
 .participant-register-action .btn:hover{transform:translateY(-2px);background:linear-gradient(135deg,#123f6e,#1f66ab);box-shadow:0 12px 26px rgba(12,49,93,.32)}
-.participant-allowance-summary{display:block;margin-top:5px;color:#536a80;font-size:11px}
+.participant-attendance-summary{display:block;margin-top:5px;color:#536a80;font-size:11px}
 .allowance-balance-card{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0;padding:17px 20px;border:1px solid #d8e9f6;border-radius:14px;background:linear-gradient(120deg,#eef7ff,#f9fcff)}
 .allowance-balance-card span{color:#48647e;font-size:12px;font-weight:600}
 .allowance-balance-card strong{color:#0a376a;font:600 24px 'Space Grotesk'}
