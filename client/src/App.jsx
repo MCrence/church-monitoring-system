@@ -1728,7 +1728,7 @@ function ImportDataModal({ onClose, onCompleted }) {
                 </select>
               </div>
               <div className="col-12 col-md-6">
-                <label className="form-label" htmlFor="participant-import-file">Step 1 — Upload file</label>
+                <label className="form-label" htmlFor="participant-import-file">Upload file</label>
                 <input id="participant-import-file" className="form-control" type="file" accept=".csv,.xlsx,.xls" disabled={loading} onChange={(event) => inspectFile(event.target.files?.[0])} />
               </div>
             </div>
