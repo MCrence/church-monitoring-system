@@ -11,7 +11,9 @@ function isGoerRole(role) {
 
 function canGoerUsePermission(role, permission) {
   return !isGoerRole(role) || [
+    'dashboard:view',
     'checkin:record',
+    'participants:view',
     'goer-care:view',
     'goer-care:record',
   ].includes(permission);

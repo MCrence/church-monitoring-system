@@ -38,21 +38,22 @@ const formatCount = (value) => {
 const STAFF_ROLES = ["system administrator", "church administrator"];
 const GOER_ROLE = "goer";
 const STAFF_PERMISSION_OPTIONS = [
-  { key: "dashboard:view", label: "Dashboard", description: "View system overview and summary metrics." },
-  { key: "participants:view", label: "View participants", description: "Browse participant records and profiles." },
-  { key: "participants:manage", label: "Manage participants", description: "Register, view, edit, and remove participant records." },
+  { key: "dashboard:view", label: "Dashboard", description: "View your role-based dashboard." },
+  { key: "participants:view", label: "View participants", description: "Allows staff to view participant information." },
+  { key: "participants:edit", label: "Edit participants", description: "Allows staff to modify existing participant information." },
+  { key: "participants:delete", label: "Delete participants", description: "Allows staff to deactivate existing participant records." },
   { key: "events:view", label: "View events", description: "View events and event attendance lists." },
   { key: "events:manage", label: "Manage events", description: "View, create, and update events." },
   { key: "checkin:record", label: "Check-in", description: "Record attendance at the check-in station." },
   { key: "analytics:view", label: "Analytics", description: "View and refresh participant analytics." },
   { key: "reports:view", label: "Reports", description: "View and export attendance reports and sponsored-child monitoring data when authorized." },
-  { key: "portal:view", label: "Participant QR portal", description: "Look up participant details using a QR code and passcode." },
   { key: "sponsorship:view", label: "View sponsored care", description: "View sponsored-child participation and attendance history." },
   { key: "sponsorship:manage", label: "Manage sponsored care", description: "Grant second chances and record sponsorship removals after attendance review." },
 ];
 const DEFAULT_STAFF_PERMISSION_KEYS = STAFF_PERMISSION_OPTIONS
   .map(({ key }) => key)
-  .filter((key) => !key.startsWith("sponsorship:"));
+  .filter((key) => !key.startsWith("sponsorship:") &&
+    !["participants:edit", "participants:delete"].includes(key));
 const PAGE_PERMISSIONS = {
   dashboard: "dashboard:view",
   participants: "participants:view",
@@ -60,7 +61,6 @@ const PAGE_PERMISSIONS = {
   scanner: "checkin:record",
   analytics: "analytics:view",
   reports: "reports:view",
-  portal: "portal:view",
   sponsorship: "sponsorship:view",
 };
 const PAGE_ACCESS = {
@@ -69,13 +69,12 @@ const PAGE_ACCESS = {
   staff: ["system administrator"],
 };
 const PAGE_LINKS = [
-  ["dashboard", "Overview"],
+  ["dashboard", "Dashboard"],
   ["participants", "Participants"],
   ["events", "Events"],
   ["scanner", "Check-in"],
   ["analytics", "Analytics"],
   ["reports", "Reports"],
-  ["portal", "Child portal"],
   ["sponsorship", "Sponsored care"],
   ["staff", "Manage Accounts"],
   ["audit", "Audit history"],
@@ -84,7 +83,9 @@ const canAccessPermission = (permission, user) => {
   const role = String(user?.role || user || "").toLowerCase();
   if (role === "system administrator") return true;
   if (role === GOER_ROLE) {
-    return permission === "checkin:record" ||
+    return permission === "dashboard:view" ||
+      permission === "checkin:record" ||
+      permission === "participants:view" ||
       (permission === "sponsorship:view" &&
         user?.permissions?.includes("goer-care:view"));
   }
@@ -94,7 +95,8 @@ const canAccessPermission = (permission, user) => {
     : DEFAULT_STAFF_PERMISSION_KEYS;
   if (permissions.includes(permission)) return true;
   return (
-    (permission === "participants:view" && permissions.includes("participants:manage")) ||
+    (["participants:view", "participants:edit", "participants:delete"].includes(permission) &&
+      permissions.includes("participants:manage")) ||
     (permission === "events:view" && permissions.includes("events:manage")) ||
     (permission === "sponsorship:view" && permissions.includes("sponsorship:manage"))
   );
@@ -429,7 +431,14 @@ function Header({ user, page, go, logout }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const canManageAccount = STAFF_ROLES.includes(String(user.role).toLowerCase()) ||
     String(user.role).toLowerCase() === GOER_ROLE;
-  const links = PAGE_LINKS.filter(([key]) => canAccessPage(key, user));
+  const links = PAGE_LINKS
+    .filter(([key]) => canAccessPage(key, user))
+    .map(([key, label]) => [
+      key,
+      String(user.role).toLowerCase() === GOER_ROLE && key === "participants"
+        ? "My Participants"
+        : label,
+    ]);
   return (
     <aside className="topbar app-sidebar">
       <button className="brand-button" onClick={() => go("dashboard")}>
@@ -824,105 +833,184 @@ const GenderSelect = ({ id, value, onChange, onBlur, required = false, error }) 
     {error && <div className="invalid-feedback" id={`${id}-error`} role="alert">{error}</div>}
   </div>
 );
-function Dashboard({ go }) {
-  const [d, setD] = useState({ counts: {}, recentCheckins: [], atRisk: [] });
+function Dashboard({ go, user }) {
+  const [d, setD] = useState(null);
   const [greeting, setGreeting] = useState(() => getGreeting());
   const [dashboardError, setDashboardError] = useState("");
   useEffect(() => {
-    apiCall(`/dashboard`)
-      .then(setD)
-      .catch((error) => setDashboardError(error.message));
+    let active = true;
+    const load = () => apiCall("/dashboard")
+      .then((data) => {
+        if (active) {
+          setD(data);
+          setDashboardError("");
+        }
+      })
+      .catch((error) => {
+        if (active) setDashboardError(error.message);
+      });
+    load();
+    const refresh = () => load();
+    window.addEventListener("focus", refresh);
+    const interval = window.setInterval(refresh, 60_000);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refresh);
+      window.clearInterval(interval);
+    };
   }, []);
   useEffect(() => {
     const interval = window.setInterval(() => setGreeting(getGreeting()), 60_000);
     return () => window.clearInterval(interval);
   }, []);
+  const isGoer = String(user?.role || "").toLowerCase() === GOER_ROLE;
+  const isAdmin = String(user?.role || "").toLowerCase() === "system administrator";
+  const canViewParticipants = canAccessPermission("participants:view", user);
+  const canManageParticipants = isAdmin;
+  const canViewEvents = canAccessPermission("events:view", user);
+  const canManageEvents = canAccessPermission("events:manage", user);
+  const canCheckIn = canAccessPermission("checkin:record", user);
+  const canViewCare = canAccessPermission("sponsorship:view", user);
+  const displayName = (user?.fullName || user?.name || "").trim().split(/\s+/)[0];
+  const heading = `Good ${greeting}${displayName ? ` ${displayName}` : ""}.`;
+  const rateLabel = (period) => `${period?.rate || 0}%`;
+  const recentAttendance = d?.recentCheckins || [];
+  const followups = d?.followups || [];
+  const upcoming = d?.upcomingEvents || [];
+  const openActions = [
+    ...(isGoer && canViewCare ? [{ label: "My Participants", icon: "→", page: "participants" }] : []),
+    ...(canManageParticipants ? [{ label: "Register Participant", icon: "+", page: "participants" }] : []),
+    ...(canManageEvents ? [{ label: "Create Event", icon: "+", page: "events" }] : []),
+    ...(canCheckIn ? [{ label: "Check-in", icon: "✓", page: "scanner" }] : []),
+    ...(canManageParticipants ? [{ label: "Import Data", icon: "⇧", page: "participants" }] : []),
+    ...(isAdmin ? [{ label: "Manage Accounts", icon: "⌘", page: "staff" }] : []),
+  ];
+  const renderEvents = (rows, emptyText) => rows.length ? (
+    <ul className="dashboard-list">
+      {rows.map((event) => (
+        <li key={event.id}>
+          <div><strong>{event.name}</strong><small>{new Date(event.starts_at).toLocaleString()} {event.location ? `· ${event.location}` : ""}</small></div>
+          {event.status && <span className="dashboard-status">{event.status}</span>}
+        </li>
+      ))}
+    </ul>
+  ) : <p className="dashboard-empty">{emptyText}</p>;
+  const renderFollowups = () => followups.length ? (
+    <ul className="dashboard-list">
+      {followups.map((child) => (
+        <li key={child.id}>
+          <div><strong>{child.name}</strong><small>{child.absent} absences{child.status === "SECOND_CHANCE" ? ` · ${child.postSecondChanceAbsences || 0} after second chance` : ""}</small></div>
+          <span className={`dashboard-status ${child.status === "GROUNDS_FOR_DEPARTURE" ? "is-critical" : child.status === "WARNING" ? "is-warning" : ""}`}>{participationStatusLabel(child.status)}</span>
+        </li>
+      ))}
+    </ul>
+  ) : <p className="dashboard-empty">No participants require follow-up.</p>;
+  const renderAttendance = () => {
+    const monthly = d?.monthlyAttendance || [];
+    const hasAttendance = monthly.some((period) => period.required > 0);
+    return (
+      <>
+        <div className="dashboard-attendance-periods">
+          {[["Today", d?.attendance?.today], ["This Week", d?.attendance?.week], ["This Month", d?.attendance?.month], ["This Year", d?.attendance?.year]].map(([label, period]) => (
+            <div key={label}><small>{label}</small><strong>{formatCount(period?.attended || 0)} / {formatCount(period?.required || 0)}</strong><span>{rateLabel(period)}</span></div>
+          ))}
+        </div>
+        <p className="dashboard-absence-total">Total absences this year: <strong>{formatCount(d?.attendance?.year?.absent || 0)}</strong></p>
+        <h3 className="dashboard-subheading">Monthly Attendance</h3>
+        {hasAttendance ? (
+          <div className="dashboard-chart" role="img" aria-label="Monthly attendance this year">
+            {monthly.map((month) => {
+              const rate = month.required ? Math.max(4, Math.round((month.attended / month.required) * 100)) : 0;
+              return <div className="dashboard-chart-row" key={month.month}><span>{new Date(2000, month.month - 1, 1).toLocaleDateString(undefined, { month: "short" })}</span><div><i style={{ width: `${rate}%` }} /></div><small>{month.required ? `${rate}%` : "—"}</small></div>;
+            })}
+          </div>
+        ) : <p className="dashboard-empty">No attendance records yet.</p>}
+      </>
+    );
+  };
   return (
     <>
       <Title
-        e="COMMAND CENTER"
-        t={`Good ${greeting}.`}
-        d="A live pulse on participation and care."
+        e={isGoer ? "MY DASHBOARD" : isAdmin ? "COMMAND CENTER" : "STAFF DASHBOARD"}
+        t={heading}
+        d={isGoer ? `Your ${d?.educationLevel || "assigned"} group’s latest activity.` : "A live overview of participation, attendance, activities, and care."}
       />
       {dashboardError && <div className="alert alert-danger" role="alert">{dashboardError}</div>}
-      <div className="row g-3 mb-4">
-        {[
-          [
-            "Total active participant",
-            d.counts.activeParticipants ?? "—",
-            `${d.counts.participants ?? "—"} total records`,
-          ],
-          ["Total Goer", d.counts.totalGoers ?? "—", "Goer participants"],
-          ["Total staff", d.counts.totalStaff ?? "—", "Active staff accounts"],
-          ["Total Events", d.counts.totalEvents ?? "—", "Events on record"],
-        ].map((x) => (
-          <div className="col-12 col-sm-6 col-lg-3" key={x[0]}>
-            <div className="stat-card">
-              <small>{x[0]}</small>
-              <strong>{x[1]}</strong>
-              <span>{x[2]}</span>
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="row g-4">
-        <section className="col-12 col-lg-7">
-          <h2>Recent check-ins</h2>
-          <div className="table-responsive">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Participant</th>
-                  <th>Event</th>
-                  <th>Time</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {d.recentCheckins.map((r, i) => (
-                  <tr key={i}>
-                    <td>#{r.participant_id}</td>
-                    <td>{r.event_name}</td>
-                    <td>
-                      {r.checked_in_at
-                        ? new Date(r.checked_in_at).toLocaleString()
-                        : "—"}
-                    </td>
-                    <td>{r.status}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-        <section className="col-12 col-lg-5">
-          <h2>Attendance follow-up prompts</h2>
-          <p className="text-secondary small">Review attendance context with staff. Scores do not determine a child’s circumstances.</p>
-          <div className="risk-list">
-            {d.atRisk.map((r) => (
-              <div className="risk-row" key={`${r.id}-${r.computed_at}`}>
-                <div>
-                  <strong>
-                    {r.participant_code || `Participant #${r.id}`}
-                  </strong>
-                  <small>{r.model_version} · {r.computed_at}</small>
-                </div>
-                <Badge level={r.risk_level} />
-                <strong className="risk-score">
-                  {Number(r.risk_score).toFixed(0)}
-                </strong>
+      {!d && !dashboardError && <p className="dashboard-empty" role="status">Loading dashboard data…</p>}
+      {d && (
+        <>
+          <div className="row g-3 mb-4">
+            {(isAdmin ? [
+              ["Total Participants", d.participantCounts.total, `${formatCount(d.participantCounts.newThisMonth)} new this month`],
+              ["Active Participants", d.participantCounts.active, `${formatCount(d.participantCounts.inactive)} inactive`],
+              ["Attendance Rate", rateLabel(d.attendance.month), "This month"],
+              ["Upcoming Events", d.events.upcoming, "Scheduled"],
+            ] : isGoer ? [
+              ["My Participants", d.participantCounts.total, d.educationLevel],
+              ["Upcoming Activities", d.events.upcoming, "Across your assigned group"],
+              ["Attendance This Month", rateLabel(d.attendance.month), `${formatCount(d.attendance.month.attended)} present`],
+              ["Needs Follow-up", d.followupCount || 0, "Participants requiring attention"],
+            ] : [
+              ["Today's Events", d.events.today, "Scheduled for today"],
+              ["Today's Check-ins", d.attendance.today.attended, "Recorded attendance"],
+              ["Active Participants", d.participantCounts.active, "Participant records"],
+              ["Attendance Follow-ups", canViewCare ? d.followupCount || 0 : "—", canViewCare ? "Care status requires review" : "Sponsored-care access not assigned"],
+            ]).map(([label, value, caption]) => (
+              <div className="col-12 col-sm-6 col-xl-3" key={label}>
+                <div className="stat-card"><small>{label}</small><strong>{typeof value === "number" ? formatCount(value) : value}</strong><span>{caption}</span></div>
               </div>
             ))}
           </div>
-        </section>
-      </div>
+          {isAdmin && (
+            <section className="surface dashboard-section mb-4">
+              <div className="dashboard-section-heading"><div><h2>Participant Overview</h2><p>Current participant registry</p></div>{canViewParticipants && <button className="btn btn-outline-primary btn-sm" onClick={() => go("participants")}>View Participants</button>}</div>
+              <div className="dashboard-overview-stats">
+                {[["Male", d.participantCounts.male], ["Female", d.participantCounts.female], ["Active", d.participantCounts.active], ["Inactive", d.participantCounts.inactive], ["New this month", d.participantCounts.newThisMonth]].map(([label, value]) => <div key={label}><small>{label}</small><strong>{formatCount(value)}</strong></div>)}
+              </div>
+            </section>
+          )}
+          {isAdmin && <section className="surface dashboard-section mb-4"><div className="dashboard-section-heading"><div><h2>System Accounts</h2><p>Staff and Goer account totals</p></div></div><div className="dashboard-overview-stats">{[["Total Staff", d.users.totalStaff], ["Active Staff", d.users.activeStaff], ["Goer Accounts", d.users.goerAccounts], ["Church Administrators", d.users.churchAdministrators]].map(([label, value]) => <div key={label}><small>{label}</small><strong>{formatCount(value)}</strong></div>)}</div></section>}
+          <div className="row g-4 mb-4">
+            <section className={`${isAdmin ? "col-12 col-xl-7" : "col-12 col-xl-6"}`}>
+              <article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>{isGoer ? "Group Attendance" : "Attendance Overview"}</h2><p>{isGoer ? `Attendance for ${d.educationLevel} participants` : "Based on scheduled events and recorded check-ins"}</p></div>{canCheckIn && <button className="btn btn-outline-primary btn-sm" onClick={() => go("scanner")}>Open Check-in</button>}</div>{renderAttendance()}</article>
+            </section>
+            <section className={`${isAdmin ? "col-12 col-xl-5" : "col-12 col-xl-6"}`}>
+              <article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>{isGoer ? "Upcoming Activities" : "Events"}</h2><p>{formatCount(d.events.upcoming)} upcoming · {formatCount(d.events.thisMonth)} this month · {formatCount(d.events.completedThisMonth)} completed this month</p></div>{canViewEvents && <button className="btn btn-outline-primary btn-sm" onClick={() => go("events")}>View Events</button>}</div><h3 className="dashboard-subheading">Today’s Events</h3>{renderEvents(d.todayEvents, "No events scheduled for today.")}<h3 className="dashboard-subheading">Upcoming Events</h3>{renderEvents(upcoming, "No upcoming events.")}</article>
+            </section>
+          </div>
+          {isGoer && (
+            <section className="surface dashboard-section mb-4">
+              <div className="dashboard-section-heading"><div><h2>My Participants</h2><p>Only active participants in your assigned education group are shown.</p></div>{canViewParticipants && <button className="btn btn-outline-primary btn-sm" onClick={() => go("participants")}>View My Participants</button>}</div>
+              {d.groupParticipants?.length ? <div className="dashboard-participant-grid">{d.groupParticipants.map((child) => <article key={child.id}><strong>{child.name}</strong><small>{[child.gender, child.age ? `${child.age} years old` : null].filter(Boolean).join(" · ") || "Participant"}</small><span>Attendance: {child.attendanceRate}%</span></article>)}</div> : <p className="dashboard-empty">No active participants are assigned to your group.</p>}
+            </section>
+          )}
+          {(isAdmin || canViewCare) && (
+            <div className="row g-4 mb-4">
+              {isAdmin && <section className="col-12 col-lg-5"><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Sponsored Care</h2><p>Participation status summary</p></div><button className="btn btn-outline-primary btn-sm" onClick={() => go("sponsorship")}>View Sponsored Care</button></div><div className="dashboard-overview-stats">{[["Active", d.sponsoredCare.active], ["Warning", d.sponsoredCare.warning], ["Grounds for Departure", d.sponsoredCare.groundsForDeparture], ["Second Chance", d.sponsoredCare.secondChance], ["Removed", d.sponsoredCare.removed]].map(([label, value]) => <div key={label}><small>{label}</small><strong>{formatCount(value)}</strong></div>)}</div></article></section>}
+              <section className={isAdmin ? "col-12 col-lg-7" : "col-12"}><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Attendance Follow-up</h2><p>Participants who may need a conversation or support</p></div></div>{renderFollowups()}</article></section>
+            </div>
+          )}
+          {!isAdmin && !isGoer && canViewCare && (
+            <section className="surface dashboard-section mb-4">
+              <div className="dashboard-section-heading"><div><h2>Recent Growth &amp; Activity</h2><p>Latest participant care updates</p></div>{canViewParticipants && <button className="btn btn-outline-primary btn-sm" onClick={() => go("participants")}>View Participants</button>}</div>
+              {d.recentCareUpdates?.length ? <ul className="dashboard-list">{d.recentCareUpdates.map((entry) => <li key={entry.id}><div><strong>{entry.participantName}</strong><small>{entry.type === "growth" ? "Growth update" : entry.type === "activity" ? "Activity update" : "Care note"} · {entry.recordedOn ? new Date(entry.recordedOn).toLocaleDateString() : new Date(entry.createdAt).toLocaleDateString()}</small></div></li>)}</ul> : <p className="dashboard-empty">No recent care updates.</p>}
+            </section>
+          )}
+          <div className="row g-4">
+            <section className={isAdmin ? "col-12 col-xl-7" : "col-12"}>
+              <article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>{isAdmin ? "Recent System Activity" : "Recent Check-ins"}</h2><p>{isAdmin ? "Latest recorded check-ins" : "Recent attendance in your operational scope"}</p></div></div>{recentAttendance.length ? <ul className="dashboard-list">{recentAttendance.map((entry, index) => <li key={`${entry.participant_id}-${entry.checked_in_at}-${index}`}><div><strong>{entry.participantName || `Participant #${entry.participant_id}`} checked in</strong><small>{entry.event_name} · {entry.checked_in_at ? new Date(entry.checked_in_at).toLocaleString() : "Time unavailable"}</small></div><span className="dashboard-status is-success">{entry.status}</span></li>)}</ul> : <p className="dashboard-empty">No recent activity.</p>}{isAdmin && d.recentActivity?.length > 0 && <ul className="dashboard-list dashboard-audit-list">{d.recentActivity.map((entry) => <li key={entry.id}><div><strong>{entry.action} · {entry.entity_type}</strong><small>{entry.username} · {new Date(entry.created_at).toLocaleString()}</small></div><span className="dashboard-status">{entry.role}</span></li>)}</ul>}</article>
+            </section>
+            {openActions.length > 0 && <section className={isAdmin ? "col-12 col-xl-5" : "col-12"}><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Quick Actions</h2><p>Shortcuts to permitted workflows</p></div></div><div className="dashboard-quick-actions">{openActions.map((action) => <button key={action.label} type="button" className="dashboard-quick-action" onClick={() => go(action.page)}><span>{action.icon}</span><strong>{action.label}</strong></button>)}</div></article></section>}
+          </div>
+        </>
+      )}
     </>
   );
 }
 function getGreeting() {
   const hour = new Date().getHours();
-  if (hour >= 1 && hour < 12) return "morning";
-  if (hour >= 12 && hour < 18) return "afternoon";
+  if (hour >= 1 && hour < 12) return "morning!";
+  if (hour >= 12 && hour < 18) return "afternoon!";
   return "evening";
 }
 function Register({ onClose, onCreated }) {
@@ -1356,6 +1444,375 @@ function participantHistoryStatusLabel(value) {
   }
   return String(value).replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
+
+const IMPORT_FIELDS = {
+  participants: [
+    ["participantIdentifier", "Participant ID"],
+    ["fullName", "Participant Name"],
+    ["firstName", "First Name"],
+    ["middleName", "Middle Name"],
+    ["lastName", "Last Name"],
+    ["dateOfBirth", "Date of Birth"],
+    ["gender", "Sex"],
+    ["address", "Address"],
+    ["phone", "Phone"],
+    ["guardianName", "Guardian Name"],
+    ["guardianContact", "Guardian Contact"],
+    ["medicalConditions", "Medical Conditions"],
+    ["educationLevel", "Education Level"],
+    ["currentSchool", "Current School"],
+    ["schoolAddress", "School Address"],
+    ["gradeLevel", "Grade/Year"],
+    ["collegeCourse", "College Course"],
+    ["registrationDate", "Registration Date"],
+    ["sponsorshipRegistrationDate", "Sponsorship Registration Date"],
+  ],
+  education: [
+    ["participantIdentifier", "Participant ID"],
+    ["educationLevel", "Education Level"],
+    ["schoolName", "School Name"],
+    ["schoolAddress", "School Address"],
+    ["startYear", "Start Year"],
+    ["endYear", "End Year"],
+    ["status", "Status"],
+    ["courseStrand", "Course/Strand"],
+    ["notes", "Notes"],
+  ],
+  attendance: [
+    ["participantIdentifier", "Participant ID"],
+    ["eventId", "Event ID"],
+    ["eventName", "Event Name"],
+    ["eventDate", "Event Date"],
+    ["attendanceStatus", "Attendance Status"],
+  ],
+  attendanceSummary: [
+    ["participantIdentifier", "Participant ID"],
+    ["year", "Year"],
+    ["required", "Required"],
+    ["attended", "Attended"],
+    ["absent", "Absent"],
+  ],
+};
+
+const IMPORT_ALIASES = {
+  participantIdentifier: ["participant id", "participant code", "child id", "fmc id", "id"],
+  fullName: ["participant name", "child name", "full name", "name"],
+  firstName: ["first name", "firstname", "given name"],
+  middleName: ["middle name", "middlename"],
+  lastName: ["last name", "lastname", "surname", "family name"],
+  dateOfBirth: ["dob", "birth date", "date of birth"],
+  gender: ["sex", "gender"],
+  address: ["address", "home address"],
+  phone: ["phone", "phone number", "mobile"],
+  guardianName: ["guardian name", "parent name"],
+  guardianContact: ["guardian contact", "guardian contact number", "guardian phone", "emergency contact", "emergency contact number"],
+  medicalConditions: ["medical conditions", "medical condition"],
+  educationLevel: ["education level", "education", "level"],
+  currentSchool: ["current school", "school", "school name"],
+  schoolName: ["school name", "school", "previous school"],
+  schoolAddress: ["school address"],
+  gradeLevel: ["grade year", "grade/year", "grade level", "year level"],
+  collegeCourse: ["college course", "course", "program"],
+  registrationDate: ["registration date", "participant registration date", "date registered"],
+  sponsorshipRegistrationDate: ["sponsorship registration date", "sponsorship date", "sponsor date", "date registered for sponsorship"],
+  startYear: ["start year", "start"],
+  endYear: ["end year", "end"],
+  status: ["status", "education status"],
+  courseStrand: ["course strand", "strand", "course"],
+  notes: ["notes", "remarks"],
+  eventId: ["event id"],
+  eventName: ["event name", "event"],
+  eventDate: ["event date", "attendance date", "date"],
+  attendanceStatus: ["attendance status", "status", "attendance"],
+  year: ["year", "attendance year"],
+  required: ["required", "required activities"],
+  attended: ["attended", "attended activities"],
+  absent: ["absent", "absences"],
+};
+
+function normalizeImportDate(value) {
+  const text = String(value || "").trim();
+  const iso = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$/);
+  if (iso) return `${iso[1]}-${iso[2].padStart(2, "0")}-${iso[3].padStart(2, "0")}`;
+  const local = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+  if (local) return `${local[3]}-${local[1].padStart(2, "0")}-${local[2].padStart(2, "0")}`;
+  return text;
+}
+
+function csvDownload(fileName, rows) {
+  const escape = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const content = rows.map((row) => row.map(escape).join(",")).join("\r\n");
+  const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function ImportDataModal({ onClose, onCompleted }) {
+  const [importType, setImportType] = useState("participants");
+  const [file, setFile] = useState(null);
+  const [worksheet, setWorksheet] = useState(null);
+  const [mapping, setMapping] = useState([]);
+  const [preview, setPreview] = useState(null);
+  const [decisions, setDecisions] = useState({});
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    apiCall("/participants/import/history").then(setHistory).catch((requestError) => setError(requestError.message));
+  }, []);
+
+  const chooseImportType = (value) => {
+    setImportType(value);
+    setFile(null);
+    setWorksheet(null);
+    setPreview(null);
+    setResult(null);
+    setError("");
+  };
+  const inspectFile = async (selectedFile) => {
+    setError("");
+    setPreview(null);
+    setResult(null);
+    setWorksheet(null);
+    if (!selectedFile) return;
+    const extension = selectedFile.name.split(".").pop()?.toLowerCase();
+    if (!["csv", "xlsx", "xls"].includes(extension)) {
+      setFile(null);
+      setError("Unsupported file type. Choose a .csv, .xlsx, or .xls file.");
+      return;
+    }
+    if (selectedFile.size > 5 * 1024 * 1024) {
+      setFile(null);
+      setError("Files must be 5 MB or smaller.");
+      return;
+    }
+    setFile(selectedFile);
+    setLoading(true);
+    try {
+      const buffer = await selectedFile.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      }
+      const inspected = await apiCall("/participants/import/inspect", {
+        method: "POST",
+        body: JSON.stringify({ fileName: selectedFile.name, fileData: btoa(binary) }),
+      });
+      setWorksheet(inspected);
+      const availableFields = IMPORT_FIELDS[importType].map(([key]) => key);
+      setMapping(inspected.headers.map((header) => {
+        const normalized = String(header).trim().toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ");
+        const matched = availableFields.find((key) => IMPORT_ALIASES[key]?.includes(normalized));
+        return matched || "";
+      }));
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  const mappedRows = () => worksheet.rows
+    .map((values, rowIndex) => {
+      const row = { rowNumber: rowIndex + 2 };
+      mapping.forEach((field, columnIndex) => {
+        if (field) row[field] = String(values[columnIndex] ?? "").trim();
+      });
+      for (const field of ["dateOfBirth", "registrationDate", "sponsorshipRegistrationDate", "eventDate"]) {
+        if (row[field]) row[field] = normalizeImportDate(row[field]);
+      }
+      for (const field of ["eventId", "startYear", "endYear"]) {
+        if (row[field] !== undefined && row[field] !== "") row[field] = String(row[field]).trim();
+      }
+      return row;
+    })
+    .filter((row) => Object.keys(row).some((key) => key !== "rowNumber" && row[key] !== ""));
+  const validate = async () => {
+    if (!worksheet) return;
+    setLoading(true);
+    setError("");
+    try {
+      const data = await apiCall("/participants/import/preview", {
+        method: "POST",
+        body: JSON.stringify({ fileName: file.name, importType, rows: mappedRows() }),
+      });
+      setPreview(data);
+      const initialDecisions = {};
+      data.rows.forEach((row) => {
+        if (row.operation === "review") initialDecisions[row.rowNumber] = "skip";
+      });
+      setDecisions(initialDecisions);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  const commit = async () => {
+    if (!preview) return;
+    setLoading(true);
+    setError("");
+    try {
+      const data = await apiCall("/participants/import/commit", {
+        method: "POST",
+        body: JSON.stringify({
+          fileName: file.name,
+          importType,
+          rows: mappedRows(),
+          decisions,
+        }),
+      });
+      setResult(data);
+      setPreview(null);
+      setHistory(await apiCall("/participants/import/history"));
+      await onCompleted();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  const downloadTemplate = (type) => {
+    const fields = IMPORT_FIELDS[type].map(([, label]) => label);
+    const name = type === "participants" ? "participant-template.csv"
+      : type === "education" ? "education-history-template.csv" : "attendance-template.csv";
+    csvDownload(name, [fields]);
+  };
+  const downloadErrors = () => {
+    if (!preview) return;
+    const rows = [["Row", "Errors", "Warnings"]];
+    preview.rows.filter((row) => !row.valid || row.warnings.length)
+      .forEach((row) => rows.push([row.rowNumber, row.errors.join("; "), row.warnings.join("; ")]));
+    csvDownload("participant-import-errors.csv", rows);
+  };
+
+  return createPortal(
+    <div className="participant-modal-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !loading) onClose();
+    }}>
+      <section className="participant-modal" role="dialog" aria-modal="true" aria-labelledby="participant-import-title">
+        <header className="d-flex justify-content-between align-items-start gap-3 mb-4">
+          <div>
+            <span className="eyebrow">PARTICIPANTS / IMPORT</span>
+            <h2 id="participant-import-title">Import Data</h2>
+            <p className="text-secondary mb-0">Supported formats: Excel (.xlsx, .xls) and CSV (.csv). Maximum file size: 5 MB.</p>
+          </div>
+          <button type="button" className="btn-close" aria-label="Close import dialog" onClick={onClose} disabled={loading} />
+        </header>
+        {error && <div className="alert alert-danger" role="alert">{error}</div>}
+        {result ? (
+          <div className="alert alert-success" role="status">
+            <h3>Import completed successfully.</h3>
+            <p className="mb-1">Participants imported: {result.participantsImported}</p>
+            <p className="mb-1">Participants updated: {result.participantsUpdated}</p>
+            <p className="mb-1">Attendance records imported: {result.attendanceImported}</p>
+            <p className="mb-1">Historical attendance summaries imported: {result.attendanceSummariesImported}</p>
+            <p className="mb-1">Education records imported: {result.educationImported}</p>
+            <p className="mb-0">Skipped: {result.skipped} · Errors: {result.failed}</p>
+          </div>
+        ) : (
+          <>
+            <div className="row g-3 mb-3">
+              <div className="col-12 col-md-6">
+                <label className="form-label" htmlFor="participant-import-type">Import type</label>
+                <select id="participant-import-type" className="form-select" value={importType} onChange={(event) => chooseImportType(event.target.value)}>
+                  <option value="participants">Participant information</option>
+                  <option value="education">Education history</option>
+                  <option value="attendance">Detailed attendance records</option>
+                  <option value="attendanceSummary">Historical attendance summary</option>
+                </select>
+              </div>
+              <div className="col-12 col-md-6">
+                <label className="form-label" htmlFor="participant-import-file">Step 1 — Upload file</label>
+                <input id="participant-import-file" className="form-control" type="file" accept=".csv,.xlsx,.xls" disabled={loading} onChange={(event) => inspectFile(event.target.files?.[0])} />
+              </div>
+            </div>
+            <div className="d-flex flex-wrap gap-2 mb-4">
+              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("participants")}>Download Participant Template</button>
+              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("education")}>Download Education History Template</button>
+              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("attendance")}>Download Attendance Template</button>
+              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("attendanceSummary")}>Download Attendance Summary Template</button>
+            </div>
+            {worksheet && (
+              <>
+                <h3>Step 2 — Map your columns</h3>
+                <p className="text-secondary">Review and adjust every suggested mapping before validating.</p>
+                <div className="table-responsive mb-4">
+                  <table className="table align-middle">
+                    <thead><tr><th>File column</th><th>Map to system field</th></tr></thead>
+                    <tbody>{worksheet.headers.map((header, index) => (
+                      <tr key={`${header}-${index}`}>
+                        <td>{header}</td>
+                        <td>
+                          <select className="form-select" aria-label={`Map ${header}`} value={mapping[index] || ""} onChange={(event) => setMapping((current) => current.map((field, column) => column === index ? event.target.value : field))}>
+                            <option value="">Do not import</option>
+                            {IMPORT_FIELDS[importType].map(([key, label]) => <option value={key} key={key}>{label}</option>)}
+                          </select>
+                        </td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              </>
+            )}
+            {preview && (
+              <section className="mb-4">
+                <h3>Step 3 — Validate and preview</h3>
+                <p>Total rows: {preview.totalRows} · Valid: {preview.validRows} · Warnings: {preview.warningCount} · Errors: {preview.errorCount}</p>
+                <div className="table-responsive">
+                  <table className="table table-sm align-middle">
+                    <thead><tr><th>Row</th><th>Operation</th><th>Validation</th></tr></thead>
+                    <tbody>{preview.rows.slice(0, 100).map((row) => (
+                      <tr key={row.rowNumber}>
+                        <td>{row.rowNumber}</td>
+                        <td>
+                          {row.operation === "review" && row.valid ? (
+                            <select className="form-select form-select-sm" value={decisions[row.rowNumber] || "skip"} onChange={(event) => setDecisions((current) => ({ ...current, [row.rowNumber]: event.target.value }))}>
+                              <option value="skip">Skip</option>
+                              {importType === "participants" && <><option value="update">Update Existing</option><option value="create">Create New</option></>}
+                            </select>
+                          ) : (row.valid ? row.operation : "Error")}
+                        </td>
+                        <td>{row.errors.map((item) => <div className="text-danger" key={item}>✕ {item}</div>)}{row.warnings.map((item) => <div className="text-warning-emphasis" key={item}>⚠ {item}</div>)}{row.valid && !row.warnings.length && <span>✓ Valid</span>}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+                {preview.rows.length > 100 && <p className="text-secondary">Showing the first 100 of {preview.rows.length} rows.</p>}
+                {preview.errorCount > 0 && <button type="button" className="btn btn-outline-danger btn-sm" onClick={downloadErrors}>Download Error Report</button>}
+              </section>
+            )}
+            <footer className="d-flex flex-wrap justify-content-between gap-2">
+              <button type="button" className="btn btn-outline-secondary" onClick={onClose} disabled={loading}>Cancel</button>
+              <div className="d-flex gap-2">
+                {worksheet && !preview && <button type="button" className="btn btn-primary" onClick={validate} disabled={loading || !mapping.some(Boolean)}>{loading ? "Validating…" : "Validate and Preview"}</button>}
+                {preview && <button type="button" className="btn btn-dark" onClick={commit} disabled={loading || preview.validRows === 0}>{loading ? "Importing…" : "Import Valid Records"}</button>}
+              </div>
+            </footer>
+          </>
+        )}
+        <section className="mt-4">
+          <h3>Import History</h3>
+          {history.length ? (
+            <div className="table-responsive"><table className="table table-sm">
+              <thead><tr><th>File</th><th>Imported by</th><th>Date</th><th>Type</th><th>Records</th><th>Failed</th></tr></thead>
+              <tbody>{history.map((item) => (
+                <tr key={item.id}><td>{item.file_name}</td><td>{item.imported_by_name}</td><td>{formatParticipantHistoryDate(item.created_at)}</td><td>{item.import_type}</td><td>{Number(item.participants_imported) + Number(item.participants_updated) + Number(item.attendance_imported) + Number(item.attendance_summaries_imported) + Number(item.education_imported)}</td><td>{item.failed}</td></tr>
+              ))}</tbody>
+            </table></div>
+          ) : <p className="text-secondary">No previous imports.</p>}
+        </section>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
 function ParticipantHistoryPage({ participantId, onBack }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1539,13 +1996,15 @@ function ParticipantHistoryPage({ participantId, onBack }) {
               <h2>Registration information</h2>
               <dl className="participant-history-details">
                 <div><dt>Registration date</dt><dd>{formatParticipantHistoryDate(participant.registrationDate)}</dd></div>
-                <div><dt>Participant ID</dt><dd>{participant.participantCode || `Participant #${participant.id}`}</dd></div>
-                <div><dt>Initial status</dt><dd>{participantHistoryStatusLabel(participant.initialStatus)}</dd></div>
-                <div><dt>Current status</dt><dd>{participantHistoryStatusLabel(participant.status)}</dd></div>
-                <div><dt>Education</dt><dd>{participant.educationLevel || "Not recorded"}</dd></div>
-                <div><dt>Grade / year</dt><dd>{participant.gradeLevel || "Not recorded"}</dd></div>
-                {participant.programCourse && <div><dt>Course</dt><dd>{participant.programCourse}</dd></div>}
-                {participant.schoolName && <div><dt>School</dt><dd>{participant.schoolName}</dd></div>}
+                  <div><dt>Sponsorship registered</dt><dd>{formatParticipantHistoryDate(participant.sponsorshipRegistrationDate)}</dd></div>
+                  <div><dt>Participant ID</dt><dd>{participant.participantCode || `Participant #${participant.id}`}</dd></div>
+                  <div><dt>Initial status</dt><dd>{participantHistoryStatusLabel(participant.initialStatus)}</dd></div>
+                  <div><dt>Current status</dt><dd>{participantHistoryStatusLabel(participant.status)}</dd></div>
+                  <div><dt>Current education level</dt><dd>{participant.educationLevel || "Not recorded"}</dd></div>
+                  <div><dt>Grade / year</dt><dd>{participant.gradeLevel || "Not recorded"}</dd></div>
+                  {participant.programCourse && <div><dt>Course</dt><dd>{participant.programCourse}</dd></div>}
+                  {participant.schoolName && <div><dt>Current school</dt><dd>{participant.schoolName}</dd></div>}
+                  {participant.schoolAddress && <div><dt>School address</dt><dd>{participant.schoolAddress}</dd></div>}
               </dl>
             </article>
             <article className="surface participant-history-section">
@@ -1559,6 +2018,42 @@ function ParticipantHistoryPage({ participantId, onBack }) {
               {isSponsoredChild && <p className="mb-0">Participation status: <strong>{participantHistoryStatusLabel(participant.status)}</strong></p>}
             </article>
           </div>
+          <article className="surface participant-history-section">
+            <h2>Education History</h2>
+            <p className="text-secondary">View the schools and education levels previously attended by the participant.</p>
+            {participant.educationHistory?.length ? (
+              <ul className="participation-event-history">
+                {participant.educationHistory.map((record) => (
+                  <li key={record.id}>
+                    <span className="attendance-check">{record.endYear || record.startYear}</span>
+                    <div>
+                      <strong>{record.status} {record.educationLevel}</strong>
+                      <small>{record.schoolName} · {record.startYear} – {record.endYear || (record.status === "Currently Attending" ? "Present" : "End year not recorded")}</small>
+                      {record.courseStrand && <small>{record.courseStrand}</small>}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="text-secondary mb-0">No education history has been recorded.</p>}
+          </article>
+          <article className="surface participant-history-section">
+            <h2>Weekly Attendance — Current Month</h2>
+            {data?.currentMonthWeeklyAttendance?.length ? (
+              <ul className="participation-event-history">
+                {data.currentMonthWeeklyAttendance.map((week) => (
+                  <li key={week.week}>
+                    <span className={week.totalAttended ? "attendance-check" : "attendance-missed"}>
+                      {week.totalAttended ? "✓" : "×"}
+                    </span>
+                    <div>
+                      <strong>Week {week.week}</strong>
+                      <small>{week.totalAttended}/{week.totalEvents} attended · {week.totalEvents - week.totalAttended} absent</small>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="text-secondary mb-0">No events recorded for the current month.</p>}
+          </article>
           <article className="surface participant-history-section">
             <div className="participant-history-section-heading">
               <h2>Recent attendance</h2>
@@ -1643,6 +2138,20 @@ function ParticipantHistoryPage({ participantId, onBack }) {
                 </tbody>
               </table>
             </div>
+          </article>
+          <article className="surface participant-history-section">
+            <h2>Historical Attendance Summary (Imported)</h2>
+            <p className="text-secondary">Yearly summaries are preserved separately and do not replace detailed event attendance or affect participation status.</p>
+            {data?.historicalAttendanceSummary?.length ? (
+              <div className="table-responsive">
+                <table className="table align-middle participant-history-table">
+                  <thead><tr><th>Year</th><th>Required</th><th>Attended</th><th>Absent</th><th>Attendance rate</th></tr></thead>
+                  <tbody>{data.historicalAttendanceSummary.map((entry) => (
+                    <tr key={entry.year}><td>{entry.year}</td><td>{entry.required}</td><td>{entry.attended}</td><td>{entry.absent}</td><td>{entry.attendanceRate}%</td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ) : <p className="text-secondary mb-0">No historical attendance summaries imported.</p>}
           </article>
           <article className="surface participant-history-section">
             <h2>Attendance records</h2>
@@ -1736,7 +2245,7 @@ function ParticipantHistoryPage({ participantId, onBack }) {
     </section>
   );
 }
-function Participants({ canManage, user, onViewHistory }) {
+function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onViewHistory }) {
   const canViewSponsorship = canAccessPermission("sponsorship:view", user);
   const [list, setList] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -1745,8 +2254,24 @@ function Participants({ canManage, user, onViewHistory }) {
   const [query, setQuery] = useState("");
   const [sortBy, setSortBy] = useState("newest");
   const [genderFilter, setGenderFilter] = useState("all");
+  const [recordStatusFilter, setRecordStatusFilter] = useState("all");
   const [message, setMessage] = useState("");
   const [showRegistration, setShowRegistration] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [educationHistory, setEducationHistory] = useState([]);
+  const [growthUpdates, setGrowthUpdates] = useState([]);
+  const [profileAttendance, setProfileAttendance] = useState(null);
+  const [educationDraft, setEducationDraft] = useState({
+    educationLevel: "",
+    schoolName: "",
+    schoolAddress: "",
+    startYear: "",
+    endYear: "",
+    status: "",
+    courseStrand: "",
+    notes: "",
+  });
+  const [addingEducation, setAddingEducation] = useState(false);
   const [educationFilter, setEducationFilter] = useState("all");
   const [childStatusFilter, setChildStatusFilter] = useState("all");
   const [visiblePasscode, setVisiblePasscode] = useState(null);
@@ -1773,6 +2298,8 @@ function Participants({ canManage, user, onViewHistory }) {
   const closeProfile = () => {
     setSelected(null);
     setForm(null);
+    setGrowthUpdates([]);
+    setProfileAttendance(null);
     setEditing(false);
     setMessage("");
   };
@@ -1789,22 +2316,68 @@ function Participants({ canManage, user, onViewHistory }) {
       .then((data) => setList(Array.isArray(data) ? data.filter((participant) => participant.status !== "deleted") : []))
       .catch((error) => setMessage(error.message));
   }, []);
-  const choose = async (id) => {
+  const choose = async (id, startEditing = false) => {
     try {
-      const data = await apiCall(`/participants/${id}`);
+      const selectedRow = list.find((participant) => String(participant.id) === String(id));
+      const shouldLoadGrowth = canViewSponsorship && selectedRow?.participant_type === "sponsored_child";
+      const growthUpdatesPromise = shouldLoadGrowth
+        ? apiCall(`/sponsorship/children/${id}/updates`)
+          .then((updates) => ({ updates }))
+          .catch((requestError) => ({ updates: [], loadError: requestError.message }))
+        : Promise.resolve({ updates: [] });
+      const [data, educationRows, attendanceData, growthData] = await Promise.all([
+        apiCall(`/participants/${id}`),
+        apiCall(`/participants/${id}/education-history`),
+        apiCall(`/participants/${id}/history`).catch((requestError) => ({ loadError: requestError.message })),
+        growthUpdatesPromise,
+      ]);
       setSelected(id);
+      setEducationHistory(educationRows);
+      setGrowthUpdates(growthData.updates);
+      setProfileAttendance(attendanceData.loadError ? null : attendanceData);
       setVisiblePasscode(null);
       setPasscodeMessage("");
       setForm({
         ...data.participant,
         participantType: data.participant.participant_type,
+        sponsorshipRegistrationDate: data.participant.sponsorship_registered_at || "",
         ...participantNameFields(data.participant),
         passcode: '',
       });
-      setEditing(false);
-      setMessage("");
+      setEditing(startEditing);
+      setAddingEducation(false);
+      setMessage(attendanceData.loadError
+        ? `Attendance details could not be loaded: ${attendanceData.loadError}`
+        : growthData.loadError ? `Growth & Activity could not be loaded: ${growthData.loadError}` : "");
+      return true;
     } catch (error) {
       setMessage(error.message);
+      return false;
+    }
+  };
+  const saveEducationRecord = async (event) => {
+    event.preventDefault();
+    if (!selected) return;
+    try {
+      await apiCall(`/participants/${selected}/education-history`, {
+        method: "POST",
+        body: JSON.stringify(educationDraft),
+      });
+      setEducationHistory(await apiCall(`/participants/${selected}/education-history`));
+      setEducationDraft({
+        educationLevel: "",
+        schoolName: "",
+        schoolAddress: "",
+        startYear: "",
+        endYear: "",
+        status: "",
+        courseStrand: "",
+        notes: "",
+      });
+      setAddingEducation(false);
+      setMessage("Education history saved.");
+    } catch (requestError) {
+      setMessage(requestError.message);
     }
   };
   const revealPasscode = async () => {
@@ -1898,9 +2471,12 @@ function Participants({ canManage, user, onViewHistory }) {
   const genderVisibleParticipants = genderFilter === "all"
     ? visibleParticipants
     : visibleParticipants.filter((item) => String(item.gender || "").toLowerCase() === genderFilter);
-  const statusVisibleParticipants = childStatusFilter === "all"
+  const recordStatusParticipants = recordStatusFilter === "all"
     ? genderVisibleParticipants
-    : genderVisibleParticipants.filter((item) =>
+    : genderVisibleParticipants.filter((item) => String(item.status || "").toLowerCase() === recordStatusFilter);
+  const statusVisibleParticipants = childStatusFilter === "all"
+    ? recordStatusParticipants
+    : recordStatusParticipants.filter((item) =>
         normalizeParticipationStatus(item.participation_status) === childStatusFilter);
   const filtered = statusVisibleParticipants.filter((item) =>
     `${item.fullName || ""} ${item.participant_code || ""} ${item.participant_type || ""} ${item.gender || ""}`
@@ -1929,13 +2505,18 @@ function Participants({ canManage, user, onViewHistory }) {
     <>
       <Title
         e="PARTICIPANTS / RECORDS"
-        t="Participant directory."
-        d="Explore participant records, review activity history, and monitor sponsored-child participation."
+        t={isGoer ? "My Participants" : "Participant directory."}
+        d={isGoer
+          ? "View the children assigned to your group."
+          : "Explore participant records, review activity history, and monitor sponsored-child participation."}
       />
-      {canManage && (
-        <div className="participant-register-action">
+      {canCreateImport && (
+        <div className="participant-register-action d-flex flex-wrap gap-2">
           <button type="button" className="btn btn-dark" onClick={() => setShowRegistration(true)}>
-            + Register sponsored child
+            + Register Child
+          </button>
+          <button type="button" className="btn btn-outline-primary" onClick={() => setShowImport(true)}>
+            Import Data
           </button>
         </div>
       )}
@@ -1980,6 +2561,19 @@ function Participants({ canManage, user, onViewHistory }) {
                   <option value="female">Female</option>
                 </select>
               </div>
+              <div className="participant-filter-field">
+                <label className="form-label" htmlFor="participants-record-status">Status</label>
+                <select
+                  id="participants-record-status"
+                  className="form-select"
+                  value={recordStatusFilter}
+                  onChange={(event) => setRecordStatusFilter(event.target.value)}
+                >
+                  <option value="all">All</option>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </div>
               {canViewSponsorship && (
                 <div className="participant-filter-field">
                   <label className="form-label" htmlFor="participants-child-status">Participation status</label>
@@ -2017,37 +2611,47 @@ function Participants({ canManage, user, onViewHistory }) {
               </p>
             </div>
             {sortedParticipants.map((item) => (
-              <button
-                type="button"
+              <article
                 className={`directory-row ${selected === item.id ? "selected" : ""}`}
                 key={item.id}
-                onClick={() => choose(item.id)}
               >
-                <span>
-                  <strong>
-                    {item.participant_code || `Participant #${item.id}`}
-                  </strong>
-                  <small>
-                    {item.participant_type === "sponsored_child"
-                      ? "Sponsored Child"
-                      : "Goer"}{" "}
-                    · {item.gender || "Sex not set"}
-                  </small>
-                  {canViewSponsorship && item.participant_type === "sponsored_child" && (
-                    <small className="participant-attendance-summary">
-                      Monthly: {item.monthly_participation?.attended || 0}/2 attended · {item.monthly_participation?.absent ?? 2} absent
+                <button type="button" className="directory-row-main" onClick={() => choose(item.id)}>
+                  <span>
+                    <strong>{item.fullName || "Unnamed participant"}</strong>
+                    <small>
+                      {item.gender || "Sex not set"}
+                      {Number.isFinite(item.age) ? ` · ${item.age} years old` : ""}
+                      {" · "}{participantHistoryStatusLabel(item.status)}
                     </small>
-                  )}
-                </span>
-                <span className="directory-row-end">
+                    <small>{item.participant_code || `Participant #${item.id}`}</small>
+                    {canViewSponsorship && item.participant_type === "sponsored_child" && (
+                      <small className="participant-attendance-summary">
+                        Monthly: {item.monthly_participation?.attended || 0}/2 attended · {item.monthly_participation?.absent ?? 2} absent
+                      </small>
+                    )}
+                  </span>
                   {canViewSponsorship && item.participant_type === "sponsored_child" && (
                     <span className={`participation-status-badge ${String(item.participation_status || "ACTIVE").toLowerCase().replaceAll("_", "-")}`}>
                       {participationStatusLabel(item.participation_status)}
                     </span>
                   )}
-                  <span className="directory-arrow">→</span>
-                </span>
-              </button>
+                </button>
+                <div className="participant-row-actions">
+                  <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => choose(item.id)}>View</button>
+                  {canEdit && <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => choose(item.id, true)}>Edit</button>}
+                  {canDelete && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-danger"
+                      onClick={async () => {
+                        if (await choose(item.id)) setConfirmDelete(true);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </article>
             ))}
             {!sortedParticipants.length && (
               <p className="text-secondary" role="status">
@@ -2086,15 +2690,15 @@ function Participants({ canManage, user, onViewHistory }) {
                   >
                     View History
                   </button>
-                  {canManage && (
-                    <>
-                      <button type="button" className="profile-tool-btn" title="Edit details" aria-label="Edit participant details" onClick={() => { setMessage(""); setEditing(true); }}>
-                        <EditIcon />
-                      </button>
-                      <button type="button" className="profile-tool-btn profile-tool-btn-danger" title="Delete participant" aria-label="Delete participant" onClick={() => setConfirmDelete(true)}>
-                        <DeleteIcon />
-                      </button>
-                    </>
+                  {canEdit && (
+                    <button type="button" className="profile-tool-btn" title="Edit details" aria-label="Edit participant details" onClick={() => { setMessage(""); setEditing(true); }}>
+                      <EditIcon />
+                    </button>
+                  )}
+                  {canDelete && (
+                    <button type="button" className="profile-tool-btn profile-tool-btn-danger" title="Delete participant" aria-label="Delete participant" onClick={() => setConfirmDelete(true)}>
+                      <DeleteIcon />
+                    </button>
                   )}
                   <button type="button" className="btn-close" aria-label="Close participant profile" onClick={closeProfile} />
                 </div>
@@ -2157,11 +2761,7 @@ function Participants({ canManage, user, onViewHistory }) {
                     ["Sex", form.gender],
                     ["Date of birth", form.dateOfBirth],
                     ["Age", <AgeValue key="age" dateOfBirth={form.dateOfBirth} />],
-                    ["Education", form.educationLevel],
-                    ["Grade/year", form.gradeLevel],
-                    ["College course", form.programCourse],
-                    ["School name", form.schoolName],
-                    ["School address", form.schoolAddress],
+                    ["Sponsorship registered", formatParticipantHistoryDate(form.sponsorshipRegistrationDate || form.sponsorship_registered_at)],
                     ["Phone", form.phone],
                     ["Address", form.address],
                     ["Guardian Name", form.emergencyContactName],
@@ -2174,6 +2774,149 @@ function Participants({ canManage, user, onViewHistory }) {
                     </div>
                   ))}
               </div>
+              <section className="participant-profile-education">
+                <h3>Current Education</h3>
+                <div className="profile-grid">
+                  {[
+                    ["Education level", form.educationLevel],
+                    ["Current school", form.schoolName],
+                    ["School address", form.schoolAddress],
+                    ["Grade / year level", form.gradeLevel],
+                    ["College course", form.programCourse],
+                  ].map(([label, value]) => (
+                    <div key={label}><small>{label}</small><strong>{value || "Not provided"}</strong></div>
+                  ))}
+                </div>
+              </section>
+              <section className="participant-profile-education">
+                <div className="d-flex justify-content-between align-items-start gap-2">
+                  <div>
+                    <h3>Education History</h3>
+                    <p className="text-secondary">View the schools and education levels previously attended by the participant.</p>
+                  </div>
+                  {canEdit && <button type="button" className="btn btn-outline-primary btn-sm" onClick={() => setAddingEducation((value) => !value)}>+ Add Education History</button>}
+                </div>
+                {educationHistory.length ? (
+                  <div className="participant-education-history-list">
+                    {educationHistory.map((record) => (
+                      <article className="participant-education-history-card" key={record.id}>
+                        <strong>{record.educationLevel}</strong>
+                        <span>{record.schoolName}</span>
+                        {record.schoolAddress && <small>{record.schoolAddress}</small>}
+                        <span>{record.startYear} – {record.endYear || (record.status === "Currently Attending" ? "Present" : "End year not recorded")}</span>
+                        <span>{record.status}</span>
+                        {record.courseStrand && <small>{record.courseStrand}</small>}
+                        {record.notes && <small>{record.notes}</small>}
+                      </article>
+                    ))}
+                  </div>
+                ) : <p className="text-secondary">No education history has been recorded.</p>}
+                {addingEducation && canEdit && (
+                  <form className="row g-3 mt-2" onSubmit={saveEducationRecord}>
+                    <div className="col-12 col-md-6">
+                      <label className="form-label" htmlFor="education-history-level">Education level *</label>
+                      <select id="education-history-level" className="form-select" required value={educationDraft.educationLevel} onChange={(event) => setEducationDraft({ ...educationDraft, educationLevel: event.target.value })}>
+                        <option value="">Select education level</option>
+                        {["Elementary", "Junior High School", "Senior High School", "College", "Vocational", "Other"].map((level) => <option key={level}>{level}</option>)}
+                      </select>
+                    </div>
+                    <Field label="School name *" value={educationDraft.schoolName} onChange={(event) => setEducationDraft({ ...educationDraft, schoolName: event.target.value })} required />
+                    <Field label="School address" value={educationDraft.schoolAddress} onChange={(event) => setEducationDraft({ ...educationDraft, schoolAddress: event.target.value })} />
+                    <Field label="Start year *" type="number" min="1900" max={new Date().getFullYear() + 1} value={educationDraft.startYear} onChange={(event) => setEducationDraft({ ...educationDraft, startYear: event.target.value })} required />
+                    <Field label="End year" type="number" min={educationDraft.startYear || "1900"} max={new Date().getFullYear() + 1} value={educationDraft.endYear} onChange={(event) => setEducationDraft({ ...educationDraft, endYear: event.target.value })} required={["Graduated", "Completed"].includes(educationDraft.status)} />
+                    <div className="col-12 col-md-6">
+                      <label className="form-label" htmlFor="education-history-status">Status *</label>
+                      <select id="education-history-status" className="form-select" required value={educationDraft.status} onChange={(event) => setEducationDraft({ ...educationDraft, status: event.target.value })}>
+                        <option value="">Select status</option>
+                        {["Currently Attending", "Graduated", "Completed", "Transferred", "Dropped", "Other"].map((status) => <option key={status}>{status}</option>)}
+                      </select>
+                    </div>
+                    <Field label="Course / Strand" value={educationDraft.courseStrand} onChange={(event) => setEducationDraft({ ...educationDraft, courseStrand: event.target.value })} />
+                    <div className="col-12">
+                      <label className="form-label" htmlFor="education-history-notes">Notes</label>
+                      <textarea id="education-history-notes" className="form-control" rows="2" maxLength="2000" value={educationDraft.notes} onChange={(event) => setEducationDraft({ ...educationDraft, notes: event.target.value })} />
+                    </div>
+                    <div className="col-12 d-flex gap-2">
+                      <button type="submit" className="btn btn-primary btn-sm">Save education record</button>
+                      <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setAddingEducation(false)}>Cancel</button>
+                    </div>
+                  </form>
+                )}
+              </section>
+              {canViewSponsorship && form.participantType === "sponsored_child" && (
+                <section className="participant-profile-education">
+                  <h3>Growth &amp; Activity</h3>
+                  {growthUpdates.length ? (
+                    <div className="guardian-update-list">
+                      {growthUpdates.map((updateEntry) => (
+                        <article className={`guardian-update-card update-${updateEntry.type}`} key={updateEntry.id}>
+                          <div className="guardian-update-body">
+                            <div className="guardian-update-top">
+                              <strong>{updateEntry.type === "growth" ? "Growth measurement" : updateEntry.type === "activity" ? "Activity" : "Care note"}</strong>
+                              <time>{formatParticipantHistoryDate(updateEntry.recordedOn)}</time>
+                            </div>
+                            {updateEntry.type === "growth" && (updateEntry.heightCm || updateEntry.weightKg) && (
+                              <p className="guardian-update-metrics">
+                                {updateEntry.heightCm && <span>Height: {updateEntry.heightCm} cm</span>}
+                                {updateEntry.weightKg && <span>Weight: {updateEntry.weightKg} kg</span>}
+                              </p>
+                            )}
+                            {updateEntry.activity && <p className="guardian-update-activity">{updateEntry.activity}</p>}
+                            {updateEntry.note && <p className="guardian-update-note">{updateEntry.note}</p>}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  ) : <p className="text-secondary">No Growth &amp; Activity updates recorded yet.</p>}
+                </section>
+              )}
+              <section className="participant-profile-education">
+                <h3>Attendance</h3>
+                <p className="text-secondary">Detailed attendance is calculated from existing events and check-in records.</p>
+                <h4>Weekly Attendance — Current Month</h4>
+                {profileAttendance?.currentMonthWeeklyAttendance?.length ? (
+                  <ul className="participation-event-history">
+                    {profileAttendance.currentMonthWeeklyAttendance.map((week) => (
+                      <li key={week.week}>
+                        <span className={week.totalAttended ? "attendance-check" : "attendance-missed"}>{week.totalAttended ? "✓" : "×"}</span>
+                        <div><strong>Week {week.week}</strong><small>{week.totalAttended}/{week.totalEvents} attended · {week.totalEvents - week.totalAttended} absent</small></div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : <p className="text-secondary">No events recorded this month.</p>}
+                <h4>Monthly Attendance</h4>
+                {profileAttendance?.attendanceByMonth?.length ? (
+                  <div className="table-responsive"><table className="table table-sm">
+                    <thead><tr><th>Month</th><th>Attended / Events</th><th>Attendance</th></tr></thead>
+                    <tbody>{profileAttendance.attendanceByMonth.map((month) => (
+                      <tr key={month.month}>
+                        <td>{new Date(2000, month.month - 1, 1).toLocaleDateString(undefined, { month: "long" })}</td>
+                        <td>{month.totalAttended}/{month.totalEvents}</td>
+                        <td>{month.attendanceRate}%</td>
+                      </tr>
+                    ))}</tbody>
+                  </table></div>
+                ) : <p className="text-secondary">No monthly attendance is available.</p>}
+                <h4>Yearly Attendance</h4>
+                {profileAttendance?.attendanceByYear?.length ? (
+                  <div className="table-responsive"><table className="table table-sm">
+                    <thead><tr><th>Year</th><th>Attended</th><th>Absent</th><th>Attendance</th></tr></thead>
+                    <tbody>{profileAttendance.attendanceByYear.map((year) => (
+                      <tr key={year.year}><td>{year.year}</td><td>{year.totalAttended}</td><td>{year.totalEvents - year.totalAttended}</td><td>{year.attendanceRate}%</td></tr>
+                    ))}</tbody>
+                  </table></div>
+                ) : <p className="text-secondary">No yearly attendance is available.</p>}
+                <h4>Historical Attendance Summary (Imported)</h4>
+                <p className="text-secondary">Summary-only imports are separate from detailed attendance and do not affect participation status.</p>
+                {profileAttendance?.historicalAttendanceSummary?.length ? (
+                  <div className="table-responsive"><table className="table table-sm">
+                    <thead><tr><th>Year</th><th>Required</th><th>Attended</th><th>Absent</th></tr></thead>
+                    <tbody>{profileAttendance.historicalAttendanceSummary.map((summary) => (
+                      <tr key={summary.year}><td>{summary.year}</td><td>{summary.required}</td><td>{summary.attended}</td><td>{summary.absent}</td></tr>
+                    ))}</tbody>
+                  </table></div>
+                ) : <p className="text-secondary">No historical summary imported.</p>}
+              </section>
             </div>
           ) : (
             <form className="participant-profile-edit" onSubmit={save}>
@@ -2189,7 +2932,7 @@ function Participants({ canManage, user, onViewHistory }) {
                 </div>
                 <button type="button" className="btn-close" aria-label="Close participant editor" onClick={() => { setEditing(false); setMessage(""); }} />
               </div>
-              {form.participantType === "goer" && (
+              {form.participantType === "goer" && canDelete && (
                 <div className="participant-account-status">
                   <label className="form-label" htmlFor="edit-participant-status">Registration status</label>
                   <select id="edit-participant-status" className="form-select" value={form.status || "active"} onChange={update("status")}>
@@ -2318,6 +3061,14 @@ function Participants({ canManage, user, onViewHistory }) {
                       value={(form.enrollmentDate || "").slice(0, 10)}
                       onChange={update("enrollmentDate")}
                     />
+                    {form.participantType === "sponsored_child" && (
+                      <Field
+                        label="Sponsorship registration date"
+                        type="date"
+                        value={(form.sponsorshipRegistrationDate || form.sponsorship_registered_at || "").slice(0, 10)}
+                        onChange={update("sponsorshipRegistrationDate")}
+                      />
+                    )}
                     <Field
                       label="New portal passcode (optional)"
                       type="password"
@@ -2350,7 +3101,7 @@ function Participants({ canManage, user, onViewHistory }) {
           </div>,
           document.body,
         )}
-      {confirmDelete && createPortal(
+      {confirmDelete && canDelete && createPortal(
         <div
           className="participant-modal-backdrop confirm-backdrop"
           onMouseDown={(event) => {
@@ -2377,12 +3128,13 @@ function Participants({ canManage, user, onViewHistory }) {
         </div>,
         document.body,
       )}
-      {showRegistration && (
+      {showRegistration && canCreateImport && (
         <Register
           onClose={() => setShowRegistration(false)}
           onCreated={refreshParticipants}
         />
       )}
+      {showImport && canCreateImport && <ImportDataModal onClose={() => setShowImport(false)} onCompleted={refreshParticipants} />}
     </>
   );
 }
@@ -2504,8 +3256,8 @@ function PublicHome({ onLogin }) {
             <svg viewBox="0 0 24 24" fill="none"><path d="M20.8 8.7c0 5.4-8.8 11-8.8 11s-8.8-5.6-8.8-11A4.7 4.7 0 0 1 12 6.1a4.7 4.7 0 0 1 8.8 2.6Z" /><path d="M8.5 12h2l1.2-2.2 1.7 4.4 1.1-2.2h1" /></svg>
           </span><span className="public-access-number">02 / GUARDIAN</span></span>
           <strong>Sponsored Child Guardian</strong>
-          <span>See your child’s sponsorship status with their QR code and passcode.</span>
-          <b>Check sponsorship <span aria-hidden="true">↗</span></b>
+          <span>View your child’s progress, attendance, and care updates with their QR code and passcode.</span>
+          <b>View child progress <span aria-hidden="true">↗</span></b>
         </button>
         </div>
       </section>
@@ -2589,7 +3341,8 @@ function PublicLookup({ onBack }) {
       <section className="public-lookup-heading">
         <span className="eyebrow">GUARDIAN SPACE</span>
         <h1>Your child’s journey.</h1>
-        <p>Scan the Sponsored Child’s QR code. You’ll be asked for the passcode after scanning.</p>
+        <p>View your child’s participation, attendance, growth, and current care status.</p>
+        <p className="guardian-verification-hint">Scan the Sponsored Child QR code. You’ll be asked for the passcode after scanning.</p>
       </section>
       {!result ? (
         <form className="surface public-lookup-form" onSubmit={submit}>
@@ -2605,15 +3358,22 @@ function PublicLookup({ onBack }) {
         </form>
       ) : (
         <section className="surface public-result" aria-live="polite">
-          <span className="eyebrow">VERIFIED CHILD</span>
-          <h2>{result.child.name}</h2>
-          <p className="text-secondary">Participant ID: {result.child.participantCode}</p>
+          <div className="guardian-child-profile">
+            <span className="guardian-child-avatar" aria-hidden="true">
+              {result.child.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}
+            </span>
+            <div className="guardian-child-identity">
+              <span className="eyebrow">VERIFIED CHILD</span>
+              <h2>{result.child.name}</h2>
+              <p>Participant ID: {result.child.participantCode || "Not recorded"} · {result.child.age ?? "Age not recorded"} years old · {result.child.gender || "Sex not recorded"}</p>
+            </div>
+          </div>
           <GuardianSponsoredDetails
             child={result.child}
             qrPayload={payload}
             passcode={passcode}
           />
-          <button className="btn btn-outline-dark mt-4" onClick={() => { setResult(null); setPasscode(""); setPayload(""); setPasscodeOpen(false); lastScannedPayload.current = ""; lastScannedAt.current = 0; }}>Look up another</button>
+          <button className="btn btn-outline-dark mt-4 guardian-look-up-button" onClick={() => { setResult(null); setPasscode(""); setPayload(""); setPasscodeOpen(false); lastScannedPayload.current = ""; lastScannedAt.current = 0; }}>Look up another child</button>
         </section>
       )}
     </main>
@@ -2691,6 +3451,10 @@ function PublicLookup({ onBack }) {
 }
 function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
   const [section, setSection] = useState("attendance");
+  const [attendanceView, setAttendanceView] = useState("monthly");
+  const [selectedMonth, setSelectedMonth] = useState(child.participation?.monthly?.key || "");
+  const [selectedYear, setSelectedYear] = useState(String(child.participation?.currentYear?.year || new Date().getFullYear()));
+  const [showAllMonths, setShowAllMonths] = useState(false);
   const [updates, setUpdates] = useState([]);
   const [loadingUpdates, setLoadingUpdates] = useState(false);
   const [updatesLoaded, setUpdatesLoaded] = useState(false);
@@ -2716,70 +3480,371 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
     }
   };
   const participation = child.participation;
-  const statusClass = String(participation?.status || "WARNING").toLowerCase().replaceAll("_", "-");
+  const months = participation?.months || [];
+  const monthly = participation?.monthly;
+  const monthlyComplete = Boolean(monthly?.required > 0 && monthly.attended >= monthly.required);
+  const status = participation?.status || "WARNING";
+  const statusClass = status.toLowerCase().replaceAll("_", "-");
+  const statusDetails = {
+    ACTIVE: {
+      label: "Good standing",
+      badge: "✓ GOOD STANDING",
+      message: "Your child is currently meeting the monthly participation requirement.",
+      icon: "✓",
+    },
+    WARNING: {
+      label: "Attendance warning",
+      badge: "⚠ ATTENDANCE WARNING",
+      message: `Your child currently has ${monthly?.absent ?? 0} recorded ${monthly?.absent === 1 ? "absence" : "absences"} for ${monthly?.key || "this month"}.`,
+      icon: "⚠",
+    },
+    SECOND_CHANCE: {
+      label: "Second chance",
+      badge: "↻ SECOND CHANCE",
+      message: "Your child is currently under a second-chance attendance period.",
+      icon: "↻",
+    },
+    GROUNDS_FOR_DEPARTURE: {
+      label: "Grounds for departure",
+      badge: "! GROUNDS FOR DEPARTURE",
+      message: "Your child has reached the attendance threshold. Please contact the program administrator for further information.",
+      icon: "!",
+    },
+    REMOVED_FROM_SPONSORSHIP: {
+      label: "Program status ended",
+      badge: "PROGRAM STATUS ENDED",
+      message: "Please contact the program administrator if you have questions about your child's current program status.",
+      icon: "!",
+    },
+  }[status] || {
+    label: "Attendance warning",
+    badge: "⚠ ATTENDANCE WARNING",
+    message: "Please contact the program administrator for information about your child's current status.",
+    icon: "⚠",
+  };
+  const selectedMonthSummary = months.find((month) => month.key === selectedMonth) || monthly;
+  const selectedYearSummary = (participation?.years || []).find((year) => String(year.year) === selectedYear)
+    || participation?.currentYear;
+  const yearMonths = months.filter((month) => String(month.year) === String(selectedYear));
+  const activities = months.flatMap((month) => month.events || [])
+    .sort((first, second) => String(second.date).localeCompare(String(first.date)));
+  const lastAttendedActivity = activities.find((activity) => activity.attended);
+  const now = new Date();
+  const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekEnd.getDate() + 6);
+  const weekStartKey = `${weekStart.getFullYear()}-${String(weekStart.getMonth() + 1).padStart(2, "0")}-${String(weekStart.getDate()).padStart(2, "0")}`;
+  const weekEndKey = `${weekEnd.getFullYear()}-${String(weekEnd.getMonth() + 1).padStart(2, "0")}-${String(weekEnd.getDate()).padStart(2, "0")}`;
+  const weekActivities = activities.filter((activity) => activity.date >= weekStartKey && activity.date <= weekEndKey);
+  const weekAttended = weekActivities.filter((activity) => activity.attended).length;
+  const weekAbsent = weekActivities.length - weekAttended;
+  const weekRate = weekActivities.length ? Math.round((weekAttended / weekActivities.length) * 1000) / 10 : 0;
+  const monthLabel = (key) => key
+    ? formatParticipantHistoryDate(`${key}-01`, { month: "long", year: "numeric" })
+    : "Current month";
+  const activityStats = (entry) => [
+    ["Required", entry?.required ?? 0],
+    ["Attended", entry?.attended ?? 0],
+    ["Absent", entry?.absent ?? 0],
+    ["Attendance rate", `${entry?.attendanceRate ?? 0}%`],
+  ];
+  const statusForMonth = (month) => month.status === "ACTIVE"
+    ? { label: "Good standing", icon: "✓", className: "active" }
+    : { label: "Warning", icon: "⚠", className: "warning" };
+  const statusHistory = [
+    ...months.map((month) => ({
+      key: `month-${month.key}`,
+      date: `${month.key}-01`,
+      label: statusForMonth(month).label,
+      icon: statusForMonth(month).icon,
+      className: statusForMonth(month).className,
+      description: month.status === "ACTIVE"
+        ? "Monthly participation requirement completed."
+        : `${month.absent} ${month.absent === 1 ? "absence" : "absences"} recorded for the month.`,
+    })),
+    ...(participation?.history || [])
+      .filter((entry) => ["grounds_for_departure", "second_chance", "removed"].includes(entry.type))
+      .map((entry, index) => {
+        const typeInfo = {
+          grounds_for_departure: {
+            label: "Grounds for departure",
+            icon: "!",
+            className: "grounds-for-departure",
+            description: entry.reason || `${entry.absenceCount} total absences reached the program threshold.`,
+          },
+          second_chance: {
+            label: "Second chance",
+            icon: "↻",
+            className: "second-chance",
+            description: entry.reason || "Second-chance attendance monitoring started.",
+          },
+          removed: {
+            label: "Program status ended",
+            icon: "!",
+            className: "removed-from-sponsorship",
+            description: entry.reason || "A program status decision was recorded.",
+          },
+        }[entry.type];
+        return {
+          key: `action-${entry.type}-${index}`,
+          date: entry.createdAt,
+          ...typeInfo,
+        };
+      }),
+  ].sort((first, second) => String(second.date).localeCompare(String(first.date)));
 
   return (
     <div className="guardian-sponsored-details">
+      <section className={`guardian-current-status guardian-status-${statusClass}`} aria-label="Current child status">
+        <div className="guardian-current-status-icon" aria-hidden="true">{statusDetails.icon}</div>
+        <div>
+          <span>CURRENT STATUS</span>
+          <strong>{statusDetails.badge}</strong>
+          <p>{statusDetails.message}</p>
+        </div>
+      </section>
+      <section className="guardian-overview-section">
+        <div className="guardian-section-heading">
+          <span className="eyebrow">CHILD OVERVIEW</span>
+          <h3>At a glance</h3>
+        </div>
+        <div className="guardian-overview-grid">
+          {[
+            ["Current status", statusDetails.label],
+            ["This month", `${monthly?.attended ?? 0} / ${monthly?.required ?? 0}`],
+            ["Attendance rate", `${monthly?.attendanceRate ?? 0}%`],
+            ["Total absences", participation?.lifetime?.absent ?? 0],
+            ["Last activity", lastAttendedActivity
+              ? `${lastAttendedActivity.name} · ${formatParticipantHistoryDate(lastAttendedActivity.date, { month: "short", day: "numeric" })}`
+              : "No attendance yet"],
+          ].map(([label, value]) => (
+            <article key={label}><span>{label}</span><strong>{value}</strong></article>
+          ))}
+        </div>
+      </section>
       <div className="guardian-portal-tabs" role="tablist" aria-label="Child participation information">
-        <button type="button" className={section === "attendance" ? "active" : ""} role="tab" aria-selected={section === "attendance"} onClick={() => setSection("attendance")}>Monthly activities</button>
-        <button type="button" className={section === "updates" ? "active" : ""} role="tab" aria-selected={section === "updates"} onClick={() => { setSection("updates"); loadUpdates(); }}>Growth updates</button>
+        <button type="button" className={section === "attendance" ? "active" : ""} role="tab" aria-selected={section === "attendance"} onClick={() => setSection("attendance")}>Attendance</button>
+        <button type="button" className={section === "updates" ? "active" : ""} role="tab" aria-selected={section === "updates"} onClick={() => { setSection("updates"); loadUpdates(); }}>Growth &amp; development</button>
+        {(child.educationLevel || child.gradeLevel || child.educationHistory?.length) && <button type="button" className={section === "education" ? "active" : ""} role="tab" aria-selected={section === "education"} onClick={() => setSection("education")}>Education</button>}
       </div>
       {error && <div className="alert alert-danger mt-3" role="alert">{error}</div>}
       {section === "attendance" ? (
+        <div className="guardian-updates-section">
+          <section className="guardian-dashboard-card guardian-monthly-card">
+            <div className="guardian-section-heading">
+              <div><span className="eyebrow">MONTHLY PARTICIPATION</span><h3>{monthLabel(monthly?.key)}</h3></div>
+              <span className={`guardian-status-chip guardian-status-chip-${statusClass}`}>{statusDetails.label}</span>
+            </div>
+            <div className="guardian-stat-grid">
+              {activityStats(monthly).map(([label, value]) => (
+                <article key={label}><span>{label}</span><strong>{value}</strong></article>
+              ))}
+            </div>
+            <div className="guardian-progress-copy"><strong>{monthly?.attended ?? 0} / {monthly?.required ?? 0} activities completed</strong><span>{monthly?.attendanceRate ?? 0}%</span></div>
+            <div className="guardian-progress-track" role="progressbar" aria-label="Monthly activities completed" aria-valuemin="0" aria-valuemax={monthly?.required ?? 0} aria-valuenow={monthly?.attended ?? 0}>
+              <span style={{ width: `${monthly?.required ? Math.min(100, (monthly.attended / monthly.required) * 100) : 0}%` }} />
+            </div>
+            <p className={`guardian-requirement-message ${monthlyComplete ? "complete" : "incomplete"}`}>
+              <strong>{monthlyComplete ? "✓ Monthly requirement completed" : "⚠ Monthly requirement not completed"}</strong>
+              <span>{monthlyComplete
+                ? `Your child attended the required ${monthly?.required} activities this month.`
+                : `Your child needs to attend ${Math.max(0, (monthly?.required ?? 0) - (monthly?.attended ?? 0))} more ${Math.max(0, (monthly?.required ?? 0) - (monthly?.attended ?? 0)) === 1 ? "activity" : "activities"} to meet this month's requirement.`}</span>
+            </p>
+            {(monthly?.absent ?? 0) > 0 && <p className="guardian-absence-note">Your child has {monthly.absent} recorded {monthly.absent === 1 ? "absence" : "absences"} this month.</p>}
+          </section>
+
+          <section className="guardian-dashboard-card">
+            <div className="guardian-history-heading">
+              <div><span className="eyebrow">ATTENDANCE HISTORY</span><h3>Review attendance</h3></div>
+              <label className="guardian-view-select">
+                <span className="visually-hidden">Attendance history view</span>
+                <select className="form-select" value={attendanceView} onChange={(event) => setAttendanceView(event.target.value)}>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="yearly">Yearly</option>
+                </select>
+              </label>
+            </div>
+            {attendanceView === "weekly" && (
+              <div className="guardian-history-view">
+                <h4>Weekly attendance</h4>
+                <p className="guardian-period-label">{formatParticipantHistoryDate(weekStartKey, { month: "long", day: "numeric" })} – {formatParticipantHistoryDate(weekEndKey, { month: "long", day: "numeric", year: "numeric" })}</p>
+                <div className="guardian-stat-grid guardian-stat-grid-compact">
+                  {[["Activities held", weekActivities.length], ["Attended", weekAttended], ["Missed", weekAbsent], ["Attendance rate", `${weekRate}%`]].map(([label, value]) => (
+                    <article key={label}><span>{label}</span><strong>{value}</strong></article>
+                  ))}
+                </div>
+                <GuardianActivityList activities={weekActivities} emptyMessage="No event attendance records for this week." />
+              </div>
+            )}
+            {attendanceView === "monthly" && (
+              <div className="guardian-history-view">
+                <label className="guardian-period-select"><span>Choose month</span>
+                  <select className="form-select" value={selectedMonth} onChange={(event) => setSelectedMonth(event.target.value)}>
+                    {months.map((month) => <option key={month.key} value={month.key}>{monthLabel(month.key)}</option>)}
+                  </select>
+                </label>
+                <h4>{monthLabel(selectedMonthSummary?.key)}</h4>
+                <div className="guardian-stat-grid guardian-stat-grid-compact">
+                  {activityStats(selectedMonthSummary).map(([label, value]) => <article key={label}><span>{label}</span><strong>{value}</strong></article>)}
+                </div>
+                <div className="guardian-month-history">
+                  <h4>Monthly summary</h4>
+                  {(showAllMonths ? months : months.slice(0, 12)).map((month) => {
+                    const monthStatus = statusForMonth(month);
+                    return (
+                      <article className="guardian-month-row" key={month.key}>
+                        <strong>{monthLabel(month.key)}</strong>
+                        <span>{month.required} required</span>
+                        <span>{month.attended} attended · {month.absent} absent</span>
+                        <strong>{month.attendanceRate}%</strong>
+                        <span className={`guardian-history-status ${monthStatus.className}`}>{monthStatus.icon} {monthStatus.label}</span>
+                      </article>
+                    );
+                  })}
+                  {months.length > 12 && <button type="button" className="guardian-show-older-button" onClick={() => setShowAllMonths((shown) => !shown)}>{showAllMonths ? "Show recent months" : "Show older months"}</button>}
+                </div>
+                <h4 className="guardian-subsection-title">Recent activity attendance</h4>
+                <GuardianActivityList activities={activities.slice(0, 30)} emptyMessage="No event attendance records found." />
+              </div>
+            )}
+            {attendanceView === "yearly" && (
+              <div className="guardian-history-view">
+                <label className="guardian-period-select"><span>Choose year</span>
+                  <select className="form-select" value={selectedYear} onChange={(event) => setSelectedYear(event.target.value)}>
+                    {(participation?.years || []).map((year) => <option key={year.year} value={year.year}>{year.year}</option>)}
+                  </select>
+                </label>
+                <h4>{selectedYear} attendance summary</h4>
+                <div className="guardian-stat-grid guardian-stat-grid-compact">
+                  {[["Required activities", selectedYearSummary?.required ?? 0], ["Attended", selectedYearSummary?.attended ?? 0], ["Absent", selectedYearSummary?.absent ?? 0], ["Attendance rate", `${selectedYearSummary?.attendanceRate ?? 0}%`]].map(([label, value]) => (
+                    <article key={label}><span>{label}</span><strong>{value}</strong></article>
+                  ))}
+                </div>
+                <div className="guardian-month-history">
+                  {yearMonths.map((month) => {
+                    const monthStatus = statusForMonth(month);
+                    return (
+                      <article className="guardian-year-month-row" key={month.key}>
+                        <strong>{monthLabel(month.key)}</strong>
+                        <span>{month.attended} / {month.required}</span>
+                        <span>{month.attendanceRate}%</span>
+                        <span className={`guardian-history-status ${monthStatus.className}`}>{monthStatus.icon} {monthStatus.label}</span>
+                      </article>
+                    );
+                  })}
+                  {!yearMonths.length && <p className="text-secondary">No monthly attendance records found for this year.</p>}
+                </div>
+                <h4 className="guardian-subsection-title">Recent activity attendance</h4>
+                <GuardianActivityList activities={activities.filter((activity) => String(activity.date).startsWith(`${selectedYear}-`)).slice(0, 30)} emptyMessage="No event attendance records found for this year." />
+              </div>
+            )}
+          </section>
+
+          <section className="guardian-dashboard-card">
+            <div className="guardian-section-heading"><span className="eyebrow">ATTENDANCE OVERVIEW</span><h3>Participation to date</h3></div>
+            <div className="guardian-overview-grid guardian-overview-grid-three">
+              {[
+                ["Current month absences", monthly?.absent ?? 0],
+                ["Total absences", participation?.lifetime?.absent ?? 0],
+                ["Overall attendance rate", `${participation?.lifetime?.attendanceRate ?? 0}%`],
+              ].map(([label, value]) => <article key={label}><span>{label}</span><strong>{value}</strong></article>)}
+            </div>
+            <p className="guardian-threshold-note">Six absences may result in Grounds for Departure, subject to the program’s second-chance policy. Final decisions are made by an authorized administrator.</p>
+          </section>
+
+          <section className="guardian-dashboard-card">
+            <div className="guardian-section-heading"><span className="eyebrow">STATUS HISTORY</span><h3>How participation has changed</h3></div>
+            {statusHistory.length ? (
+              <ul className="guardian-status-history">
+                {statusHistory.slice(0, 12).map((entry) => (
+                  <li key={entry.key}>
+                    <span className={`guardian-history-icon ${entry.className}`} aria-hidden="true">{entry.icon}</span>
+                    <div><strong>{entry.label}</strong><span>{formatParticipantHistoryDate(entry.date, { month: "long", year: "numeric" })}</span><p>{entry.description}</p></div>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="text-secondary mb-0">No status history is available yet.</p>}
+          </section>
+        </div>
+      ) : section === "updates" ? (
         <section className="guardian-updates-section">
-          <div className="participation-detail-status">
-            <span className={`participation-status-badge ${statusClass}`}>{PARTICIPATION_STATUS_LABELS[participation?.status] || participation?.status || "Warning"}</span>
-            <span>Two activities are expected each month.</span>
-          </div>
-          <div className="participation-number-grid">
-            {[["Required", participation?.monthly.required ?? 2], ["Attended", participation?.monthly.attended ?? 0], ["Absent", participation?.monthly.absent ?? 2], ["Attendance", `${participation?.monthly.attendanceRate ?? 0}%`]].map(([label, value]) => (
-              <div key={label}><small>{label}</small><strong>{value}</strong></div>
-            ))}
-          </div>
-          <h3 className="public-attendance-title">Monthly attendance history</h3>
-          <div className="table-responsive">
-            <table className="table align-middle">
-              <thead><tr><th>Month</th><th>Required</th><th>Attended</th><th>Absent</th><th>Status</th></tr></thead>
-              <tbody>{(participation?.months || []).map((month) => (
-                <tr key={month.key}>
-                  <td>{new Date(`${month.key}-01T00:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" })}</td>
-                  <td>{month.required}</td><td>{month.attended}</td><td>{month.absent}</td><td>{month.status === "ACTIVE" ? "Active" : "Warning"}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </div>
-          <ul className="participation-event-history">
-            {(participation?.months || []).flatMap((month) => month.events).sort((first, second) => second.date.localeCompare(first.date)).slice(0, 30).map((activity, index) => (
-              <li key={`${activity.name}-${activity.date}-${index}`}>
-                <span className={activity.attended ? "attendance-check" : "attendance-missed"}>{activity.attended ? "✓" : "×"}</span>
-                <div><strong>{activity.attended ? "Attended" : "Missed"} {activity.name}</strong><small>{formatParticipantHistoryDate(activity.date)}</small></div>
-              </li>
-            ))}
-          </ul>
+          <div className="guardian-section-heading"><span className="eyebrow">GROWTH &amp; DEVELOPMENT</span><h3>Growth updates</h3></div>
+          <p className="guardian-read-only-note">These records are view-only and are shared by your child’s care team.</p>
+          {loadingUpdates ? <p role="status">Loading updates...</p> : updates.length ? (
+            <>
+              <div className="guardian-latest-update">
+                <span className="eyebrow">LATEST UPDATE</span>
+                <GuardianUpdateCard update={updates[0]} />
+              </div>
+              {updates.length > 1 && <div className="guardian-previous-updates">
+                <h4>Previous updates</h4>
+                <div className="guardian-update-list">
+                  {updates.slice(1).map((update) => <GuardianUpdateCard key={update.id} update={update} />)}
+                </div>
+              </div>}
+            </>
+          ) : <p className="text-secondary">No growth updates recorded yet.</p>}
         </section>
       ) : (
         <section className="guardian-updates-section">
-          <h3>Growth &amp; activity</h3>
-          <p>Growth measurements and care notes shared for {child.name}.</p>
-          {loadingUpdates ? <p role="status">Loading updates...</p> : updates.length ? (
-            <div className="guardian-update-list">
-              {updates.map((update) => (
-                <article className={`guardian-update-card update-${update.type}`} key={update.id}>
-                  <div className="guardian-update-body">
-                    <div className="guardian-update-top">
-                      <strong>{update.type === "growth" ? "Growth measurement" : update.type === "activity" ? "Activity update" : "Care note"}</strong>
-                      <time>{new Date(`${update.recordedOn}T00:00:00`).toLocaleDateString()}</time>
-                    </div>
-                    {update.type === "growth" && (update.heightCm || update.weightKg) && <p>{update.heightCm ? `${update.heightCm} cm` : ""}{update.heightCm && update.weightKg ? " · " : ""}{update.weightKg ? `${update.weightKg} kg` : ""}</p>}
-                    {update.note && <p>{update.note}</p>}
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : <p className="text-secondary">No growth updates recorded yet.</p>}
+          <div className="guardian-section-heading"><span className="eyebrow">EDUCATION</span><h3>Education information</h3></div>
+          <div className="guardian-education-card">
+            <span>Current education</span>
+            <strong>{[child.educationLevel, child.gradeLevel].filter(Boolean).join(" · ") || "Not recorded"}</strong>
+            {child.schoolName && <span>{child.schoolName}</span>}
+          </div>
+          {child.educationHistory?.length ? <div className="guardian-education-history">
+            {child.educationHistory.map((record, index) => (
+              <article key={`${record.educationLevel}-${record.startYear}-${index}`}>
+                <strong>{record.educationLevel}{record.courseStrand ? ` · ${record.courseStrand}` : ""}</strong>
+                <span>{record.schoolName || "School not recorded"} · {record.startYear}{record.endYear ? `–${record.endYear}` : "–Present"}</span>
+                <small>{record.status}</small>
+              </article>
+            ))}
+          </div> : <p className="text-secondary mb-0">No additional education history is available.</p>}
         </section>
       )}
     </div>
+  );
+}
+function GuardianActivityList({ activities, emptyMessage }) {
+  if (!activities.length) return <p className="guardian-empty-history">{emptyMessage}</p>;
+  return (
+    <ul className="guardian-activity-list">
+      {activities.map((activity, index) => (
+        <li key={`${activity.name}-${activity.date}-${index}`}>
+          <span className={`guardian-activity-mark ${activity.attended ? "attended" : "absent"}`} aria-hidden="true">{activity.attended ? "✓" : "×"}</span>
+          <div>
+            <strong>{activity.name || "Activity"}</strong>
+            <span>{formatParticipantHistoryDate(activity.date)}</span>
+          </div>
+          <span className={`guardian-activity-label ${activity.attended ? "attended" : "absent"}`}>{activity.attended ? "Attended" : "Absent"}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+function GuardianUpdateCard({ update }) {
+  return (
+    <article className={`guardian-update-card update-${update.type}`}>
+      <div className="guardian-update-body">
+        <div className="guardian-update-top">
+          <strong>{update.type === "growth" ? "Growth update" : update.type === "activity" ? "Activity update" : "Care note"}</strong>
+          <time>{formatParticipantHistoryDate(update.recordedOn)}</time>
+        </div>
+        {update.type === "growth" && (update.heightCm || update.weightKg) && (
+          <p className="guardian-update-metrics">
+            {update.heightCm && <span className="metric-height">Height: {update.heightCm} cm</span>}
+            {update.weightKg && <span className="metric-weight">Weight: {update.weightKg} kg</span>}
+          </p>
+        )}
+        {update.activity && <p className="guardian-update-activity">{update.activity}</p>}
+        {update.activity && <p className="guardian-update-activity">{update.activity}</p>}
+        {update.note && <p className="guardian-update-note">{update.note}</p>}
+      </div>
+    </article>
   );
 }
 function Scanner({ portal = false, user = null }) {
@@ -4415,15 +5480,19 @@ const PARTICIPATION_STATUS_LABELS = {
   WARNING: "Warning",
   GROUNDS_FOR_DEPARTURE: "Grounds for Departure",
   SECOND_CHANCE: "Second Chance",
-  REMOVED_FROM_SPONSORSHIP: "Removed from Sponsorship",
+  REMOVED_FROM_SPONSORSHIP: "Removed from program",
 };
 
 function SponsoredCare({ user, onViewHistory }) {
   const canManage = canAccessPermission("sponsorship:manage", user);
   const isGoer = String(user?.role || "").toLowerCase() === GOER_ROLE;
+  const canRecordCare = isGoer
+    ? Array.isArray(user?.permissions) && user.permissions.includes("goer-care:record")
+    : canManage;
   const [children, setChildren] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [details, setDetails] = useState(null);
+  const [profileTab, setProfileTab] = useState("attendance");
   const [growthUpdates, setGrowthUpdates] = useState([]);
   const [growthUpdatesLoading, setGrowthUpdatesLoading] = useState(false);
   const [growthFormOpen, setGrowthFormOpen] = useState(false);
@@ -4439,6 +5508,8 @@ function SponsoredCare({ user, onViewHistory }) {
     note: "",
   });
   const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [sortBy, setSortBy] = useState("attention");
   const [secondChanceReason, setSecondChanceReason] = useState("");
   const [removalReason, setRemovalReason] = useState("");
   const [confirmRemoval, setConfirmRemoval] = useState(false);
@@ -4462,9 +5533,19 @@ function SponsoredCare({ user, onViewHistory }) {
 
   const selectedChild = children.find((child) => Number(child.id) === Number(selectedId));
   const child = details && Number(details.id) === Number(selectedId) ? details : selectedChild;
-  const visibleChildren = children.filter((entry) =>
-    `${entry.name} ${entry.participantCode || ""}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
-  );
+  const visibleChildren = children
+    .filter((entry) =>
+      (statusFilter === "all" || entry.status === statusFilter) &&
+      `${entry.name} ${entry.participantCode || ""}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+    )
+    .sort((first, second) => {
+      if (sortBy === "name") return first.name.localeCompare(second.name);
+      if (sortBy === "attendance") return second.monthly.attendanceRate - first.monthly.attendanceRate
+        || first.name.localeCompare(second.name);
+      const priority = { GROUNDS_FOR_DEPARTURE: 0, WARNING: 1, SECOND_CHANCE: 2, ACTIVE: 3 };
+      return (priority[first.status] ?? 4) - (priority[second.status] ?? 4)
+        || first.name.localeCompare(second.name);
+    });
   const statusClass = (status) => String(status || "WARNING").toLowerCase().replaceAll("_", "-");
   const openChild = async (entry) => {
     const requestId = ++childDetailsRequest.current;
@@ -4473,6 +5554,7 @@ function SponsoredCare({ user, onViewHistory }) {
     setGrowthUpdates([]);
     setGrowthUpdatesLoading(true);
     setGrowthFormOpen(false);
+    setProfileTab("attendance");
     setSecondChanceReason("");
     setError("");
     setMessage("");
@@ -4528,10 +5610,11 @@ function SponsoredCare({ user, onViewHistory }) {
     setSaving(true);
     setError("");
     try {
-      setDetails(await apiCall(`/sponsorship/children/${selectedChild.id}/second-chance`, {
+      const updatedChild = await apiCall(`/sponsorship/children/${selectedChild.id}/second-chance`, {
         method: "POST",
         body: JSON.stringify({ reason: secondChanceReason }),
-      }));
+      });
+      setDetails((current) => ({ ...current, ...updatedChild }));
       await refresh();
       setSecondChanceReason("");
       setMessage("Second chance granted and recorded in audit history.");
@@ -4546,14 +5629,15 @@ function SponsoredCare({ user, onViewHistory }) {
     setSaving(true);
     setError("");
     try {
-      setDetails(await apiCall(`/sponsorship/children/${selectedChild.id}/remove`, {
+      const updatedChild = await apiCall(`/sponsorship/children/${selectedChild.id}/remove`, {
         method: "POST",
         body: JSON.stringify({ reason: removalReason }),
-      }));
+      });
+      setDetails((current) => ({ ...current, ...updatedChild }));
       await refresh();
       setConfirmRemoval(false);
       setRemovalReason("");
-      setMessage("Child removed from active sponsorship. Historical records remain available.");
+      setMessage("Child removed from active participation. Historical records remain available.");
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -4567,9 +5651,9 @@ function SponsoredCare({ user, onViewHistory }) {
     <>
       <section className="sponsorship-page-hero">
         <div className="sponsorship-page-hero-copy">
-          <span className="sponsorship-page-eyebrow">PARTICIPATION / ATTENDANCE</span>
-          <h1>Every activity counts.</h1>
-          <p>Monitor each sponsored child's monthly participation using existing Events and Check-in records.</p>
+          <span className="sponsorship-page-eyebrow">CHILD CARE / PARTICIPATION</span>
+          <h1>Every child, thoughtfully cared for.</h1>
+          <p>Track attendance, growth, care notes, education, and participation follow-up in one place.</p>
         </div>
         <div className="sponsorship-hero-art" aria-hidden="true">
           <span className="sponsorship-hero-note">2<small>activities each month</small></span>
@@ -4579,7 +5663,7 @@ function SponsoredCare({ user, onViewHistory }) {
       {message && <div className="alert alert-success" role="status">{message}</div>}
       <section className="sponsorship-summary-grid participation-summary-grid" aria-label="Participation overview">
         {[
-          ["Active sponsored children", children.filter((entry) => entry.status === "ACTIVE").length],
+          ["Active children", children.filter((entry) => entry.status === "ACTIVE").length],
           ["Meeting monthly requirements", children.filter((entry) => entry.monthly.attended >= 2).length],
           ["Attendance warnings", children.filter((entry) => entry.status === "WARNING").length],
           ["Grounds for departure", children.filter((entry) => entry.status === "GROUNDS_FOR_DEPARTURE").length],
@@ -4593,25 +5677,45 @@ function SponsoredCare({ user, onViewHistory }) {
       <div className="sponsorship-workspace participation-workspace">
         <section className="surface sponsorship-child-list">
           <div className="sponsorship-list-heading">
-            <div><span className="sponsorship-section-eyebrow">{isGoer ? "YOUR GROUP" : "PARTICIPANT MONITORING"}</span><h2>Sponsored children</h2></div>
-            <span className="sponsorship-list-count">{visibleChildren.length} <small>shown</small></span>
+            <div><span className="sponsorship-section-eyebrow">{isGoer ? "YOUR GROUP" : "PARTICIPANT MONITORING"}</span>            <h2>Children</h2></div>
+            <span className="sponsorship-list-count">{visibleChildren.length} <small>children</small></span>
           </div>
           <div className="sponsorship-search-wrap">
             <span aria-hidden="true">⌕</span>
-            <input className="form-control" aria-label="Search sponsored children" placeholder="Find a child by name or ID" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <input className="form-control" aria-label="Search children" placeholder="Find a child by name or ID" value={query} onChange={(event) => setQuery(event.target.value)} />
           </div>
+            <div className="participation-list-controls">
+              <label>
+                <span>Participation</span>
+                <select className="form-select" aria-label="Filter by participation status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                  <option value="all">All statuses</option>
+                  <option value="ACTIVE">Meeting requirements</option>
+                  <option value="WARNING">Attendance warning</option>
+                  <option value="GROUNDS_FOR_DEPARTURE">Follow-up needed</option>
+                  <option value="SECOND_CHANCE">Second chance</option>
+                </select>
+              </label>
+              <label>
+                <span>Sort by</span>
+                <select className="form-select" aria-label="Sort children" value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+                  <option value="attention">Needs attention</option>
+                  <option value="name">Name</option>
+                  <option value="attendance">Attendance rate</option>
+                </select>
+              </label>
+            </div>
           {loading ? <div className="sponsorship-loading" role="status"><span /> Loading participation records...</div> : visibleChildren.map((entry) => (
             <button type="button" className={`sponsorship-child-row ${Number(selectedId) === Number(entry.id) ? "selected" : ""}`} key={entry.id} onClick={() => openChild(entry)}>
               <span className="sponsorship-child-avatar" aria-hidden="true">{entry.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
               <span className="sponsorship-child-copy">
                 <strong>{entry.name}</strong>
-                <small>{entry.participantCode || `Child #${entry.id}`} · {entry.age ?? "Age not recorded"} years · {entry.gender || "Sex not set"}</small>
+                <small>{entry.participantCode || `Child #${entry.id}`} · {entry.age ?? "Age not recorded"} years · {entry.gender || "Sex not set"} · {[entry.educationLevel, entry.gradeLevel].filter(Boolean).join(" / ") || "Education not recorded"}</small>
                 <small>{entry.monthly.key}: Required 2 · Attended {entry.monthly.attended} · Absent {entry.monthly.absent} · {entry.monthly.attendanceRate}%</small>
               </span>
               <span className={`participation-status-badge ${statusClass(entry.status)}`}>{PARTICIPATION_STATUS_LABELS[entry.status] || entry.status}</span>
             </button>
           ))}
-          {!loading && !visibleChildren.length && <div className="sponsorship-no-results"><strong>No sponsored children found</strong><p>Try a different name or participant ID.</p></div>}
+          {!loading && !visibleChildren.length && <div className="sponsorship-no-results"><strong>No children match these filters</strong><p>Try another name, ID, or participation status.</p></div>}
         </section>
       </div>
       {child && createPortal((
@@ -4625,7 +5729,7 @@ function SponsoredCare({ user, onViewHistory }) {
                 <div>
                   <span className="sponsorship-section-eyebrow">{child.participantCode || `CHILD #${child.id}`}</span>
                   <h2 id="participation-profile-title">{child.name}</h2>
-                  <span className="sponsorship-profile-caption">{child.age ?? "Age not recorded"} years old · {child.gender || "Sex not set"}</span>
+                  <span className="sponsorship-profile-caption">{child.age ?? "Age not recorded"} years old · {child.gender || "Sex not set"} · {[child.educationLevel, child.gradeLevel].filter(Boolean).join(" / ") || "Education not recorded"}</span>
                 </div>
               </div>
               <button type="button" className="btn-close" aria-label="Close child history" onClick={closeChild} />
@@ -4636,6 +5740,26 @@ function SponsoredCare({ user, onViewHistory }) {
             </div>
             {error && <div className="alert alert-danger" role="alert">{error}</div>}
             {message && <div className="alert alert-success" role="status">{message}</div>}
+            <nav className="participation-profile-tabs" aria-label="Child care record sections">
+              {[
+                ["attendance", "Attendance"],
+                ["care", "Growth & care"],
+                ["education", "Education"],
+                ["followup", "Follow-up"],
+              ].map(([tab, label]) => (
+                <button
+                  type="button"
+                  className={profileTab === tab ? "active" : ""}
+                  aria-current={profileTab === tab ? "page" : undefined}
+                  key={tab}
+                  onClick={() => setProfileTab(tab)}
+                >
+                  {label}
+                </button>
+              ))}
+            </nav>
+            {profileTab === "attendance" && (
+              <>
             <section className="surface participation-month-card">
               <div className="participant-history-section-heading">
                 <div><span className="sponsorship-section-eyebrow">MONTHLY ACTIVITY</span><h3>{monthly.key}</h3></div>
@@ -4656,6 +5780,10 @@ function SponsoredCare({ user, onViewHistory }) {
               </div>
               <p className="participation-lifetime">Lifetime absences: <strong>{child.lifetime.absent}</strong></p>
             </section>
+              </>
+            )}
+            {profileTab === "followup" && child.status === "GROUNDS_FOR_DEPARTURE" && (
+              <>
             {child.status === "GROUNDS_FOR_DEPARTURE" && (
               <section className="participation-action-panel grounds-action-panel">
                 <h3>Grounds for Departure</h3>
@@ -4669,6 +5797,10 @@ function SponsoredCare({ user, onViewHistory }) {
                 )}
               </section>
             )}
+              </>
+            )}
+            {profileTab === "followup" && child.secondChance && (
+              <>
             {child.secondChance && (
               <section className="participation-action-panel second-chance-action-panel">
                 <h3>Second Chance Monitoring</h3>
@@ -4677,17 +5809,20 @@ function SponsoredCare({ user, onViewHistory }) {
                 <p>Removal becomes available after two missed monthly requirements following a second chance.</p>
                 {child.secondChance.reason && <p>Notes: {child.secondChance.reason}</p>}
                 {canManage && child.status === "SECOND_CHANCE" && child.removalEligible && (
-                  <button type="button" className="btn btn-outline-danger" onClick={() => setConfirmRemoval(true)}>Remove from Sponsorship</button>
+                  <button type="button" className="btn btn-outline-danger" onClick={() => setConfirmRemoval(true)}>Remove from program</button>
                 )}
               </section>
             )}
+              </>
+            )}
+            {profileTab === "care" && (
             <section className="surface participation-history-section growth-activity-section">
               <div className="participant-history-section-heading">
                 <div>
                   <h3>Growth &amp; Activity</h3>
-                  <p>Record growth measurements, activities attended, and care notes.</p>
+                  <p>Record growth measurements and care notes. Event attendance is tracked from Check-in.</p>
                 </div>
-                {canManage && (
+                {canRecordCare && (
                   <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => {
                     setGrowthFormError("");
                     setGrowthFormOpen(true);
@@ -4720,6 +5855,9 @@ function SponsoredCare({ user, onViewHistory }) {
                 </div>
               ) : <p className="text-secondary">No Growth &amp; Activity updates recorded yet.</p>}
             </section>
+            )}
+            {profileTab === "attendance" && (
+              <>
             <section className="surface participation-history-section">
               <h3>Monthly attendance history</h3>
               <div className="table-responsive">
@@ -4746,6 +5884,35 @@ function SponsoredCare({ user, onViewHistory }) {
                 {!child.months.some((entry) => entry.events.length) && <li className="text-secondary">No event records found.</li>}
               </ul>
             </section>
+              </>
+            )}
+            {profileTab === "education" && (
+              <section className="surface participation-history-section">
+                <div className="participant-history-section-heading">
+                  <div><h3>Education history</h3><p className="text-secondary mb-0">Education records associated with this child.</p></div>
+                  {onViewHistory && <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => { closeChild(); onViewHistory(child.id); }}>View full participant history</button>}
+                </div>
+                <div className="participation-education-current">
+                  <strong>Current placement</strong>
+                  <span>{[child.educationLevel, child.gradeLevel].filter(Boolean).join(" · ") || "Not recorded"}</span>
+                </div>
+                {child.educationHistory?.length ? (
+                  <ul className="participation-event-history">
+                    {child.educationHistory.map((record) => (
+                      <li key={record.id}>
+                        <span className="attendance-check" aria-hidden="true">▦</span>
+                        <div>
+                          <strong>{record.educationLevel}{record.courseStrand ? ` · ${record.courseStrand}` : ""}</strong>
+                          <small>{record.schoolName || "School not recorded"} · {record.startYear}{record.endYear ? `–${record.endYear}` : "–Present"} · {record.status}</small>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : <p className="text-secondary mt-3 mb-0">No education history records found.</p>}
+              </section>
+            )}
+            {profileTab === "followup" && (
+              <>
             {child.history.length > 0 && (
               <section className="surface participation-history-section">
                 <h3>Status history</h3>
@@ -4755,6 +5922,8 @@ function SponsoredCare({ user, onViewHistory }) {
                   ))}
                 </ul>
               </section>
+            )}
+              </>
             )}
           </section>
         </div>
@@ -4804,19 +5973,19 @@ function SponsoredCare({ user, onViewHistory }) {
       {confirmRemoval && child && createPortal((
         <div className="participant-modal-backdrop" role="presentation">
           <section className="participant-modal participation-removal-modal" role="alertdialog" aria-modal="true" aria-labelledby="remove-child-title">
-            <h2 id="remove-child-title">Remove child from sponsorship?</h2>
+            <h2 id="remove-child-title">Remove child from the program?</h2>
             <dl className="participation-removal-details">
               <div><dt>Child</dt><dd>{child.name}</dd></div>
               <div><dt>Total absences</dt><dd>{child.lifetime.absent}</dd></div>
               <div><dt>Second chance</dt><dd>Granted</dd></div>
               <div><dt>Post-second-chance absences</dt><dd>{child.postSecondChanceAbsences}</dd></div>
             </dl>
-            <p className="alert alert-warning">This action will remove the child from active sponsorship. The child's historical records will be preserved.</p>
+            <p className="alert alert-warning">The child will be removed from active participation. Historical records will be preserved.</p>
             <label className="form-label" htmlFor="removal-reason">Reason</label>
             <textarea id="removal-reason" className="form-control" rows="2" maxLength="1000" value={removalReason} onChange={(event) => setRemovalReason(event.target.value)} />
             <div className="participation-removal-actions">
               <button type="button" className="btn btn-outline-secondary" disabled={saving} onClick={() => setConfirmRemoval(false)}>Cancel</button>
-              <button type="button" className="btn btn-danger" disabled={saving} onClick={removeChild}>{saving ? "Removing..." : "Remove from Sponsorship"}</button>
+              <button type="button" className="btn btn-danger" disabled={saving} onClick={removeChild}>{saving ? "Removing..." : "Remove from program"}</button>
             </div>
           </section>
         </div>
@@ -4837,7 +6006,6 @@ function PermissionCheckboxes({ idPrefix, selected, onChange }) {
     checkin: "Check-in",
     analytics: "Analytics",
     reports: "Reports",
-    portal: "Child portal",
     sponsorship: "Sponsored care",
   };
   const modules = [...new Set(STAFF_PERMISSION_OPTIONS.map(({ key }) => key.split(":")[0]))];
@@ -4863,6 +6031,12 @@ function PermissionCheckboxes({ idPrefix, selected, onChange }) {
               </label>
             ))}
           </div>
+          {module === "participants" && (
+            <div className="staff-permission-locked-list">
+              <div><strong>Create participants</strong><span>🔒 Admin only — participant creation is restricted to Administrators.</span></div>
+              <div><strong>Import participants</strong><span>🔒 Admin only — participant data import is restricted to Administrators.</span></div>
+            </div>
+          )}
         </section>
       ))}
     </div>
@@ -5415,11 +6589,11 @@ function StaffAccounts({ user }) {
                   <input id="register-last-name" className="form-control" autoComplete="family-name" maxLength={100} required value={registrationForm.lastName} onChange={(event) => setRegistrationField("lastName", event.target.value)} />
                 </div>
                 <div className="col-12 col-md-6">
-                  <label className="form-label" htmlFor="register-email">Email address (login)</label>
+                  <label className="form-label" htmlFor="register-email">Email (login)</label>
                   <input id="register-email" className="form-control" type="email" autoComplete="email" maxLength={150} required value={registrationForm.email} onChange={(event) => setRegistrationField("email", event.target.value)} />
                 </div>
                 <div className="col-12 col-md-6">
-                  <label className="form-label" htmlFor="register-password">Temporary password</label>
+                  <label className="form-label" htmlFor="register-password">Password</label>
                   <input id="register-password" className="form-control" type="password" autoComplete="new-password" minLength={8} maxLength={72} required value={registrationForm.password} onChange={(event) => setRegistrationField("password", event.target.value)} />
                   <small className="text-secondary">At least 8 characters; give it to the staff member securely.</small>
                 </div>
@@ -5720,13 +6894,22 @@ function App() {
       </>
     );
   }
+  const isAdmin = String(user.role || "").toLowerCase() === "system administrator";
   let pages = {
-    dashboard: <Dashboard go={navigateToPage} />,
-    participants: <Participants canManage={canAccessPermission("participants:manage", user)} user={user} onViewHistory={openParticipantHistory} />,
+    dashboard: <Dashboard go={navigateToPage} user={user} />,
+    participants: (
+      <Participants
+        canCreateImport={isAdmin}
+        canEdit={canAccessPermission("participants:edit", user)}
+        canDelete={canAccessPermission("participants:delete", user)}
+        isGoer={String(user.role).toLowerCase() === GOER_ROLE}
+        user={user}
+        onViewHistory={openParticipantHistory}
+      />
+    ),
     participantHistory: <ParticipantHistoryPage key={participantHistoryId} participantId={participantHistoryId} onBack={backToParticipants} />,
     events: <Events canManage={canAccessPermission("events:manage", user)} />,
     scanner: <Scanner user={user} />,
-    portal: <Scanner portal />,
     sponsorship: <SponsoredCare user={user} onViewHistory={openParticipantHistory} />,
     analytics: <Analytics user={user} />,
     reports: <Reports user={user} />,

@@ -27,10 +27,12 @@ const { sendEmailWithGmailApi } = require('./utils/gmail-api');
 const {
   calculateAge,
   findPotentialParticipantDuplicates,
+  normalizeParticipantName,
   normalizePhilippineMobile,
   participantRegistrationErrors,
 } = require('./utils/participant-utils');
 const { sendSemaphoreSms } = require('./utils/semaphore-sms');
+const { inspectImportFile, safeImportFileName } = require('./utils/import-file');
 const { validateSponsor } = require('./utils/sponsor-utils');
 const {
   calculateAllowanceBalance,
@@ -51,6 +53,11 @@ const {
   isGoerRole,
 } = require('./utils/goer-access');
 const { getProductionSecurityErrors } = require('./utils/security-config');
+const {
+  EDUCATION_LEVELS,
+  educationRecordKey,
+  validateEducationRecord,
+} = require('./utils/education-history');
 const {
   BASELINE_VERSION,
   MODEL_VERSION,
@@ -113,6 +120,77 @@ const eventsTableReady = pool.query(`
     UNIQUE KEY uq_events_name_starts_at (name, starts_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 `);
+const educationHistoryReady = eventsTableReady.then(() => pool.query(`
+  CREATE TABLE IF NOT EXISTS participant_education_history (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    participant_id INT UNSIGNED NOT NULL,
+    education_level VARCHAR(50) NOT NULL,
+    school_name_encrypted TEXT NOT NULL,
+    school_address_encrypted TEXT DEFAULT NULL,
+    start_year SMALLINT UNSIGNED NOT NULL,
+    end_year SMALLINT UNSIGNED DEFAULT NULL,
+    status VARCHAR(30) NOT NULL,
+    course_strand_encrypted TEXT DEFAULT NULL,
+    notes_encrypted TEXT DEFAULT NULL,
+    record_fingerprint CHAR(64) NOT NULL,
+    created_by INT UNSIGNED DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_participant_education_fingerprint (participant_id, record_fingerprint),
+    INDEX idx_participant_education_progression (participant_id, start_year, id),
+    CONSTRAINT fk_participant_education_history_participant
+      FOREIGN KEY (participant_id) REFERENCES participants (id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+`));
+const participantImportHistoryReady = pool.query(`
+  CREATE TABLE IF NOT EXISTS participant_import_history (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    file_name VARCHAR(255) NOT NULL,
+    import_type VARCHAR(40) NOT NULL,
+    imported_by INT UNSIGNED DEFAULT NULL,
+    imported_by_name VARCHAR(150) NOT NULL,
+    participants_imported INT UNSIGNED NOT NULL DEFAULT 0,
+    participants_updated INT UNSIGNED NOT NULL DEFAULT 0,
+    attendance_imported INT UNSIGNED NOT NULL DEFAULT 0,
+    attendance_summaries_imported INT UNSIGNED NOT NULL DEFAULT 0,
+    education_imported INT UNSIGNED NOT NULL DEFAULT 0,
+    skipped INT UNSIGNED NOT NULL DEFAULT 0,
+    failed INT UNSIGNED NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    INDEX idx_participant_import_history_created (created_at, id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+`).then(async () => {
+  const [columns] = await pool.execute(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'participant_import_history'`,
+  );
+  if (!columns.some((column) => column.COLUMN_NAME === 'attendance_summaries_imported')) {
+    try {
+      await pool.query(
+        'ALTER TABLE participant_import_history ADD COLUMN attendance_summaries_imported INT UNSIGNED NOT NULL DEFAULT 0 AFTER attendance_imported',
+      );
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+    }
+  }
+});
+const historicalAttendanceSummaryReady = pool.query(`
+  CREATE TABLE IF NOT EXISTS participant_attendance_summaries (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    participant_id INT UNSIGNED NOT NULL,
+    attendance_year SMALLINT UNSIGNED NOT NULL,
+    required_count SMALLINT UNSIGNED NOT NULL,
+    attended_count SMALLINT UNSIGNED NOT NULL,
+    absent_count SMALLINT UNSIGNED NOT NULL,
+    created_by INT UNSIGNED DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_participant_attendance_summary_year (participant_id, attendance_year),
+    CONSTRAINT fk_participant_attendance_summary_participant
+      FOREIGN KEY (participant_id) REFERENCES participants (id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+`);
 const eventPhotosTableReady = eventsTableReady.then(() => pool.query(`
   CREATE TABLE IF NOT EXISTS event_photos (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -138,7 +216,7 @@ const participantProfileColumnsReady = (async () => {
          'first_name_encrypted', 'middle_name_encrypted', 'last_name_encrypted',
          'sponsorship_lifecycle', 'monthly_allowance', 'passcode_encrypted',
          'school_name_encrypted', 'school_address_encrypted',
-         'available_allowance_balance'
+         'available_allowance_balance', 'sponsorship_registered_at'
        )`,
   );
   const existing = new Set(columns.map((column) => column.COLUMN_NAME));
@@ -155,6 +233,7 @@ const participantProfileColumnsReady = (async () => {
     ['passcode_encrypted', 'TEXT DEFAULT NULL'],
     ['school_name_encrypted', 'TEXT DEFAULT NULL'],
     ['school_address_encrypted', 'TEXT DEFAULT NULL'],
+    ['sponsorship_registered_at', 'DATE DEFAULT NULL'],
   ];
   for (const [column, definition] of additions) {
     if (!existing.has(column)) {
@@ -334,7 +413,11 @@ app.use((req, res, next) => {
     /^\/api\/sponsorship\/children\/\d+\/disbursements$/.test(req.path);
   const hasEventPhotoUpload = req.method === 'POST' &&
     (/^\/api\/events$/.test(req.path) || /^\/api\/events\/\d+\/photos$/.test(req.path));
-  express.json({ limit: hasEventPhotoUpload ? '22mb' : hasReceiptUpload ? '6mb' : '1mb' })(req, res, next);
+  const hasParticipantImport = req.method === 'POST' && /^\/api\/participants\/import\//.test(req.path);
+  const limit = hasParticipantImport ? '8mb'
+    : hasEventPhotoUpload ? '22mb'
+      : hasReceiptUpload ? '6mb' : '1mb';
+  express.json({ limit })(req, res, next);
 });
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -419,7 +502,8 @@ const accountRoles = [...staffRoles, 'Goer'];
 const STAFF_PERMISSION_KEYS = [
   'dashboard:view',
   'participants:view',
-  'participants:manage',
+  'participants:edit',
+  'participants:delete',
   'events:view',
   'events:manage',
   'checkin:record',
@@ -430,7 +514,8 @@ const STAFF_PERMISSION_KEYS = [
   'sponsorship:manage',
 ];
 const LEGACY_STAFF_PERMISSIONS = STAFF_PERMISSION_KEYS.filter(
-  (permission) => !permission.startsWith('sponsorship:'),
+  (permission) => !permission.startsWith('sponsorship:') &&
+    !['participants:edit', 'participants:delete'].includes(permission),
 );
 
 function permissionsForUser(user) {
@@ -438,7 +523,7 @@ function permissionsForUser(user) {
     return STAFF_PERMISSION_KEYS;
   }
   if (isGoerRole(user.role)) {
-    return ['checkin:record', 'goer-care:view', 'goer-care:record'];
+    return ['dashboard:view', 'checkin:record', 'participants:view', 'goer-care:view', 'goer-care:record'];
   }
   if (user.access_permissions === null || user.access_permissions === undefined) {
     return LEGACY_STAFF_PERMISSIONS;
@@ -448,7 +533,11 @@ function permissionsForUser(user) {
       ? JSON.parse(user.access_permissions)
       : user.access_permissions;
     if (!Array.isArray(decoded)) return [];
-    return decoded.filter((permission) => STAFF_PERMISSION_KEYS.includes(permission));
+    const permissions = decoded.filter((permission) => STAFF_PERMISSION_KEYS.includes(permission));
+    if (decoded.includes('participants:manage')) {
+      permissions.push('participants:view', 'participants:edit', 'participants:delete');
+    }
+    return [...new Set(permissions)];
   } catch (error) {
     console.error('Invalid saved staff permissions for account', user.id, error);
     return [];
@@ -462,7 +551,6 @@ function hasPermission(user, permission) {
   const permissions = user.permissions || permissionsForUser(user);
   if (permissions.includes(permission)) return true;
   return (
-    (permission === 'participants:view' && permissions.includes('participants:manage')) ||
     (permission === 'events:view' && permissions.includes('events:manage')) ||
     (permission === 'sponsorship:view' && permissions.includes('sponsorship:manage'))
   );
@@ -477,9 +565,30 @@ function checkPermission(permission) {
   };
 }
 
+function canViewParticipant(user, participant) {
+  return !isGoerRole(user?.role) || canGoerAccessParticipant(user, participant);
+}
+
+function canViewParticipantCare(user) {
+  return isGoerRole(user?.role)
+    ? Boolean(user.permissions?.includes('goer-care:view'))
+    : hasPermission(user, 'sponsorship:view');
+}
+
+async function hasParticipantScope(user, participantId) {
+  if (!isGoerRole(user?.role)) return true;
+  const [[participant]] = await pool.execute(
+    `SELECT participant_type, education_level, status
+     FROM participants WHERE id = ? LIMIT 1`,
+    [participantId],
+  );
+  return canViewParticipant(user, participant);
+}
+
 function checkSponsorshipView(req, res, next) {
   const allowed = isGoerRole(req.user?.role)
-    ? req.user.permissions?.includes('goer-care:view')
+    ? GOER_EDUCATION_LEVELS.includes(req.user.goerEducationLevel)
+      && req.user.permissions?.includes('goer-care:view')
     : hasPermission(req.user, 'sponsorship:view');
   if (!allowed) return res.status(403).json({ error: 'Insufficient permissions' });
   next();
@@ -644,6 +753,70 @@ function participantView(row) {
   return result;
 }
 
+function educationFingerprint(record) {
+  return crypto.createHmac('sha256', process.env.AES_KEY)
+    .update(educationRecordKey(record))
+    .digest('hex');
+}
+
+async function preservePreviousCurrentSchool(connection, participantRow, nextSchoolName, actorId) {
+  const previousSchool = decrypt(participantRow.school_name_encrypted);
+  const nextSchool = String(nextSchoolName || '').trim();
+  if (
+    participantRow.participant_type !== 'sponsored_child' ||
+    !previousSchool ||
+    !nextSchool ||
+    previousSchool.trim().toLocaleLowerCase() === nextSchool.toLocaleLowerCase()
+  ) return false;
+  const educationLevel = participantRow.education_level;
+  if (!EDUCATION_LEVELS.has(educationLevel)) return false;
+  const currentYear = new Date().getFullYear();
+  const enrollmentDate = participantRow.enrollment_date instanceof Date
+    ? new Date(participantRow.enrollment_date.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+    : String(participantRow.enrollment_date || participantRow.created_at || '').slice(0, 10);
+  const parsedStartYear = Number(enrollmentDate.slice(0, 4));
+  const record = {
+    educationLevel,
+    schoolName: previousSchool,
+    schoolAddress: decrypt(participantRow.school_address_encrypted) || '',
+    startYear: Number.isInteger(parsedStartYear) && parsedStartYear >= 1900 && parsedStartYear <= currentYear
+      ? parsedStartYear
+      : currentYear,
+    endYear: currentYear,
+    status: 'Transferred',
+    courseStrand: decrypt(participantRow.program_course_encrypted) || '',
+    notes: '',
+  };
+  await connection.execute(
+    `INSERT IGNORE INTO participant_education_history
+       (participant_id, education_level, school_name_encrypted, school_address_encrypted,
+        start_year, end_year, status, course_strand_encrypted, notes_encrypted,
+        record_fingerprint, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      participantRow.id, record.educationLevel, encrypt(record.schoolName),
+      encrypt(record.schoolAddress || null), record.startYear, record.endYear,
+      record.status, encrypt(record.courseStrand || null), null,
+      educationFingerprint(record), actorId,
+    ],
+  );
+  return true;
+}
+
+function educationHistoryView(row) {
+  return {
+    id: row.id,
+    educationLevel: row.education_level,
+    schoolName: decrypt(row.school_name_encrypted) || '',
+    schoolAddress: decrypt(row.school_address_encrypted) || '',
+    startYear: Number(row.start_year),
+    endYear: row.end_year === null ? null : Number(row.end_year),
+    status: row.status,
+    courseStrand: decrypt(row.course_strand_encrypted) || '',
+    notes: decrypt(row.notes_encrypted) || '',
+  };
+}
+
 function stripFinancialSponsorshipData(participant) {
   for (const field of [
     'sponsorName',
@@ -725,61 +898,259 @@ app.get('/api/audit-logs', authenticate, checkRole(['System Administrator']), as
 
 app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async (req, res, next) => {
   try {
-    const [[counts]] = await pool.execute(
-      `SELECT COUNT(*) AS participants,
-              COALESCE(SUM(status = 'active'), 0) AS activeParticipants,
-              COALESCE(SUM(participant_type = 'goer' AND COALESCE(status, '') <> 'deleted'), 0) AS totalGoers
-       FROM participants`,
+    const role = String(req.user.role || '').toLowerCase();
+    const isAdmin = role === 'system administrator';
+    const isGoer = isGoerRole(role);
+    if (isGoer && !GOER_EDUCATION_LEVELS.includes(req.user.goerEducationLevel)) {
+      return res.status(403).json({ error: 'A Goer account with an assigned education group is required' });
+    }
+
+    await Promise.all([eventsTableReady, participantProfileColumnsReady, participationTrackingReady]);
+    const todayEventsPromise = pool.execute(
+      `SELECT id, name, starts_at, location, status
+       FROM events WHERE status <> 'cancelled' AND DATE(starts_at) = CURDATE()
+       ORDER BY starts_at ASC LIMIT 8`,
     );
-    const [[staff]] = await pool.execute(
-      `SELECT COUNT(*) AS totalStaff FROM users
-       WHERE role IN ('System Administrator', 'Church Administrator') AND status = 'active'`,
+    const [todayEventCountRows] = await pool.execute(
+      `SELECT COUNT(*) AS count FROM events
+       WHERE status <> 'cancelled' AND DATE(starts_at) = CURDATE()`,
     );
-    const [[events]] = await pool.execute(
-      'SELECT COUNT(*) AS totalEvents FROM events',
+    const upcomingEventsPromise = pool.execute(
+      `SELECT id, name, starts_at, location, status
+       FROM events WHERE status = 'scheduled' AND starts_at >= NOW()
+       ORDER BY starts_at ASC LIMIT 5`,
     );
-    const [[checkins]] = await pool.query(
-      `SELECT COUNT(*) AS totalCheckins,
-              COALESCE(SUM(p.participant_type = 'goer'), 0) AS goerCheckins,
-              COALESCE(SUM(p.participant_type = 'sponsored_child'), 0) AS sponsoredCheckins
-       FROM check_in_logs c JOIN participants p ON p.id = c.participant_id
-       WHERE c.checked_in_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-         AND c.status = 'checked_in'`,
+    const participantFilter = isGoer
+      ? `participant_type = 'sponsored_child' AND education_level = ?
+         AND status = 'active'
+         AND COALESCE(participation_status, 'ACTIVE') <> 'REMOVED_FROM_SPONSORSHIP'`
+      : `status <> 'deleted'`;
+    const participantParams = isGoer ? [req.user.goerEducationLevel] : [];
+    const [[participantCounts]] = await pool.execute(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(status = 'active'), 0) AS active,
+              COALESCE(SUM(status = 'inactive'), 0) AS inactive,
+              COALESCE(SUM(LOWER(gender) IN ('male', 'm')), 0) AS male,
+              COALESCE(SUM(LOWER(gender) IN ('female', 'f')), 0) AS female,
+              COALESCE(SUM(created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')), 0) AS newThisMonth
+       FROM participants WHERE ${participantFilter}`,
+      participantParams,
+    );
+    const [todayEvents, upcomingEvents] = await Promise.all([
+      todayEventsPromise,
+      upcomingEventsPromise,
+    ]);
+
+    const groupClause = isGoer
+      ? `AND p.participant_type = 'sponsored_child'
+         AND p.education_level = ? AND p.status = 'active'
+         AND COALESCE(p.participation_status, 'ACTIVE') <> 'REMOVED_FROM_SPONSORSHIP'`
+      : `AND p.status = 'active'`;
+    const attendanceParams = isGoer
+      ? [req.user.goerEducationLevel, `${new Date().getFullYear()}-01-01`]
+      : [`${new Date().getFullYear()}-01-01`];
+    const [attendanceRows] = await pool.execute(
+      `SELECT MIN(e.name) AS name, DATE_FORMAT(MIN(e.starts_at), '%Y-%m-%d') AS event_date,
+              COUNT(DISTINCT p.id) AS required,
+              COUNT(DISTINCT CASE WHEN c.status = 'checked_in' THEN p.id END) AS attended
+       FROM events e
+       JOIN participants p ON p.created_at <= e.starts_at ${groupClause}
+       LEFT JOIN check_in_logs c
+         ON c.participant_id = p.id AND c.status = 'checked_in'
+        AND LOWER(c.event_name) = LOWER(e.name)
+        AND DATE(c.checked_in_at) = DATE(e.starts_at)
+       WHERE e.status <> 'cancelled' AND e.starts_at >= ? AND e.starts_at < NOW()
+       GROUP BY LOWER(e.name), DATE(e.starts_at)
+       ORDER BY event_date`,
+      attendanceParams,
+    );
+    const now = new Date();
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+    startOfWeek.setHours(0, 0, 0, 0);
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const formatDateKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const todayKey = formatDateKey(now);
+    const weekStartKey = formatDateKey(startOfWeek);
+    const attendance = { today: { required: 0, attended: 0 }, week: { required: 0, attended: 0 }, month: { required: 0, attended: 0 }, year: { required: 0, attended: 0 } };
+    const monthlyAttendance = Array.from({ length: 12 }, (_, index) => ({ month: index + 1, required: 0, attended: 0 }));
+    for (const row of attendanceRows) {
+      const eventDate = String(row.event_date).slice(0, 10);
+      const year = Number(eventDate.slice(0, 4));
+      const month = Number(eventDate.slice(5, 7));
+      const required = Number(row.required) || 0;
+      const attended = Number(row.attended) || 0;
+      attendance.year.required += required;
+      attendance.year.attended += attended;
+      monthlyAttendance[month - 1].required += required;
+      monthlyAttendance[month - 1].attended += attended;
+      if (eventDate === todayKey) {
+        attendance.today.required += required;
+        attendance.today.attended += attended;
+      }
+      if (eventDate >= weekStartKey) {
+        attendance.week.required += required;
+        attendance.week.attended += attended;
+      }
+      if (eventDate.slice(0, 7) === monthKey) {
+        attendance.month.required += required;
+        attendance.month.attended += attended;
+      }
+    }
+    const withRate = (period) => ({
+      ...period,
+      absent: Math.max(0, period.required - period.attended),
+      rate: period.required ? Math.round((period.attended / period.required) * 1000) / 10 : 0,
+    });
+    const [eventsThisMonthRows] = await pool.execute(
+      `SELECT COUNT(*) AS count,
+              COALESCE(SUM(status = 'completed' OR starts_at < NOW()), 0) AS completed
+       FROM events WHERE status <> 'cancelled'
+         AND YEAR(starts_at) = YEAR(CURDATE()) AND MONTH(starts_at) = MONTH(CURDATE())`,
+    );
+    const [[eventsUpcomingCount]] = await pool.execute(
+      `SELECT COUNT(*) AS count FROM events
+       WHERE status = 'scheduled' AND starts_at >= NOW()`,
     );
     const [recentCheckins] = await pool.execute(
-      `SELECT c.participant_id, p.participant_type, c.event_name, c.location, c.checked_in_at, c.status
+      `SELECT c.participant_id, p.full_name_encrypted, p.participant_type,
+              c.event_name, c.location, c.checked_in_at, c.status
        FROM check_in_logs c JOIN participants p ON p.id = c.participant_id
+       WHERE c.status = 'checked_in' ${isGoer ? "AND p.participant_type = 'sponsored_child' AND p.education_level = ? AND COALESCE(p.participation_status, 'ACTIVE') <> 'REMOVED_FROM_SPONSORSHIP'" : ''}
        ORDER BY c.checked_in_at DESC LIMIT 8`,
+      isGoer ? [req.user.goerEducationLevel] : [],
     );
-    const [atRisk] = await pool.execute(
-      `SELECT p.id, p.participant_code, r.risk_score, r.risk_level, r.model_version, r.computed_at
-       FROM predictive_risk_scores r JOIN participants p ON p.id = r.participant_id
-       JOIN (SELECT participant_id, MAX(computed_at) AS latest
-             FROM predictive_risk_scores GROUP BY participant_id) latest
-         ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at
-       WHERE r.risk_level IN ('high', 'medium')
-       ORDER BY r.risk_score DESC LIMIT 8`,
-    );
-    res.json({
-      counts: {
-        ...counts,
-        totalStaff: staff.totalStaff,
-        totalEvents: events.totalEvents,
-        totalCheckins: checkins.totalCheckins,
-        goerCheckins: checkins.goerCheckins,
-        sponsoredCheckins: checkins.sponsoredCheckins,
+    const dashboard = {
+      role: isAdmin ? 'admin' : isGoer ? 'goer' : 'staff',
+      participantCounts: isAdmin || isGoer
+        ? participantCounts
+        : { active: Number(participantCounts.active) || 0 },
+      attendance: Object.fromEntries(Object.entries(attendance).map(([key, period]) => [key, withRate(period)])),
+      monthlyAttendance: monthlyAttendance.map(withRate),
+      todayEvents,
+      upcomingEvents,
+      events: {
+        today: Number(todayEventCountRows[0].count) || 0,
+        upcoming: Number(eventsUpcomingCount.count) || 0,
+        thisMonth: Number(eventsThisMonthRows[0].count) || 0,
+        completedThisMonth: Number(eventsThisMonthRows[0].completed) || 0,
       },
-      recentCheckins,
-      atRisk,
-    });
+      recentCheckins: recentCheckins.map((row) => ({
+        ...row,
+        participantName: isGoer || hasPermission(req.user, 'participants:view')
+          ? decrypt(row.full_name_encrypted) || 'Unnamed participant'
+          : null,
+        full_name_encrypted: undefined,
+      })),
+    };
+
+    if (isAdmin) {
+      const [[users]] = await pool.execute(
+        `SELECT COUNT(CASE WHEN role IN ('System Administrator', 'Church Administrator') THEN 1 END) AS totalStaff,
+                COUNT(CASE WHEN role IN ('System Administrator', 'Church Administrator') AND status = 'active' THEN 1 END) AS activeStaff,
+                COUNT(CASE WHEN role = 'Goer' THEN 1 END) AS goerAccounts,
+                COUNT(CASE WHEN role = 'Church Administrator' THEN 1 END) AS churchAdministrators
+         FROM users WHERE status <> 'deleted'`,
+      );
+      const children = await getSponsoredParticipationSummaries();
+      const followups = children.filter((child) =>
+        ['WARNING', 'GROUNDS_FOR_DEPARTURE', 'SECOND_CHANCE'].includes(child.status),
+      );
+      await auditTableReady;
+      const [recentActivity] = await pool.execute(
+        `SELECT id, username, role, action, entity_type, details, created_at
+         FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT 8`,
+      );
+      dashboard.users = users;
+      dashboard.sponsoredCare = {
+        active: children.filter((child) => child.status === 'ACTIVE').length,
+        warning: children.filter((child) => child.status === 'WARNING').length,
+        groundsForDeparture: children.filter((child) => child.status === 'GROUNDS_FOR_DEPARTURE').length,
+        secondChance: children.filter((child) => child.status === 'SECOND_CHANCE').length,
+        removed: children.filter((child) => child.status === 'REMOVED_FROM_SPONSORSHIP').length,
+      };
+      dashboard.followups = followups.slice(0, 8).map((child) => ({
+        id: child.id,
+        name: child.name,
+        status: child.status,
+        absent: child.lifetime?.absent || 0,
+        postSecondChanceAbsences: child.postSecondChanceAbsences || 0,
+      }));
+      dashboard.followupCount = followups.length;
+      dashboard.recentActivity = recentActivity;
+    } else if (isGoer) {
+      dashboard.educationLevel = req.user.goerEducationLevel;
+      const groupChildren = await getSponsoredParticipationSummaries();
+      const groupFollowups = groupChildren
+        .filter((child) => child.educationLevel === req.user.goerEducationLevel
+          && ['WARNING', 'GROUNDS_FOR_DEPARTURE', 'SECOND_CHANCE'].includes(child.status));
+      dashboard.followups = groupFollowups
+        .slice(0, 8)
+        .map((child) => ({
+          id: child.id,
+          name: child.name,
+          status: child.status,
+          absent: child.lifetime?.absent || 0,
+          attendanceRate: child.lifetime?.attendanceRate || 0,
+        }));
+      dashboard.followupCount = groupFollowups.length;
+      dashboard.groupParticipants = groupChildren
+        .filter((child) => child.educationLevel === req.user.goerEducationLevel
+          && child.status !== 'REMOVED_FROM_SPONSORSHIP')
+        .slice(0, 8)
+        .map((child) => ({
+          id: child.id,
+          name: child.name,
+          gender: child.gender,
+          age: child.age,
+          attendanceRate: child.lifetime?.attendanceRate || 0,
+        }));
+    } else if (hasPermission(req.user, 'sponsorship:view')) {
+      const children = await getSponsoredParticipationSummaries();
+      const staffFollowups = children
+        .filter((child) => ['WARNING', 'GROUNDS_FOR_DEPARTURE', 'SECOND_CHANCE'].includes(child.status));
+      dashboard.followups = staffFollowups
+        .slice(0, 8)
+        .map((child) => ({
+          id: child.id,
+          name: child.name,
+          status: child.status,
+          absent: child.lifetime?.absent || 0,
+          attendanceRate: child.lifetime?.attendanceRate || 0,
+        }));
+      dashboard.followupCount = staffFollowups.length;
+      await sponsoredChildUpdatesReady;
+      const [recentUpdates] = await pool.execute(
+        `SELECT u.id, u.update_type, u.recorded_on, u.created_at,
+                p.full_name_encrypted
+         FROM sponsored_child_updates u
+         JOIN participants p ON p.id = u.participant_id
+         WHERE p.participant_type = 'sponsored_child' AND p.status <> 'deleted'
+         ORDER BY u.created_at DESC, u.id DESC LIMIT 6`,
+      );
+      dashboard.recentCareUpdates = recentUpdates.map((row) => ({
+        id: row.id,
+        type: row.update_type,
+        recordedOn: row.recorded_on,
+        createdAt: row.created_at,
+        participantName: decrypt(row.full_name_encrypted) || 'Unnamed child',
+      }));
+    }
+    res.json(dashboard);
   } catch (error) { next(error); }
 });
 
 app.get('/api/participants', authenticate, checkPermission('participants:view'), async (req, res, next) => {
   try {
     await Promise.all([participantProfileColumnsReady, goerQrRevocationReady, participationTrackingReady]);
-    const canViewSponsorship = hasPermission(req.user, 'sponsorship:view');
-    const [rows] = await pool.query(
+    if (isGoerRole(req.user.role) && !GOER_EDUCATION_LEVELS.includes(req.user.goerEducationLevel)) {
+      return res.status(403).json({ error: 'A Goer account with an assigned education group is required' });
+    }
+    const canViewSponsorship = canViewParticipantCare(req.user);
+    const goerScope = isGoerRole(req.user.role)
+      ? "WHERE p.participant_type = 'sponsored_child' AND p.education_level = ? AND p.status = 'active'"
+      : '';
+    const [rows] = await pool.execute(
       `SELECT p.id, p.participant_code, p.participant_type, p.gender, p.status, p.created_at,
               p.participation_status, p.full_name_encrypted, p.first_name_encrypted, p.middle_name_encrypted,
               p.last_name_encrypted, p.date_of_birth_encrypted, p.education_level, p.grade_level,
@@ -787,7 +1158,8 @@ app.get('/api/participants', authenticate, checkPermission('participants:view'),
                WHERE q.participant_id = p.id AND q.status = 'active'
                  AND p.participant_type = 'sponsored_child'
                ORDER BY q.id DESC LIMIT 1) AS qr_code_image
-       FROM participants p ORDER BY p.id DESC`,
+       FROM participants p ${goerScope} ORDER BY p.id DESC`,
+      isGoerRole(req.user.role) ? [req.user.goerEducationLevel] : [],
     );
     const participationById = canViewSponsorship
       ? new Map((await getSponsoredParticipationSummaries()).map((child) => [Number(child.id), child]))
@@ -1030,6 +1402,9 @@ app.get('/api/participants/:id', authenticate, checkPermission('participants:vie
     await Promise.all([participantProfileColumnsReady, goerQrRevocationReady, participationTrackingReady]);
     const [rows] = await pool.execute("SELECT p.*, q.qr_code_image, q.qr_uid FROM participants p LEFT JOIN qr_codes q ON q.id = (SELECT q2.id FROM qr_codes q2 WHERE q2.participant_id = p.id AND q2.status = 'active' AND p.participant_type = 'sponsored_child' ORDER BY q2.id DESC LIMIT 1) WHERE p.id = ? LIMIT 1", [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Participant not found' });
+    if (!canViewParticipant(req.user, rows[0])) {
+      return res.status(404).json({ error: 'Participant not found or not assigned to your group.' });
+    }
     if (rows[0].participant_type !== 'goer' && rows[0].qr_code_image && rows[0].qr_uid) {
       const qrFile = path.join(__dirname, rows[0].qr_code_image);
       if (!fs.existsSync(qrFile)) {
@@ -1038,7 +1413,7 @@ app.get('/api/participants/:id', authenticate, checkPermission('participants:vie
     }
     const participant = stripFinancialSponsorshipData(participantView(rows[0]));
     delete participant.qr_uid;
-    if (hasPermission(req.user, 'sponsorship:view') && participant.participant_type === 'sponsored_child') {
+    if (canViewParticipantCare(req.user) && participant.participant_type === 'sponsored_child') {
       const [monitoring] = await getSponsoredParticipationSummaries(Number(req.params.id));
       participant.participation_status = monitoring?.status || 'ACTIVE';
       participant.monthly_participation = monitoring?.monthly || null;
@@ -1049,11 +1424,665 @@ app.get('/api/participants/:id', authenticate, checkPermission('participants:vie
   } catch (error) { next(error); }
 });
 
-app.get('/api/participants/:id/history', authenticate, checkPermission('participants:view'), async (req, res, next) => {
+app.get('/api/participants/:id/education-history', authenticate, checkPermission('participants:view'), async (req, res, next) => {
   try {
-    const includeCareHistory = hasPermission(req.user, 'sponsorship:view');
+    await Promise.all([participantProfileColumnsReady, educationHistoryReady]);
+    const [[participant]] = await pool.execute(
+      `SELECT id, participant_type, education_level, emergency_contact_phone_encrypted, status
+       FROM participants WHERE id = ? AND status <> 'deleted' LIMIT 1`,
+      [req.params.id],
+    );
+    if (!participant) return res.status(404).json({ error: 'Participant not found' });
+    if (!canViewParticipant(req.user, participant)) {
+      return res.status(404).json({ error: 'Participant not found or not assigned to your group.' });
+    }
+    const [rows] = await pool.execute(
+      `SELECT id, education_level, school_name_encrypted, school_address_encrypted,
+              start_year, end_year, status, course_strand_encrypted, notes_encrypted
+       FROM participant_education_history
+       WHERE participant_id = ? ORDER BY start_year DESC, id DESC`,
+      [participant.id],
+    );
+    res.json(rows.map(educationHistoryView));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/participants/:id/education-history', authenticate, checkPermission('participants:edit'), async (req, res, next) => {
+  try {
+    await Promise.all([participantProfileColumnsReady, educationHistoryReady]);
+    const record = {
+      educationLevel: String(req.body.educationLevel || '').trim(),
+      schoolName: String(req.body.schoolName || '').trim(),
+      schoolAddress: String(req.body.schoolAddress || '').trim(),
+      startYear: req.body.startYear,
+      endYear: req.body.endYear === '' || req.body.endYear === undefined ? null : req.body.endYear,
+      status: String(req.body.status || '').trim(),
+      courseStrand: String(req.body.courseStrand || '').trim(),
+      notes: String(req.body.notes || '').trim(),
+    };
+    const errors = validateEducationRecord(record);
+    if (record.schoolName.length > 200) errors.push('School name must be 200 characters or fewer');
+    if (record.schoolAddress.length > 500) errors.push('School address must be 500 characters or fewer');
+    if (record.courseStrand.length > 200) errors.push('Course or strand must be 200 characters or fewer');
+    if (record.notes.length > 2000) errors.push('Notes must be 2,000 characters or fewer');
+    if (errors.length) return res.status(400).json({ error: errors.join('. ') });
+    const [[participant]] = await pool.execute(
+      `SELECT id FROM participants WHERE id = ? AND status <> 'deleted' LIMIT 1`,
+      [req.params.id],
+    );
+    if (!participant) return res.status(404).json({ error: 'Participant not found' });
+    const fingerprint = educationFingerprint(record);
+    try {
+      const [result] = await pool.execute(
+        `INSERT INTO participant_education_history
+           (participant_id, education_level, school_name_encrypted, school_address_encrypted,
+            start_year, end_year, status, course_strand_encrypted, notes_encrypted,
+            record_fingerprint, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          participant.id, record.educationLevel, encrypt(record.schoolName),
+          encrypt(record.schoolAddress || null), Number(record.startYear),
+          record.endYear === null ? null : Number(record.endYear), record.status,
+          encrypt(record.courseStrand || null), encrypt(record.notes || null),
+          fingerprint, req.user.id,
+        ],
+      );
+      await writeAuditLog(req.user, 'participant.education.created', 'participant', participant.id, {
+        educationLevel: record.educationLevel,
+        startYear: Number(record.startYear),
+      });
+      res.status(201).json({ id: result.insertId });
+    } catch (error) {
+      if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'This education record already exists' });
+      throw error;
+    }
+  } catch (error) { next(error); }
+});
+
+app.delete('/api/participants/:id/education-history/:recordId', authenticate, checkPermission('participants:edit'), async (req, res, next) => {
+  try {
+    await educationHistoryReady;
+    const [result] = await pool.execute(
+      'DELETE FROM participant_education_history WHERE id = ? AND participant_id = ?',
+      [req.params.recordId, req.params.id],
+    );
+    if (!result.affectedRows) return res.status(404).json({ error: 'Education record not found' });
+    await writeAuditLog(req.user, 'participant.education.deleted', 'participant', req.params.id);
+    res.status(204).end();
+  } catch (error) { next(error); }
+});
+
+function validImportDate(value) {
+  const date = String(value || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const parsed = new Date(`${date}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
+}
+
+function importAttendanceStatus(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  const aliases = {
+    present: 'Present',
+    attended: 'Present',
+    absent: 'Absent',
+    excused: 'Excused',
+    late: 'Late',
+  };
+  return aliases[normalized] || null;
+}
+
+app.post('/api/participants/import/inspect', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+  try {
+    res.json(inspectImportFile(req.body.fileName, req.body.fileData));
+  } catch (error) {
+    if (error.code === 'INVALID_IMPORT_FILE') {
+      return res.status(400).json({ error: error.message });
+    }
+    next(error);
+  }
+});
+
+async function validateParticipantImport(type, rows) {
+  const errors = [];
+  const normalized = [];
+  if (!['participants', 'education', 'attendance', 'attendanceSummary'].includes(type)) {
+    return { errors: ['Choose a supported import type'], normalized: [] };
+  }
+  if (!Array.isArray(rows) || !rows.length || rows.length > 5000) {
+    return { errors: ['The import must contain between 1 and 5,000 data rows'], normalized: [] };
+  }
+  const [participants] = await pool.execute(
+    `SELECT id, participant_code, participant_type, full_name_encrypted,
+            first_name_encrypted, middle_name_encrypted, last_name_encrypted,
+            date_of_birth_encrypted, gender
+     FROM participants WHERE COALESCE(status, '') <> 'deleted'`,
+  );
+  const byIdentifier = new Map();
+  const existingParticipantViews = participants.map((participant) => participantView(participant));
+  for (const participant of participants) {
+    if (participant.participant_code) byIdentifier.set(String(participant.participant_code).toLowerCase(), participant);
+    byIdentifier.set(String(participant.id), participant);
+  }
+  const seenParticipantIdentifiers = new Set();
+  const seenParticipantNames = new Set();
+  const seenEducation = new Set();
+  const seenAttendance = new Set();
+  const seenAttendanceSummaries = new Set();
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const source = rows[index] && typeof rows[index] === 'object' && !Array.isArray(rows[index])
+      ? rows[index]
+      : {};
+    const row = { ...source, rowNumber: index + 2, errors: [], warnings: [] };
+    if (type === 'participants') {
+      row.firstName = String(source.firstName || '').trim();
+      row.middleName = String(source.middleName || '').trim();
+      row.lastName = String(source.lastName || '').trim();
+      const importedName = String(source.fullName || '').trim().replace(/\s+/g, ' ');
+      if ((!row.firstName || !row.lastName) && importedName) {
+        const parts = importedName.split(' ');
+        row.firstName = parts[0];
+        row.lastName = parts.length > 1 ? parts[parts.length - 1] : '';
+        row.middleName = parts.length > 2 ? parts.slice(1, -1).join(' ') : row.middleName;
+      }
+      row.dateOfBirth = String(source.dateOfBirth || '').slice(0, 10);
+      const rawGender = String(source.gender || '').trim().toLowerCase();
+      row.gender = ['m', 'male'].includes(rawGender) ? 'Male'
+        : ['f', 'female'].includes(rawGender) ? 'Female' : String(source.gender || '').trim();
+      row.participantIdentifier = String(source.participantIdentifier || '').trim();
+      if (!row.firstName || !row.lastName) row.errors.push('First and last name are required');
+      if (!validImportDate(row.dateOfBirth)) row.errors.push('Invalid or missing date of birth');
+      if (!genderOptions.has(row.gender)) row.errors.push('Sex must be Male or Female');
+      if (row.dateOfBirth && row.dateOfBirth > new Date().toISOString().slice(0, 10)) row.errors.push('Date of birth cannot be in the future');
+      if (row.firstName.length > 100 || row.middleName.length > 100 || row.lastName.length > 100) {
+        row.errors.push('Names must be 100 characters or fewer');
+      }
+      if (source.phone && !normalizePhilippineMobile(source.phone)) row.errors.push('Invalid phone number');
+      if (source.registrationDate && !validImportDate(source.registrationDate)) {
+        row.errors.push('Invalid participant registration date');
+      }
+      if (source.sponsorshipRegistrationDate && !validImportDate(source.sponsorshipRegistrationDate)) {
+        row.errors.push('Invalid sponsorship registration date');
+      }
+      if (
+        row.participantIdentifier &&
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$/.test(row.participantIdentifier)
+      ) row.errors.push('Invalid participant ID format');
+      const registrationErrors = participantRegistrationErrors({
+        participantType: 'sponsored_child',
+        firstName: row.firstName,
+        middleName: row.middleName,
+        lastName: row.lastName,
+        dateOfBirth: row.dateOfBirth,
+        gender: row.gender,
+        emergencyContactName: source.guardianName,
+        emergencyContactPhone: source.guardianContact,
+        educationLevel: source.educationLevel,
+        gradeLevel: source.gradeLevel,
+        schoolName: source.currentSchool,
+        programCourse: source.collegeCourse,
+      }, educationLevels, gradeLevelsByEducation);
+      for (const message of Object.values(registrationErrors)) row.errors.push(message);
+      const identifierKey = row.participantIdentifier.toLowerCase();
+      const duplicateRow = identifierKey && seenParticipantIdentifiers.has(identifierKey);
+      if (identifierKey) seenParticipantIdentifiers.add(identifierKey);
+      const participantNameKey = `${normalizeParticipantName([row.firstName, row.middleName, row.lastName].filter(Boolean).join(' '))}|${row.dateOfBirth}`;
+      const duplicateNameRow = row.dateOfBirth && seenParticipantNames.has(participantNameKey);
+      if (row.dateOfBirth) seenParticipantNames.add(participantNameKey);
+      const fullName = [row.firstName, row.middleName, row.lastName].filter(Boolean).join(' ');
+      const possibleDuplicate = findPotentialParticipantDuplicates({
+        fullName,
+        firstName: row.firstName,
+        lastName: row.lastName,
+        dateOfBirth: row.dateOfBirth,
+      }, existingParticipantViews)[0];
+      const matching = (identifierKey && byIdentifier.get(identifierKey))
+        || participants.find((participant) => Number(participant.id) === Number(possibleDuplicate?.id));
+      row.matchingParticipantId = matching?.id || null;
+      row.operation = matching ? 'review' : 'create';
+      if (duplicateRow) row.errors.push('Duplicate participant identifier in this file');
+      if (duplicateNameRow) row.errors.push('Duplicate participant name and date of birth in this file');
+      if (matching) row.warnings.push(`Possible existing participant match: ${matching.participant_code || `#${matching.id}`}`);
+    } else if (type === 'education') {
+      row.participantIdentifier = String(source.participantIdentifier || '').trim();
+      row.educationLevel = String(source.educationLevel || '').trim();
+      row.schoolName = String(source.schoolName || '').trim();
+      row.schoolAddress = String(source.schoolAddress || '').trim();
+      row.startYear = source.startYear;
+      row.endYear = source.endYear === '' ? null : source.endYear;
+      row.status = String(source.status || '').trim();
+      row.courseStrand = String(source.courseStrand || '').trim();
+      row.notes = String(source.notes || '').trim();
+      if (!row.participantIdentifier) row.errors.push('Participant ID is required');
+      const matches = byIdentifier.get(row.participantIdentifier.toLowerCase())
+        || byIdentifier.get(row.participantIdentifier);
+      if (!matches) row.errors.push('Participant ID does not match an existing participant');
+      else row.participantId = matches.id;
+      row.errors.push(...validateEducationRecord(row));
+      const duplicateKey = `${row.participantId || row.participantIdentifier}|${educationFingerprint(row)}`;
+      if (seenEducation.has(duplicateKey)) row.errors.push('Duplicate education record in this file');
+      seenEducation.add(duplicateKey);
+      if (row.participantId) {
+        const [[existingEducation]] = await pool.execute(
+          `SELECT id FROM participant_education_history
+           WHERE participant_id = ? AND record_fingerprint = ? LIMIT 1`,
+          [row.participantId, educationFingerprint(row)],
+        );
+        if (existingEducation) {
+          row.warnings.push('Education record already exists');
+          row.operation = 'review';
+        }
+      }
+      if (!row.operation) row.operation = row.errors.length ? 'error' : 'create';
+    } else if (type === 'attendanceSummary') {
+      row.participantIdentifier = String(source.participantIdentifier || '').trim();
+      row.year = Number(source.year);
+      row.required = Number(source.required);
+      row.attended = Number(source.attended);
+      row.absent = source.absent === '' || source.absent === undefined
+        ? row.required - row.attended
+        : Number(source.absent);
+      const participant = byIdentifier.get(row.participantIdentifier.toLowerCase())
+        || byIdentifier.get(row.participantIdentifier);
+      if (!row.participantIdentifier) row.errors.push('Participant ID is required');
+      if (!participant) row.errors.push('Participant ID does not match an existing participant');
+      else row.participantId = participant.id;
+      if (source.year === undefined || String(source.year).trim() === '') row.errors.push('Year is required');
+      if (source.required === undefined || String(source.required).trim() === '') row.errors.push('Required attendance is required');
+      if (source.attended === undefined || String(source.attended).trim() === '') row.errors.push('Attended attendance is required');
+      if (!Number.isInteger(row.year) || row.year < 1900 || row.year > new Date().getFullYear()) {
+        row.errors.push('Year must be a valid historical year');
+      }
+      if (!Number.isInteger(row.required) || row.required < 0 || row.required > 1000) {
+        row.errors.push('Required attendance must be a whole number from 0 to 1,000');
+      }
+      if (!Number.isInteger(row.attended) || row.attended < 0 || row.attended > row.required) {
+        row.errors.push('Attended must be a whole number no greater than Required');
+      }
+      if (!Number.isInteger(row.absent) || row.absent < 0 || row.absent > row.required) {
+        row.errors.push('Absent must be a whole number no greater than Required');
+      }
+      if (row.attended + row.absent !== row.required) {
+        row.errors.push('Attended and Absent must total Required');
+      }
+      const summaryKey = `${row.participantId || row.participantIdentifier}|${row.year}`;
+      if (seenAttendanceSummaries.has(summaryKey)) row.errors.push('Duplicate yearly attendance summary in this file');
+      seenAttendanceSummaries.add(summaryKey);
+      if (row.participantId && Number.isInteger(row.year)) {
+        const [[existingSummary]] = await pool.execute(
+          `SELECT id FROM participant_attendance_summaries
+           WHERE participant_id = ? AND attendance_year = ? LIMIT 1`,
+          [row.participantId, row.year],
+        );
+        if (existingSummary) {
+          row.warnings.push('Historical attendance summary already exists');
+          row.operation = 'review';
+        }
+      }
+      if (!row.operation) row.operation = row.errors.length ? 'error' : 'create';
+    } else {
+      row.participantIdentifier = String(source.participantIdentifier || '').trim();
+      row.eventId = source.eventId ? Number(source.eventId) : null;
+      row.eventName = String(source.eventName || '').trim();
+      row.eventDate = String(source.eventDate || '').slice(0, 10);
+      row.attendanceStatus = importAttendanceStatus(source.attendanceStatus);
+      if (!row.participantIdentifier) row.errors.push('Participant ID is required');
+      const participant = byIdentifier.get(row.participantIdentifier.toLowerCase())
+        || byIdentifier.get(row.participantIdentifier);
+      if (!participant) row.errors.push('Participant ID does not match an existing participant');
+      else row.participantId = participant.id;
+      if (!validImportDate(row.eventDate)) row.errors.push('Invalid or missing event date');
+      if (row.eventDate && row.eventDate > new Date().toISOString().slice(0, 10)) row.errors.push('Event date cannot be in the future');
+      if (!row.attendanceStatus) row.errors.push('Attendance status must be Present, Attended, Absent, Excused, or Late');
+      if (!row.eventId && !row.eventName) row.errors.push('Event name or Event ID is required');
+      if (row.eventId && (!Number.isSafeInteger(row.eventId) || row.eventId < 1)) row.errors.push('Invalid event ID');
+      const duplicateKey = `${row.participantId || row.participantIdentifier}|${row.eventId || row.eventName.toLowerCase()}|${row.eventDate}`;
+      if (seenAttendance.has(duplicateKey)) row.errors.push('Duplicate attendance record in this file');
+      seenAttendance.add(duplicateKey);
+      if (row.eventId && !row.errors.length) {
+        const [[event]] = await pool.execute('SELECT id, name, starts_at FROM events WHERE id = ? LIMIT 1', [row.eventId]);
+        if (!event) row.errors.push('Event ID does not match an existing event');
+        else {
+          row.eventName = event.name;
+          if (String(event.starts_at).slice(0, 10) !== row.eventDate) {
+            row.errors.push('Event date does not match the selected event');
+          }
+        }
+      }
+      if (participant && row.eventName && validImportDate(row.eventDate)) {
+        const [[duplicate]] = await pool.execute(
+          `SELECT id FROM check_in_logs
+           WHERE participant_id = ? AND LOWER(event_name) = LOWER(?) AND DATE(checked_in_at) = ?
+           LIMIT 1`,
+          [participant.id, row.eventName, row.eventDate],
+        );
+        const [[scheduledOccurrence]] = await pool.execute(
+          `SELECT id FROM events WHERE LOWER(name) = LOWER(?) AND DATE(starts_at) = ? LIMIT 1`,
+          [row.eventName, row.eventDate],
+        );
+        if (
+          duplicate && ['Present', 'Late'].includes(row.attendanceStatus) ||
+          scheduledOccurrence && ['Absent', 'Excused'].includes(row.attendanceStatus)
+        ) {
+          row.warnings.push('Attendance record already exists');
+          row.operation = 'review';
+        } else {
+          row.operation = 'create';
+        }
+      } else {
+        row.operation = 'create';
+      }
+    }
+    normalized.push(row);
+  }
+  return { errors, normalized };
+}
+
+app.post('/api/participants/import/preview', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+  try {
     await Promise.all([
       participantProfileColumnsReady,
+      educationHistoryReady,
+      eventsTableReady,
+      historicalAttendanceSummaryReady,
+    ]);
+    const fileName = safeImportFileName(req.body.fileName || 'import.csv');
+    const result = await validateParticipantImport(req.body.importType, req.body.rows);
+    if (result.errors.length) return res.status(400).json({ error: result.errors[0] });
+    const rows = result.normalized.map(({ errors, warnings, ...row }) => ({
+      ...row,
+      errors,
+      warnings,
+      valid: errors.length === 0,
+    }));
+    res.json({
+      fileName,
+      importType: req.body.importType,
+      totalRows: rows.length,
+      validRows: rows.filter((row) => row.valid).length,
+      warningCount: rows.filter((row) => row.warnings.length).length,
+      errorCount: rows.filter((row) => !row.valid).length,
+      rows,
+    });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/participants/import/commit', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+  let connection;
+  let transactionActive = false;
+  let duplicateLockName = null;
+  try {
+    await Promise.all([
+      participantProfileColumnsReady,
+      educationHistoryReady,
+      participantImportHistoryReady,
+      eventsTableReady,
+      historicalAttendanceSummaryReady,
+    ]);
+    const fileName = safeImportFileName(req.body.fileName || 'import.csv');
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionActive = true;
+    duplicateLockName = 'participant-registration-duplicates';
+    const [[lock]] = await connection.execute('SELECT GET_LOCK(?, 10) AS acquired', [duplicateLockName]);
+    if (Number(lock?.acquired) !== 1) {
+      duplicateLockName = null;
+      return res.status(503).json({ error: 'Participant duplicate checks are temporarily unavailable. Please try again.' });
+    }
+    const validation = await validateParticipantImport(req.body.importType, req.body.rows);
+    if (validation.errors.length) return res.status(400).json({ error: validation.errors[0] });
+    const decisions = req.body.decisions && typeof req.body.decisions === 'object' ? req.body.decisions : {};
+    const validRows = validation.normalized.filter((row) => row.errors.length === 0);
+    for (const row of validRows) {
+      const decision = decisions[String(row.rowNumber)]
+        || (row.operation === 'review' ? 'skip' : row.operation || 'create');
+      const allowed = req.body.importType === 'participants'
+        ? row.matchingParticipantId ? ['skip', 'update', 'create'] : ['skip', 'create']
+        : ['skip', 'create'];
+      if (!allowed.includes(String(decision))) {
+        return res.status(400).json({ error: `Invalid import decision for row ${row.rowNumber}` });
+      }
+    }
+    const invalidCount = validation.normalized.length - validRows.length;
+    const operationFor = (row) => String(
+      decisions[String(row.rowNumber)] || (row.operation === 'review' ? 'skip' : row.operation || 'create'),
+    );
+    let participantsImported = 0;
+    let participantsUpdated = 0;
+    let attendanceImported = 0;
+    let attendanceSummariesImported = 0;
+    let educationImported = 0;
+    let skipped = invalidCount;
+
+    for (const row of validRows) {
+      const operation = operationFor(row);
+      if (operation === 'skip') {
+        skipped += 1;
+        continue;
+      }
+      if (req.body.importType === 'participants') {
+        const existingId = row.matchingParticipantId;
+        if (existingId && operation === 'review') {
+          skipped += 1;
+          continue;
+        }
+        if (existingId && operation === 'update') {
+          const [[existingParticipant]] = await connection.execute(
+            `SELECT id, participant_type, education_level, school_name_encrypted,
+                    school_address_encrypted, program_course_encrypted, enrollment_date, created_at
+             FROM participants WHERE id = ? LIMIT 1`,
+            [existingId],
+          );
+          if (existingParticipant) {
+            await preservePreviousCurrentSchool(connection, existingParticipant, row.currentSchool, req.user.id);
+          }
+          const fieldValues = {
+            firstName: ['first_name_encrypted', (value) => encrypt(value)],
+            middleName: ['middle_name_encrypted', (value) => encrypt(value)],
+            lastName: ['last_name_encrypted', (value) => encrypt(value)],
+            dateOfBirth: ['date_of_birth_encrypted', (value) => encrypt(value)],
+            gender: ['gender', (value) => value],
+            address: ['address_encrypted', (value) => encrypt(value)],
+            phone: ['phone_encrypted', (value) => encrypt(value)],
+            guardianName: ['emergency_contact_name_encrypted', (value) => encrypt(value)],
+            guardianContact: ['emergency_contact_phone_encrypted', (value) => encrypt(value)],
+            medicalConditions: ['medical_conditions_encrypted', (value) => encrypt(value)],
+            educationLevel: ['education_level', (value) => value],
+            gradeLevel: ['grade_level', (value) => value],
+            collegeCourse: ['program_course_encrypted', (value) => encrypt(value)],
+            currentSchool: ['school_name_encrypted', (value) => encrypt(value)],
+            schoolAddress: ['school_address_encrypted', (value) => encrypt(value)],
+            registrationDate: ['created_at', (value) => value],
+            sponsorshipRegistrationDate: ['sponsorship_registered_at', (value) => value],
+          };
+          const fields = {};
+          for (const [sourceField, [column, transform]] of Object.entries(fieldValues)) {
+            if (row[sourceField] !== undefined && String(row[sourceField]).trim() !== '') {
+              fields[column] = transform(row[sourceField]);
+            }
+          }
+          const nameParts = ['firstName', 'middleName', 'lastName']
+            .map((field) => row[field])
+            .filter((value) => String(value || '').trim());
+          if (nameParts.length) fields.full_name_encrypted = encrypt(nameParts.join(' '));
+          await connection.execute(
+            `UPDATE participants SET ${Object.keys(fields).map((field) => `${field} = ?`).join(', ')},
+             updated_at = NOW() WHERE id = ?`,
+            [...Object.values(fields), existingId],
+          );
+          participantsUpdated += 1;
+          continue;
+        }
+        const name = [row.firstName, row.middleName, row.lastName].filter(Boolean).join(' ');
+        const proposedCode = row.participantIdentifier && !row.matchingParticipantId
+          ? row.participantIdentifier
+          : `FMC-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+        const passcode = createParticipantPasscode();
+        const [result] = await connection.execute(
+          `INSERT INTO participants
+             (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted,
+              last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted,
+              passcode_hash, passcode_encrypted,
+              emergency_contact_name_encrypted, emergency_contact_phone_encrypted,
+              medical_conditions_encrypted, education_level, grade_level, program_course_encrypted,
+              school_name_encrypted, school_address_encrypted, sponsorship_registered_at,
+              status, participant_code, sponsorship_lifecycle, created_at, updated_at)
+           VALUES ('sponsored_child', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 'new', ?, ?)`,
+          [
+            encrypt(name), encrypt(row.firstName), encrypt(row.middleName || null), encrypt(row.lastName),
+            encrypt(row.dateOfBirth), row.gender, encrypt(row.phone || null), encrypt(row.address || null),
+            await bcrypt.hash(passcode, 12), encrypt(passcode),
+            encrypt(row.guardianName || null), encrypt(row.guardianContact || null),
+            encrypt(row.medicalConditions || null), row.educationLevel || null, row.gradeLevel || null,
+            encrypt(row.collegeCourse || null), encrypt(row.currentSchool || null),
+            encrypt(row.schoolAddress || null), row.sponsorshipRegistrationDate || null,
+            proposedCode, row.registrationDate || new Date().toISOString().slice(0, 10),
+            row.registrationDate || new Date().toISOString().slice(0, 10),
+          ],
+        );
+        const qrUid = encrypt(crypto.randomUUID());
+        const qrFile = `qr_${result.insertId}_${Date.now()}.png`;
+        await QRCode.toFile(path.join(uploadsDir, qrFile), qrUid);
+        await connection.execute(
+          `INSERT INTO qr_codes
+             (participant_id, qr_uid, qr_code_image, status, assigned_at, created_by, created_at)
+           VALUES (?, ?, ?, 'active', NOW(), ?, NOW())`,
+          [result.insertId, qrUid, `uploads/qr_codes/${qrFile}`, req.user.id],
+        );
+        participantsImported += 1;
+      } else if (req.body.importType === 'education') {
+        if (operation === 'review') {
+          skipped += 1;
+          continue;
+        }
+        await connection.execute(
+          `INSERT INTO participant_education_history
+             (participant_id, education_level, school_name_encrypted, school_address_encrypted,
+              start_year, end_year, status, course_strand_encrypted, notes_encrypted,
+              record_fingerprint, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            row.participantId, row.educationLevel, encrypt(row.schoolName),
+            encrypt(row.schoolAddress || null), Number(row.startYear),
+            row.endYear === null ? null : Number(row.endYear), row.status,
+            encrypt(row.courseStrand || null), encrypt(row.notes || null),
+            educationFingerprint(row), req.user.id,
+          ],
+        );
+        educationImported += 1;
+      } else if (req.body.importType === 'attendanceSummary') {
+        if (operation === 'review') {
+          skipped += 1;
+          continue;
+        }
+        await connection.execute(
+          `INSERT INTO participant_attendance_summaries
+             (participant_id, attendance_year, required_count, attended_count, absent_count, created_by)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [row.participantId, row.year, row.required, row.attended, row.absent, req.user.id],
+        );
+        attendanceSummariesImported += 1;
+      } else {
+        if (operation === 'review') {
+          skipped += 1;
+          continue;
+        }
+        const [[alreadyAttended]] = await connection.execute(
+          `SELECT id FROM check_in_logs
+           WHERE participant_id = ? AND LOWER(event_name) = LOWER(?) AND DATE(checked_in_at) = ?
+           LIMIT 1`,
+          [row.participantId, row.eventName, row.eventDate],
+        );
+        if (alreadyAttended && ['Present', 'Late'].includes(row.attendanceStatus)) {
+          skipped += 1;
+          continue;
+        }
+        let eventId = row.eventId;
+        if (!eventId) {
+          const [eventResult] = await connection.execute(
+            `INSERT INTO events (name, starts_at, status, created_by)
+             VALUES (?, ?, 'scheduled', ?)
+             ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
+            [row.eventName, `${row.eventDate} 00:00:00`, req.user.id],
+          );
+          eventId = eventResult.insertId;
+        }
+        if (row.attendanceStatus === 'Present' || row.attendanceStatus === 'Late') {
+          await connection.execute(
+            `INSERT INTO check_in_logs
+               (participant_id, event_name, checked_in_at, location, status, created_at)
+             VALUES (?, ?, ?, 'Data import', 'checked_in', NOW())`,
+            [row.participantId, row.eventName, `${row.eventDate} 09:00:00`],
+          );
+        }
+        attendanceImported += 1;
+      }
+    }
+    const summary = {
+      fileName,
+      importType: req.body.importType,
+      participantsImported,
+      participantsUpdated,
+      attendanceImported,
+      attendanceSummariesImported,
+      educationImported,
+      skipped,
+      failed: invalidCount,
+    };
+    await connection.execute(
+      `INSERT INTO participant_import_history
+         (file_name, import_type, imported_by, imported_by_name, participants_imported,
+          participants_updated, attendance_imported, attendance_summaries_imported,
+          education_imported, skipped, failed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        fileName, req.body.importType, req.user.id,
+        req.user.username || req.user.role, participantsImported, participantsUpdated,
+        attendanceImported, attendanceSummariesImported, educationImported, skipped, invalidCount,
+      ],
+    );
+    await connection.commit();
+    transactionActive = false;
+    await writeAuditLog(req.user, 'participant.data.imported', 'participant', null, summary);
+    res.json({ success: true, ...summary });
+  } catch (error) {
+    if (connection && transactionActive) {
+      await connection.rollback();
+      transactionActive = false;
+    }
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'An imported record conflicts with an existing participant, event, or education record. Review the file and preview again.' });
+    }
+    next(error);
+  } finally {
+    if (connection && transactionActive) await connection.rollback();
+    if (connection && duplicateLockName) {
+      await connection.execute('SELECT RELEASE_LOCK(?)', [duplicateLockName]);
+    }
+    connection?.release();
+  }
+});
+
+app.get('/api/participants/import/history', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+  try {
+    await participantImportHistoryReady;
+    const [rows] = await pool.execute(
+      `SELECT id, file_name, import_type, imported_by_name, participants_imported,
+              participants_updated, attendance_imported, education_imported,
+              attendance_summaries_imported, skipped, failed, created_at
+       FROM participant_import_history ORDER BY created_at DESC, id DESC LIMIT 50`,
+    );
+    res.json(rows);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/participants/:id/history', authenticate, checkPermission('participants:view'), async (req, res, next) => {
+  try {
+    const includeCareHistory = canViewParticipantCare(req.user);
+    await Promise.all([
+      participantProfileColumnsReady,
+      educationHistoryReady,
+      historicalAttendanceSummaryReady,
       participationTrackingReady,
       eventsTableReady,
       ...(includeCareHistory ? [sponsoredChildUpdatesReady] : []),
@@ -1061,6 +2090,9 @@ app.get('/api/participants/:id/history', authenticate, checkPermission('particip
     const participantId = Number(req.params.id);
     if (!Number.isSafeInteger(participantId) || participantId < 1) {
       return res.status(400).json({ error: 'Select a valid participant' });
+    }
+    if (!await hasParticipantScope(req.user, participantId)) {
+      return res.status(404).json({ error: 'Participant not found or not assigned to your group.' });
     }
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const historyPage = Math.max(1, Number.parseInt(req.query.historyPage, 10) || 1);
@@ -1104,6 +2136,7 @@ app.get(
   '/api/participants/:id/passcode',
   authenticate,
   checkRole(['Church Administrator', 'System Administrator']),
+  checkPermission('participants:view'),
   async (req, res, next) => {
     try {
       await participantProfileColumnsReady;
@@ -1660,7 +2693,7 @@ app.post('/api/account/email/verify', authenticate, checkRole(accountRoles), asy
   }
 });
 
-app.post('/api/participants', authenticate, checkPermission('participants:manage'), async (req, res, next) => {
+app.post('/api/participants', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
   const connection = await pool.getConnection();
   let duplicateLockName = null;
   try {
@@ -1794,17 +2827,29 @@ app.post('/api/participants', authenticate, checkPermission('participants:manage
   }
 });
 
-app.put('/api/participants/:id', authenticate, checkPermission('participants:manage'), async (req, res, next) => {
+app.put('/api/participants/:id', authenticate, checkPermission('participants:edit'), async (req, res, next) => {
   let connection;
   let transactionActive = false;
   try {
-    await participantProfileColumnsReady;
+    await Promise.all([participantProfileColumnsReady, educationHistoryReady]);
     const [existingRows] = await pool.execute(
-      `SELECT gender, participant_type, status
+      `SELECT id, gender, participant_type, status, education_level, school_name_encrypted,
+              school_address_encrypted, program_course_encrypted, enrollment_date, created_at
        FROM participants WHERE id = ? LIMIT 1`,
       [req.params.id],
     );
     if (!existingRows[0]) return res.status(404).json({ error: 'Participant not found' });
+    const previousStatus = String(existingRows[0].status || 'active');
+    const requestedStatus = String(req.body.status || previousStatus);
+    if (!['active', 'inactive', 'deleted'].includes(requestedStatus)) {
+      return res.status(400).json({ error: 'Select a valid participant status' });
+    }
+    if (requestedStatus === 'deleted' && previousStatus !== 'deleted') {
+      return res.status(400).json({ error: 'Use the participant deactivation action to delete a record' });
+    }
+    if (requestedStatus !== previousStatus && !hasPermission(req.user, 'participants:delete')) {
+      return res.status(403).json({ error: 'Participant status changes require delete permission' });
+    }
     const participantType = existingRows[0].participant_type;
     if (!['sponsored_child', 'goer'].includes(participantType)) {
       return res.status(400).json({ error: 'Participant type cannot be edited' });
@@ -1831,6 +2876,13 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
     }
     if (schoolAddress.length > 500) {
       return res.status(400).json({ error: 'School address must be 500 characters or fewer' });
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(req.body, 'sponsorshipRegistrationDate') &&
+      req.body.sponsorshipRegistrationDate &&
+      !validImportDate(req.body.sponsorshipRegistrationDate)
+    ) {
+      return res.status(400).json({ error: 'Enter a valid sponsorship registration date' });
     }
     if (
       Object.prototype.hasOwnProperty.call(req.body, 'passcode') &&
@@ -1863,8 +2915,11 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
       program_course_encrypted: participantType === 'sponsored_child' ? encrypt(req.body.programCourse) : null,
       school_name_encrypted: participantType === 'sponsored_child' ? encrypt(schoolName || null) : null,
       school_address_encrypted: participantType === 'sponsored_child' ? encrypt(schoolAddress || null) : null,
-      status: req.body.status || 'active',
+      status: requestedStatus,
     };
+    if (Object.prototype.hasOwnProperty.call(req.body, 'sponsorshipRegistrationDate')) {
+      fields.sponsorship_registered_at = req.body.sponsorshipRegistrationDate || null;
+    }
     if (isValidParticipantPasscode(req.body.passcode)) {
       fields.passcode_hash = await bcrypt.hash(req.body.passcode, 12);
       fields.passcode_encrypted = encrypt(req.body.passcode);
@@ -1874,6 +2929,7 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
     connection = await pool.getConnection();
     await connection.beginTransaction();
     transactionActive = true;
+    await preservePreviousCurrentSchool(connection, existingRows[0], schoolName, req.user.id);
     const [result] = await connection.execute(
       `UPDATE participants SET ${updates}, updated_at = NOW() WHERE id = ?`,
       [...Object.values(fields), req.params.id],
@@ -1902,7 +2958,7 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:man
   }
 });
 
-app.delete('/api/participants/:id', authenticate, checkPermission('participants:manage'), async (req, res, next) => {
+app.delete('/api/participants/:id', authenticate, checkPermission('participants:delete'), async (req, res, next) => {
   let connection;
   let transactionActive = false;
   try {
@@ -2135,8 +3191,8 @@ async function verifyPublicSponsoredChild(qrPayload, passcode) {
   const lookupKey = crypto.createHmac('sha256', process.env.JWT_SECRET).update(qrPayload).digest('hex');
   await sponsorLookupAttemptsReady;
   const [rows] = await pool.execute(
-    `SELECT p.id, p.full_name_encrypted, p.participant_code, p.school_name_encrypted,
-            p.school_address_encrypted,
+    `SELECT p.id, p.full_name_encrypted, p.date_of_birth_encrypted, p.gender,
+            p.participant_code, p.education_level, p.grade_level, p.school_name_encrypted,
             p.sponsorship_status, p.sponsorship_lifecycle, p.monthly_allowance,
             p.status, p.passcode_hash
      FROM participants p
@@ -2212,7 +3268,7 @@ async function getSponsorshipThreads(participantId) {
 
 async function getAccessibleSponsorshipChild(user, participantId) {
   const [[child]] = await pool.execute(
-    `SELECT id, participant_type, education_level, status
+    `SELECT id, participant_type, education_level, emergency_contact_phone_encrypted, status
      FROM participants
      WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
      LIMIT 1`,
@@ -2491,17 +3547,25 @@ app.delete('/api/sponsorship/children/:id/sponsor-assignment', authenticate, che
   }
 });
 
-async function getSponsoredParticipationSummaries(participantId = null) {
+async function getSponsoredParticipationSummaries(participantId = null, options = {}) {
   await Promise.all([participantProfileColumnsReady, eventsTableReady, participationTrackingReady]);
   const childFilter = participantId ? 'AND p.id = ?' : '';
-  const childParams = participantId ? [participantId] : [];
+  const educationFilter = options.educationLevel ? 'AND p.education_level = ?' : '';
+  const activeFilter = options.activeOnly
+    ? `AND p.status = 'active'
+       AND (p.participation_status IS NULL OR p.participation_status <> 'REMOVED_FROM_SPONSORSHIP')`
+    : '';
+  const childParams = [
+    ...(participantId ? [participantId] : []),
+    ...(options.educationLevel ? [options.educationLevel] : []),
+  ];
   const [participants] = await pool.execute(
     `SELECT p.id, p.participant_code, p.full_name_encrypted, p.date_of_birth_encrypted,
             p.gender, p.created_at, p.education_level, p.grade_level, p.participation_status,
             p.status AS participant_status
      FROM participants p
      WHERE p.participant_type = 'sponsored_child'
-       AND p.status <> 'deleted' ${childFilter}
+       AND p.status <> 'deleted' ${childFilter} ${educationFilter} ${activeFilter}
      ORDER BY p.created_at DESC, p.id DESC`,
     childParams,
   );
@@ -2575,6 +3639,7 @@ async function getSponsoredParticipationSummaries(participantId = null) {
       tracking.lifetime.absent >= GROUNDS_FOR_DEPARTURE_ABSENCES
       && !childActions.some((action) => action.type === 'grounds_for_departure')
       && !childActions.some((action) => action.type === 'second_chance')
+      && options.recordThresholdHistory !== false
     ) {
       const [result] = await pool.execute(
         `INSERT IGNORE INTO sponsored_child_participation_history
@@ -2638,11 +3703,9 @@ async function getSponsoredParticipationSummaries(participantId = null) {
 app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (req, res, next) => {
   try {
     const isGoer = isGoerRole(req.user.role);
-    let children = await getSponsoredParticipationSummaries();
-    if (isGoer) {
-      children = children.filter((child) => child.educationLevel === req.user.goerEducationLevel
-        && child.status !== 'REMOVED_FROM_SPONSORSHIP');
-    }
+    const children = await getSponsoredParticipationSummaries(null, isGoer
+      ? { educationLevel: req.user.goerEducationLevel, activeOnly: true }
+      : {});
     res.json(children);
   } catch (error) { next(error); }
 });
@@ -2653,9 +3716,20 @@ app.get('/api/sponsorship/children/:id/history', authenticate, checkSponsorshipV
     if (!Number.isSafeInteger(participantId) || participantId < 1) {
       return res.status(400).json({ error: 'Select a valid participant' });
     }
-    const [child] = await getSponsoredParticipationSummaries(participantId);
+    const isGoer = isGoerRole(req.user.role);
+    const [child] = await getSponsoredParticipationSummaries(participantId, isGoer
+      ? { educationLevel: req.user.goerEducationLevel, activeOnly: true }
+      : {});
     if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
-    res.json(child);
+    await educationHistoryReady;
+    const [educationRows] = await pool.execute(
+      `SELECT id, education_level, school_name_encrypted, school_address_encrypted,
+              start_year, end_year, status, course_strand_encrypted, notes_encrypted
+       FROM participant_education_history
+       WHERE participant_id = ? ORDER BY start_year DESC, id DESC`,
+      [participantId],
+    );
+    res.json({ ...child, educationHistory: educationRows.map(educationHistoryView) });
   } catch (error) { next(error); }
 });
 
@@ -2970,15 +4044,10 @@ app.post('/api/sponsorship/children/:id/allowance-transactions/:transactionId/re
   }
 });
 
-app.get('/api/sponsorship/children/:id/updates', authenticate, checkPermission('sponsorship:view'), async (req, res, next) => {
+app.get('/api/sponsorship/children/:id/updates', authenticate, checkSponsorshipView, async (req, res, next) => {
   try {
     await sponsoredChildUpdatesReady;
-    const [[child]] = await pool.execute(
-      `SELECT id FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1`,
-      [req.params.id],
-    );
+    const child = await getAccessibleSponsorshipChild(req.user, req.params.id);
     if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
     const [rows] = await pool.execute(
       `SELECT id, update_type, recorded_on, activity_encrypted, height_encrypted,
@@ -3004,7 +4073,7 @@ app.get('/api/sponsorship/children/:id/updates', authenticate, checkPermission('
   } catch (error) { next(error); }
 });
 
-app.post('/api/sponsorship/children/:id/updates', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+app.post('/api/sponsorship/children/:id/updates', authenticate, checkSponsorshipRecord, async (req, res, next) => {
   try {
     await sponsoredChildUpdatesReady;
     const type = String(req.body.type || '');
@@ -3044,12 +4113,7 @@ app.post('/api/sponsorship/children/:id/updates', authenticate, checkPermission(
     if (type === 'note' && !note) {
       return res.status(400).json({ error: 'Enter a note for this update' });
     }
-    const [[child]] = await pool.execute(
-      `SELECT id, emergency_contact_phone_encrypted FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1`,
-      [req.params.id],
-    );
+    const child = await getAccessibleSponsorshipChild(req.user, req.params.id);
     if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
     const [result] = await pool.execute(
       `INSERT INTO sponsored_child_updates
@@ -3664,13 +4728,57 @@ app.post('/api/public/sponsor-status', guardianRateLimit, async (req, res, next)
     const verification = await verifyPublicSponsoredChild(qrPayload, passcode);
     if (verification.error) return res.status(verification.status).json({ error: verification.error });
     const child = verification.child;
-    const [participation] = await getSponsoredParticipationSummaries(Number(child.id));
+    const [participation] = await getSponsoredParticipationSummaries(Number(child.id), {
+      recordThresholdHistory: false,
+    });
+    await educationHistoryReady;
+    const [educationRows] = await pool.execute(
+      `SELECT id, education_level, school_name_encrypted, start_year, end_year, status,
+              course_strand_encrypted
+       FROM participant_education_history
+       WHERE participant_id = ? ORDER BY start_year DESC, id DESC`,
+      [child.id],
+    );
     res.json({
       child: {
-        id: child.id,
-        name: decrypt(child.full_name_encrypted),
+        name: decrypt(child.full_name_encrypted) || 'Unnamed child',
         participantCode: child.participant_code,
-        participation,
+        age: calculateAge(decrypt(child.date_of_birth_encrypted)),
+        gender: child.gender || '',
+        educationLevel: child.education_level || '',
+        gradeLevel: child.grade_level || '',
+        schoolName: decrypt(child.school_name_encrypted) || '',
+        educationHistory: educationRows.map((row) => ({
+          educationLevel: row.education_level,
+          schoolName: decrypt(row.school_name_encrypted) || '',
+          startYear: Number(row.start_year),
+          endYear: row.end_year === null ? null : Number(row.end_year),
+          status: row.status,
+          courseStrand: decrypt(row.course_strand_encrypted) || '',
+        })),
+        participation: participation ? {
+          status: participation.status,
+          monthly: participation.monthly,
+          currentYear: participation.currentYear,
+          lifetime: participation.lifetime,
+          years: participation.years,
+          months: participation.months,
+          secondChance: participation.secondChance
+            ? {
+                createdAt: participation.secondChance.createdAt,
+                reason: participation.secondChance.reason,
+                absenceCount: participation.secondChance.absenceCount,
+              }
+            : null,
+          history: participation.history.map((entry) => ({
+            type: entry.type,
+            previousStatus: entry.previousStatus,
+            currentStatus: entry.currentStatus,
+            reason: entry.reason,
+            absenceCount: entry.absenceCount,
+            createdAt: entry.createdAt,
+          })),
+        } : null,
       },
     });
   } catch (error) { next(error); }
@@ -4250,6 +5358,20 @@ async function loadParticipantDetailHistory(participantId, options) {
   );
   if (!participantRow) return null;
   const participant = participantView(participantRow);
+  const [educationRows] = await pool.execute(
+    `SELECT id, education_level, school_name_encrypted, school_address_encrypted,
+            start_year, end_year, status, course_strand_encrypted, notes_encrypted
+     FROM participant_education_history
+     WHERE participant_id = ? ORDER BY start_year DESC, id DESC`,
+    [participantId],
+  );
+  const educationHistory = educationRows.map(educationHistoryView);
+  const [historicalAttendanceRows] = await pool.execute(
+    `SELECT attendance_year, required_count, attended_count, absent_count
+     FROM participant_attendance_summaries
+     WHERE participant_id = ? ORDER BY attendance_year DESC`,
+    [participantId],
+  );
   const [statusRows] = await pool.execute(
     `SELECT status_type, previous_status, current_status, changed_at
      FROM participant_status_history
@@ -4306,6 +5428,20 @@ async function loadParticipantDetailHistory(participantId, options) {
         ? Math.round((item.totalAttended / item.totalEvents) * 1000) / 10
         : 0,
     }));
+  const now = new Date();
+  const [weeklyAttendanceRows] = await pool.execute(
+    `SELECT FLOOR((DAYOFMONTH(event_date) - 1) / 7) + 1 AS week_of_month,
+            COUNT(*) AS total_events, SUM(attended_at IS NOT NULL) AS total_attended
+     FROM ${occurrenceSubquery} event_rows
+     WHERE YEAR(event_date) = ? AND MONTH(event_date) = ?
+     GROUP BY week_of_month ORDER BY week_of_month`,
+    [...occurrenceParams, now.getFullYear(), now.getMonth() + 1],
+  );
+  const currentMonthWeeklyAttendance = weeklyAttendanceRows.map((row) => ({
+    week: Number(row.week_of_month),
+    totalEvents: Number(row.total_events) || 0,
+    totalAttended: Number(row.total_attended) || 0,
+  }));
   const attendanceWhere = [];
   const attendanceParams = [...occurrenceParams];
   if (options.year) {
@@ -4391,9 +5527,40 @@ async function loadParticipantDetailHistory(participantId, options) {
     `SELECT event_at, event_type, title, description
      FROM ${timelineSubquery} timeline_rows
      ORDER BY event_at DESC, title ASC
-     LIMIT ? OFFSET ?`,
-    [...timelineParams, options.historyPageSize, (options.historyPage - 1) * options.historyPageSize],
+     LIMIT ? OFFSET 0`,
+    [...timelineParams, (options.historyPage - 1) * options.historyPageSize + options.historyPageSize],
   );
+  const educationTimeline = educationHistory.map((record) => ({
+    event_at: `${record.endYear || record.startYear}-01-01`,
+    event_type: 'education',
+    title: `${record.status === 'Currently Attending' ? 'Started' : record.status} ${record.educationLevel}`,
+    description: record.schoolName,
+  }));
+  const currentEducationYear = Number(
+    String(participant.enrollmentDate || participant.created_at || '').slice(0, 4),
+  );
+  const hasCurrentEducationRecord = educationHistory.some((record) =>
+    record.status === 'Currently Attending' &&
+    record.educationLevel === participant.educationLevel &&
+    record.schoolName.toLocaleLowerCase() === String(participant.schoolName || '').toLocaleLowerCase(),
+  );
+  if (
+    participant.educationLevel &&
+    participant.schoolName &&
+    !hasCurrentEducationRecord &&
+    Number.isInteger(currentEducationYear)
+  ) {
+    educationTimeline.push({
+      event_at: `${currentEducationYear}-01-01`,
+      event_type: 'education',
+      title: `Started ${participant.educationLevel}`,
+      description: participant.schoolName,
+    });
+  }
+  const combinedTimeline = [...timelineRows, ...educationTimeline]
+    .sort((first, second) => new Date(second.event_at) - new Date(first.event_at)
+      || String(first.title).localeCompare(String(second.title)))
+    .slice((options.historyPage - 1) * options.historyPageSize, options.historyPage * options.historyPageSize);
   const initialStatus = statusRows[0]?.previous_status
     || (participant.participant_type === 'sponsored_child'
       ? participant.participation_status
@@ -4419,6 +5586,8 @@ async function loadParticipantDetailHistory(participantId, options) {
       programCourse: participant.programCourse || '',
       schoolName: participant.schoolName || '',
       schoolAddress: participant.schoolAddress || '',
+      sponsorshipRegistrationDate: participant.sponsorship_registered_at || null,
+      educationHistory,
       phone: participant.phone || '',
       address: participant.address || '',
       guardianName: participant.emergencyContactName || '',
@@ -4431,9 +5600,20 @@ async function loadParticipantDetailHistory(participantId, options) {
       totalAbsences: Math.max(0, totalEvents - totalAttended),
       attendanceRate,
       registrationDate: participant.created_at || null,
+      sponsorshipRegistrationDate: participant.sponsorship_registered_at || null,
     },
     attendanceByYear,
     attendanceByMonth,
+    currentMonthWeeklyAttendance,
+    historicalAttendanceSummary: historicalAttendanceRows.map((row) => ({
+      year: Number(row.attendance_year),
+      required: Number(row.required_count),
+      attended: Number(row.attended_count),
+      absent: Number(row.absent_count),
+      attendanceRate: Number(row.required_count)
+        ? Math.round((Number(row.attended_count) / Number(row.required_count)) * 1000) / 10
+        : 0,
+    })),
     eventOptions: eventRows.map((row) => row.event_name),
     attendance: {
       records: attendanceRows.map((row) => ({
@@ -4454,7 +5634,7 @@ async function loadParticipantDetailHistory(participantId, options) {
       changedAt: row.changed_at,
     })),
     history: {
-      records: timelineRows.map((row) => ({
+      records: combinedTimeline.map((row) => ({
         eventAt: row.event_at,
         type: row.event_type,
         title: row.title,
@@ -4462,7 +5642,7 @@ async function loadParticipantDetailHistory(participantId, options) {
       })),
       page: options.historyPage,
       pageSize: options.historyPageSize,
-      total: Number(timelineCountRows[0]?.total) || 0,
+      total: (Number(timelineCountRows[0]?.total) || 0) + educationTimeline.length,
     },
   };
 }
