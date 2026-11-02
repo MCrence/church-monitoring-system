@@ -1848,6 +1848,19 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
     const operationFor = (row) => String(
       decisions[String(row.rowNumber)] || (row.operation === 'review' ? 'skip' : row.operation || 'create'),
     );
+    const participantCredentials = new Map();
+    if (req.body.importType === 'participants') {
+      const createRows = validRows.filter((row) => operationFor(row) === 'create');
+      for (let offset = 0; offset < createRows.length; offset += 4) {
+        await Promise.all(createRows.slice(offset, offset + 4).map(async (row) => {
+          const passcode = createParticipantPasscode();
+          participantCredentials.set(row.rowNumber, {
+            passcodeHash: await bcrypt.hash(passcode, 12),
+            encryptedPasscode: encrypt(passcode),
+          });
+        }));
+      }
+    }
     let participantsImported = 0;
     let participantsUpdated = 0;
     let attendanceImported = 0;
@@ -1918,7 +1931,8 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
         const proposedCode = row.participantIdentifier && !row.matchingParticipantId
           ? row.participantIdentifier
           : `FMC-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
-        const passcode = createParticipantPasscode();
+        const credentials = participantCredentials.get(row.rowNumber);
+        if (!credentials) throw new Error(`Participant import credentials were not prepared for row ${row.rowNumber}`);
         const [result] = await connection.execute(
           `INSERT INTO participants
              (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted,
@@ -1932,7 +1946,7 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
           [
             encrypt(name), encrypt(row.firstName), encrypt(row.middleName || null), encrypt(row.lastName),
             encrypt(row.dateOfBirth), row.gender, encrypt(row.phone || null), encrypt(row.address || null),
-            await bcrypt.hash(passcode, 12), encrypt(passcode),
+            credentials.passcodeHash, credentials.encryptedPasscode,
             encrypt(row.guardianName || null), encrypt(row.guardianContact || null),
             encrypt(row.medicalConditions || null), row.educationLevel || null, row.gradeLevel || null,
             encrypt(row.collegeCourse || null), encrypt(row.currentSchool || null),
@@ -2056,11 +2070,17 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
     }
     next(error);
   } finally {
-    if (connection && transactionActive) await connection.rollback();
-    if (connection && duplicateLockName) {
-      await connection.execute('SELECT RELEASE_LOCK(?)', [duplicateLockName]);
+    try {
+      if (connection && transactionActive) await connection.rollback();
+    } finally {
+      try {
+        if (connection && duplicateLockName) {
+          await connection.execute('SELECT RELEASE_LOCK(?)', [duplicateLockName]);
+        }
+      } finally {
+        connection?.release();
+      }
     }
-    connection?.release();
   }
 });
 
