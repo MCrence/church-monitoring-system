@@ -703,9 +703,9 @@ function issueToken(user) {
   );
 }
 
-async function writeAuditLog(user, action, entityType, entityId = null, details = null) {
+async function writeAuditLog(user, action, entityType, entityId = null, details = null, executor = pool) {
   await auditTableReady;
-  await pool.execute(
+  await executor.execute(
     'INSERT INTO audit_logs (user_id, username, role, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?)',
     [
       user.id,
@@ -2056,9 +2056,9 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
         attendanceImported, attendanceSummariesImported, educationImported, skipped, invalidCount,
       ],
     );
+    await writeAuditLog(req.user, 'participant.data.imported', 'participant', null, summary, connection);
     await connection.commit();
     transactionActive = false;
-    await writeAuditLog(req.user, 'participant.data.imported', 'participant', null, summary);
     res.json({ success: true, ...summary });
   } catch (error) {
     if (connection && transactionActive) {
