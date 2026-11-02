@@ -1563,6 +1563,27 @@ async function validateParticipantImport(type, rows) {
     if (participant.participant_code) byIdentifier.set(String(participant.participant_code).toLowerCase(), participant);
     byIdentifier.set(String(participant.id), participant);
   }
+  const existingEducationKeys = new Set();
+  if (type === 'education') {
+    const participantIds = [...new Set(rows
+      .map((source) => {
+        const identifier = String(source?.participantIdentifier || '').trim();
+        return byIdentifier.get(identifier.toLowerCase()) || byIdentifier.get(identifier);
+      })
+      .filter(Boolean)
+      .map((participant) => Number(participant.id)))];
+    if (participantIds.length) {
+      const placeholders = participantIds.map(() => '?').join(', ');
+      const [existingEducation] = await pool.execute(
+        `SELECT participant_id, record_fingerprint FROM participant_education_history
+         WHERE participant_id IN (${placeholders})`,
+        participantIds,
+      );
+      for (const record of existingEducation) {
+        existingEducationKeys.add(`${record.participant_id}|${record.record_fingerprint}`);
+      }
+    }
+  }
   const seenParticipantIdentifiers = new Set();
   const seenParticipantNames = new Set();
   const seenEducation = new Set();
@@ -1663,16 +1684,9 @@ async function validateParticipantImport(type, rows) {
       const duplicateKey = `${row.participantId || row.participantIdentifier}|${educationFingerprint(row)}`;
       if (seenEducation.has(duplicateKey)) row.errors.push('Duplicate education record in this file');
       seenEducation.add(duplicateKey);
-      if (row.participantId) {
-        const [[existingEducation]] = await pool.execute(
-          `SELECT id FROM participant_education_history
-           WHERE participant_id = ? AND record_fingerprint = ? LIMIT 1`,
-          [row.participantId, educationFingerprint(row)],
-        );
-        if (existingEducation) {
-          row.warnings.push('Education record already exists');
-          row.operation = 'review';
-        }
+      if (row.participantId && existingEducationKeys.has(duplicateKey)) {
+        row.warnings.push('Education record already exists');
+        row.operation = 'review';
       }
       if (!row.operation) row.operation = row.errors.length ? 'error' : 'create';
     } else if (type === 'attendanceSummary') {
@@ -1824,11 +1838,13 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
     connection = await pool.getConnection();
     await connection.beginTransaction();
     transactionActive = true;
-    duplicateLockName = 'participant-registration-duplicates';
-    const [[lock]] = await connection.execute('SELECT GET_LOCK(?, 10) AS acquired', [duplicateLockName]);
-    if (Number(lock?.acquired) !== 1) {
-      duplicateLockName = null;
-      return res.status(503).json({ error: 'Participant duplicate checks are temporarily unavailable. Please try again.' });
+    if (req.body.importType === 'participants') {
+      duplicateLockName = 'participant-registration-duplicates';
+      const [[lock]] = await connection.execute('SELECT GET_LOCK(?, 10) AS acquired', [duplicateLockName]);
+      if (Number(lock?.acquired) !== 1) {
+        duplicateLockName = null;
+        return res.status(503).json({ error: 'Participant duplicate checks are temporarily unavailable. Please try again.' });
+      }
     }
     const validation = await validateParticipantImport(req.body.importType, req.body.rows);
     if (validation.errors.length) return res.status(400).json({ error: validation.errors[0] });
@@ -1867,6 +1883,7 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
     let attendanceSummariesImported = 0;
     let educationImported = 0;
     let skipped = invalidCount;
+    const educationRecords = [];
 
     for (const row of validRows) {
       const operation = operationFor(row);
@@ -1970,21 +1987,13 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
           skipped += 1;
           continue;
         }
-        await connection.execute(
-          `INSERT INTO participant_education_history
-             (participant_id, education_level, school_name_encrypted, school_address_encrypted,
-              start_year, end_year, status, course_strand_encrypted, notes_encrypted,
-              record_fingerprint, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            row.participantId, row.educationLevel, encrypt(row.schoolName),
-            encrypt(row.schoolAddress || null), Number(row.startYear),
-            row.endYear === null ? null : Number(row.endYear), row.status,
-            encrypt(row.courseStrand || null), encrypt(row.notes || null),
-            educationFingerprint(row), req.user.id,
-          ],
-        );
-        educationImported += 1;
+        educationRecords.push([
+          row.participantId, row.educationLevel, encrypt(row.schoolName),
+          encrypt(row.schoolAddress || null), Number(row.startYear),
+          row.endYear === null ? null : Number(row.endYear), row.status,
+          encrypt(row.courseStrand || null), encrypt(row.notes || null),
+          educationFingerprint(row), req.user.id,
+        ]);
       } else if (req.body.importType === 'attendanceSummary') {
         if (operation === 'review') {
           skipped += 1;
@@ -2033,6 +2042,19 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
         attendanceImported += 1;
       }
     }
+    for (let offset = 0; offset < educationRecords.length; offset += 250) {
+      const batch = educationRecords.slice(offset, offset + 250);
+      const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+      await connection.execute(
+        `INSERT INTO participant_education_history
+           (participant_id, education_level, school_name_encrypted, school_address_encrypted,
+            start_year, end_year, status, course_strand_encrypted, notes_encrypted,
+            record_fingerprint, created_by)
+         VALUES ${placeholders}`,
+        batch.flat(),
+      );
+    }
+    educationImported = educationRecords.length;
     const summary = {
       fileName,
       importType: req.body.importType,
