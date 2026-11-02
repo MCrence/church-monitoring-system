@@ -1620,6 +1620,7 @@ async function validateParticipantImport(type, rows) {
         educationLevel: source.educationLevel,
         gradeLevel: source.gradeLevel,
         schoolName: source.currentSchool,
+        schoolAddress: source.schoolAddress,
         programCourse: source.collegeCourse,
       }, educationLevels, gradeLevelsByEducation);
       for (const message of Object.values(registrationErrors)) row.errors.push(message);
