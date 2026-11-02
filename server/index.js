@@ -1584,6 +1584,70 @@ async function validateParticipantImport(type, rows) {
       }
     }
   }
+  const existingAttendanceKeys = new Set();
+  const scheduledAttendanceKeys = new Set();
+  const eventsById = new Map();
+  if (type === 'attendance') {
+    const participantIds = [...new Set(rows
+      .map((source) => {
+        const identifier = String(source?.participantIdentifier || '').trim();
+        return byIdentifier.get(identifier.toLowerCase()) || byIdentifier.get(identifier);
+      })
+      .filter(Boolean)
+      .map((participant) => Number(participant.id)))];
+    const eventIds = [...new Set(rows
+      .map((source) => Number(source?.eventId))
+      .filter((id) => Number.isSafeInteger(id) && id > 0))];
+    const eventDates = [...new Set(rows
+      .map((source) => String(source?.eventDate || '').slice(0, 10))
+      .filter((date) => validImportDate(date)))].sort();
+    const dateRange = eventDates.length
+      ? [eventDates[0], eventDates[eventDates.length - 1]]
+      : null;
+
+    if (dateRange) {
+      const [scheduledEvents] = await pool.execute(
+        `SELECT id, name, DATE_FORMAT(starts_at, '%Y-%m-%d') AS event_date
+         FROM events WHERE starts_at >= ? AND starts_at < DATE_ADD(?, INTERVAL 1 DAY)`,
+        dateRange,
+      );
+      for (const event of scheduledEvents) {
+        eventsById.set(Number(event.id), event);
+        scheduledAttendanceKeys.add(
+          `${String(event.name).toLocaleLowerCase()}|${event.event_date}`,
+        );
+      }
+      if (participantIds.length) {
+        for (let offset = 0; offset < participantIds.length; offset += 500) {
+          const batch = participantIds.slice(offset, offset + 500);
+          const placeholders = batch.map(() => '?').join(', ');
+          const [existingAttendance] = await pool.execute(
+            `SELECT participant_id, LOWER(event_name) AS event_name,
+                    DATE_FORMAT(checked_in_at, '%Y-%m-%d') AS event_date
+             FROM check_in_logs
+             WHERE participant_id IN (${placeholders})
+               AND checked_in_at >= ? AND checked_in_at < DATE_ADD(?, INTERVAL 1 DAY)`,
+            [...batch, ...dateRange],
+          );
+          for (const attendance of existingAttendance) {
+            existingAttendanceKeys.add(
+              `${attendance.participant_id}|${attendance.event_name}|${attendance.event_date}`,
+            );
+          }
+        }
+      }
+    }
+    for (let offset = 0; offset < eventIds.length; offset += 500) {
+      const batch = eventIds.slice(offset, offset + 500);
+      const placeholders = batch.map(() => '?').join(', ');
+      const [events] = await pool.execute(
+        `SELECT id, name, DATE_FORMAT(starts_at, '%Y-%m-%d') AS event_date
+         FROM events WHERE id IN (${placeholders})`,
+        batch,
+      );
+      for (const event of events) eventsById.set(Number(event.id), event);
+    }
+  }
   const seenParticipantIdentifiers = new Set();
   const seenParticipantNames = new Set();
   const seenEducation = new Set();
@@ -1755,29 +1819,21 @@ async function validateParticipantImport(type, rows) {
       if (seenAttendance.has(duplicateKey)) row.errors.push('Duplicate attendance record in this file');
       seenAttendance.add(duplicateKey);
       if (row.eventId && !row.errors.length) {
-        const [[event]] = await pool.execute('SELECT id, name, starts_at FROM events WHERE id = ? LIMIT 1', [row.eventId]);
+        const event = eventsById.get(row.eventId);
         if (!event) row.errors.push('Event ID does not match an existing event');
         else {
           row.eventName = event.name;
-          if (String(event.starts_at).slice(0, 10) !== row.eventDate) {
+          if (event.event_date !== row.eventDate) {
             row.errors.push('Event date does not match the selected event');
           }
         }
       }
       if (participant && row.eventName && validImportDate(row.eventDate)) {
-        const [[duplicate]] = await pool.execute(
-          `SELECT id FROM check_in_logs
-           WHERE participant_id = ? AND LOWER(event_name) = LOWER(?) AND DATE(checked_in_at) = ?
-           LIMIT 1`,
-          [participant.id, row.eventName, row.eventDate],
-        );
-        const [[scheduledOccurrence]] = await pool.execute(
-          `SELECT id FROM events WHERE LOWER(name) = LOWER(?) AND DATE(starts_at) = ? LIMIT 1`,
-          [row.eventName, row.eventDate],
-        );
+        const attendanceKey = `${participant.id}|${row.eventName.toLocaleLowerCase()}|${row.eventDate}`;
+        const occurrenceKey = `${row.eventName.toLocaleLowerCase()}|${row.eventDate}`;
         if (
-          duplicate && ['Present', 'Late'].includes(row.attendanceStatus) ||
-          scheduledOccurrence && ['Absent', 'Excused'].includes(row.attendanceStatus)
+          existingAttendanceKeys.has(attendanceKey) && ['Present', 'Late'].includes(row.attendanceStatus) ||
+          scheduledAttendanceKeys.has(occurrenceKey) && ['Absent', 'Excused'].includes(row.attendanceStatus)
         ) {
           row.warnings.push('Attendance record already exists');
           row.operation = 'review';
@@ -1884,6 +1940,8 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
     let educationImported = 0;
     let skipped = invalidCount;
     const educationRecords = [];
+    const attendanceEvents = new Map();
+    const attendanceRecords = [];
 
     for (const row of validRows) {
       const operation = operationFor(row);
@@ -2011,36 +2069,40 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
           skipped += 1;
           continue;
         }
-        const [[alreadyAttended]] = await connection.execute(
-          `SELECT id FROM check_in_logs
-           WHERE participant_id = ? AND LOWER(event_name) = LOWER(?) AND DATE(checked_in_at) = ?
-           LIMIT 1`,
-          [row.participantId, row.eventName, row.eventDate],
-        );
-        if (alreadyAttended && ['Present', 'Late'].includes(row.attendanceStatus)) {
-          skipped += 1;
-          continue;
-        }
-        let eventId = row.eventId;
-        if (!eventId) {
-          const [eventResult] = await connection.execute(
-            `INSERT INTO events (name, starts_at, status, created_by)
-             VALUES (?, ?, 'scheduled', ?)
-             ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
+        if (!row.eventId) {
+          attendanceEvents.set(
+            `${row.eventName.toLocaleLowerCase()}|${row.eventDate}`,
             [row.eventName, `${row.eventDate} 00:00:00`, req.user.id],
           );
-          eventId = eventResult.insertId;
         }
         if (row.attendanceStatus === 'Present' || row.attendanceStatus === 'Late') {
-          await connection.execute(
-            `INSERT INTO check_in_logs
-               (participant_id, event_name, checked_in_at, location, status, created_at)
-             VALUES (?, ?, ?, 'Data import', 'checked_in', NOW())`,
-            [row.participantId, row.eventName, `${row.eventDate} 09:00:00`],
-          );
+          attendanceRecords.push([
+            row.participantId, row.eventName, `${row.eventDate} 09:00:00`,
+          ]);
         }
         attendanceImported += 1;
       }
+    }
+    const eventRows = [...attendanceEvents.values()];
+    for (let offset = 0; offset < eventRows.length; offset += 250) {
+      const batch = eventRows.slice(offset, offset + 250);
+      const placeholders = batch.map(() => '(?, ?, \'scheduled\', ?)').join(', ');
+      await connection.execute(
+        `INSERT INTO events (name, starts_at, status, created_by)
+         VALUES ${placeholders}
+         ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
+        batch.flat(),
+      );
+    }
+    for (let offset = 0; offset < attendanceRecords.length; offset += 250) {
+      const batch = attendanceRecords.slice(offset, offset + 250);
+      const placeholders = batch.map(() => '(?, ?, ?, \'Data import\', \'checked_in\', NOW())').join(', ');
+      await connection.execute(
+        `INSERT INTO check_in_logs
+           (participant_id, event_name, checked_in_at, location, status, created_at)
+         VALUES ${placeholders}`,
+        batch.flat(),
+      );
     }
     for (let offset = 0; offset < educationRecords.length; offset += 250) {
       const batch = educationRecords.slice(offset, offset + 250);
