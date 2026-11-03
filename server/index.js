@@ -4761,7 +4761,7 @@ function normalizeAnalyticsEducation(value) {
   const raw = String(value || '').trim().toLowerCase();
   if (raw === 'all') return '';
   if (raw === 'high school') return 'High School';
-  return EDUCATION_LEVELS.find((level) => level.toLowerCase() === raw) || '';
+  return [...EDUCATION_LEVELS].find((level) => level.toLowerCase() === raw) || '';
 }
 
 function normalizeAnalyticsStatus(value) {
