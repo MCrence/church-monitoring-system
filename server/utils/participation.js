@@ -79,36 +79,37 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
     const occurrences = [...activityByKey.values()]
       .filter((activity) => activity.date.slice(0, 7) === key)
       .sort((first, second) => first.date.localeCompare(second.date) || first.name.localeCompare(second.name));
+    const required = Math.min(MONTHLY_ACTIVITY_REQUIREMENT, occurrences.length);
     const requiredOccurrences = [
       ...occurrences.filter((activity) => activity.attended),
       ...occurrences.filter((activity) => !activity.attended),
-    ].slice(0, MONTHLY_ACTIVITY_REQUIREMENT);
+    ].slice(0, required);
     requiredOccurrences.forEach((activity) => { activity.required = true; });
     const attended = Math.min(
-      MONTHLY_ACTIVITY_REQUIREMENT,
+      required,
       new Set(occurrences.filter((activity) => activity.attended)
         .map((activity) => occurrenceKey(activity.name, activity.date))).size,
     );
-    const absent = MONTHLY_ACTIVITY_REQUIREMENT - attended;
+    const absent = required - attended;
     const monthSummary = {
       year,
       month,
       key,
-      required: MONTHLY_ACTIVITY_REQUIREMENT,
+      required,
       attended,
       absent,
-      attendanceRate: Math.round((attended / MONTHLY_ACTIVITY_REQUIREMENT) * 10000) / 100,
-      status: attended === MONTHLY_ACTIVITY_REQUIREMENT ? "ACTIVE" : "WARNING",
+      attendanceRate: required ? Math.round((attended / required) * 10000) / 100 : 0,
+      status: attended === required ? "ACTIVE" : "WARNING",
       events: occurrences.map((activity) => ({
         ...activity,
         status: activity.attended ? "ATTENDED" : "ABSENT",
       })),
     };
     months.push(monthSummary);
-    lifetimeRequired += MONTHLY_ACTIVITY_REQUIREMENT;
+    lifetimeRequired += required;
     lifetimeAttended += attended;
     const yearly = yearTotals.get(year) || { year, required: 0, attended: 0, absent: 0 };
-    yearly.required += MONTHLY_ACTIVITY_REQUIREMENT;
+    yearly.required += required;
     yearly.attended += attended;
     yearly.absent += absent;
     yearTotals.set(year, yearly);

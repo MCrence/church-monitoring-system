@@ -154,6 +154,7 @@ const participantImportHistoryReady = pool.query(`
     attendance_imported INT UNSIGNED NOT NULL DEFAULT 0,
     attendance_summaries_imported INT UNSIGNED NOT NULL DEFAULT 0,
     education_imported INT UNSIGNED NOT NULL DEFAULT 0,
+    events_imported INT UNSIGNED NOT NULL DEFAULT 0,
     skipped INT UNSIGNED NOT NULL DEFAULT 0,
     failed INT UNSIGNED NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -169,6 +170,15 @@ const participantImportHistoryReady = pool.query(`
     try {
       await pool.query(
         'ALTER TABLE participant_import_history ADD COLUMN attendance_summaries_imported INT UNSIGNED NOT NULL DEFAULT 0 AFTER attendance_imported',
+      );
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+    }
+  }
+  if (!columns.some((column) => column.COLUMN_NAME === 'events_imported')) {
+    try {
+      await pool.query(
+        'ALTER TABLE participant_import_history ADD COLUMN events_imported INT UNSIGNED NOT NULL DEFAULT 0 AFTER education_imported',
       );
     } catch (error) {
       if (error.code !== 'ER_DUP_FIELDNAME') throw error;
@@ -1373,9 +1383,12 @@ app.get('/api/events/:id/attendance', authenticate, checkPermission('events:view
               p.full_name_encrypted, p.first_name_encrypted, p.middle_name_encrypted, p.last_name_encrypted,
               c.event_name, c.location, c.checked_in_at, c.checked_out_at, c.status
        FROM check_in_logs c JOIN participants p ON p.id = c.participant_id
-       WHERE c.event_name = ? AND c.status = 'checked_in'
+       WHERE c.event_name = ?
+         AND c.checked_in_at >= DATE(?)
+         AND c.checked_in_at < DATE_ADD(DATE(?), INTERVAL 1 DAY)
+         AND c.status = 'checked_in'
        ORDER BY c.checked_in_at ASC`,
-      [event.name],
+      [event.name, event.starts_at, event.starts_at],
     );
     res.json({
       event,
@@ -1519,6 +1532,16 @@ function validImportDate(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
 }
 
+function normalizeImportDateTime(value) {
+  const match = String(value || '').trim().match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match || !validImportDate(match[1])) return null;
+  const hour = Number(match[2]);
+  const minute = Number(match[3]);
+  const second = Number(match[4] || 0);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  return `${match[1]} ${match[2]}:${match[3]}:${match[4] || '00'}`;
+}
+
 function importAttendanceStatus(value) {
   const normalized = String(value || '').trim().toLowerCase();
   const aliases = {
@@ -1545,7 +1568,7 @@ app.post('/api/participants/import/inspect', authenticate, checkRole(['System Ad
 async function validateParticipantImport(type, rows) {
   const errors = [];
   const normalized = [];
-  if (!['participants', 'education', 'attendance', 'attendanceSummary'].includes(type)) {
+  if (!['participants', 'education', 'attendance', 'attendanceSummary', 'events'].includes(type)) {
     return { errors: ['Choose a supported import type'], normalized: [] };
   }
   if (!Array.isArray(rows) || !rows.length || rows.length > 5000) {
@@ -1587,6 +1610,17 @@ async function validateParticipantImport(type, rows) {
   const existingAttendanceKeys = new Set();
   const scheduledAttendanceKeys = new Set();
   const eventsById = new Map();
+  const existingEventKeys = new Set();
+  if (type === 'events') {
+    const [events] = await pool.execute(
+      `SELECT LOWER(name) AS name,
+              DATE_FORMAT(starts_at, '%Y-%m-%d %H:%i:%s') AS starts_at
+       FROM events`,
+    );
+    for (const event of events) {
+      existingEventKeys.add(`${event.name}|${event.starts_at}`);
+    }
+  }
   if (type === 'attendance') {
     const participantIds = [...new Set(rows
       .map((source) => {
@@ -1799,6 +1833,30 @@ async function validateParticipantImport(type, rows) {
         }
       }
       if (!row.operation) row.operation = row.errors.length ? 'error' : 'create';
+    } else if (type === 'events') {
+      row.eventName = String(source.eventName || '').trim();
+      row.eventDescription = String(source.eventDescription || '').trim();
+      row.eventStart = normalizeImportDateTime(source.eventStart);
+      row.eventEnd = source.eventEnd ? normalizeImportDateTime(source.eventEnd) : null;
+      row.eventLocation = String(source.eventLocation || '').trim();
+      if (!row.eventName) row.errors.push('Event name is required');
+      if (row.eventName.length > 100) row.errors.push('Event name must be 100 characters or fewer');
+      if (!row.eventStart) row.errors.push('A valid event start date and time is required');
+      if (source.eventEnd && !row.eventEnd) row.errors.push('Invalid event end date and time');
+      if (row.eventEnd && row.eventStart && row.eventEnd < row.eventStart) {
+        row.errors.push('Event end time must be after the start time');
+      }
+      if (row.eventDescription.length > 500) row.errors.push('Event description must be 500 characters or fewer');
+      if (row.eventLocation.length > 100) row.errors.push('Event location must be 100 characters or fewer');
+      const eventKey = `${row.eventName.toLocaleLowerCase()}|${row.eventStart || ''}`;
+      if (seenAttendance.has(eventKey)) row.errors.push('Duplicate event in this file');
+      seenAttendance.add(eventKey);
+      if (row.eventName && row.eventStart && existingEventKeys.has(eventKey)) {
+        row.warnings.push('An event with the same name and start time already exists');
+        row.operation = 'review';
+      } else {
+        row.operation = 'create';
+      }
     } else {
       row.participantIdentifier = String(source.participantIdentifier || '').trim();
       row.eventId = source.eventId ? Number(source.eventId) : null;
@@ -1938,6 +1996,7 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
     let attendanceImported = 0;
     let attendanceSummariesImported = 0;
     let educationImported = 0;
+    let eventsImported = 0;
     let skipped = invalidCount;
     const educationRecords = [];
     const attendanceEvents = new Map();
@@ -2064,6 +2123,20 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
           [row.participantId, row.year, row.required, row.attended, row.absent, req.user.id],
         );
         attendanceSummariesImported += 1;
+      } else if (req.body.importType === 'events') {
+        await connection.execute(
+          `INSERT INTO events (name, description, starts_at, ends_at, location, created_by)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            row.eventName,
+            row.eventDescription || null,
+            row.eventStart,
+            row.eventEnd,
+            row.eventLocation || null,
+            req.user.id,
+          ],
+        );
+        eventsImported += 1;
       } else {
         if (operation === 'review') {
           skipped += 1;
@@ -2125,6 +2198,7 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
       attendanceImported,
       attendanceSummariesImported,
       educationImported,
+      eventsImported,
       skipped,
       failed: invalidCount,
     };
@@ -2132,15 +2206,22 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
       `INSERT INTO participant_import_history
          (file_name, import_type, imported_by, imported_by_name, participants_imported,
           participants_updated, attendance_imported, attendance_summaries_imported,
-          education_imported, skipped, failed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          education_imported, events_imported, skipped, failed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         fileName, req.body.importType, req.user.id,
         req.user.username || req.user.role, participantsImported, participantsUpdated,
-        attendanceImported, attendanceSummariesImported, educationImported, skipped, invalidCount,
+        attendanceImported, attendanceSummariesImported, educationImported, eventsImported, skipped, invalidCount,
       ],
     );
-    await writeAuditLog(req.user, 'participant.data.imported', 'participant', null, summary, connection);
+    await writeAuditLog(
+      req.user,
+      req.body.importType === 'events' ? 'event.data.imported' : 'participant.data.imported',
+      req.body.importType === 'events' ? 'event' : 'participant',
+      null,
+      summary,
+      connection,
+    );
     await connection.commit();
     transactionActive = false;
     res.json({ success: true, ...summary });
@@ -2174,7 +2255,7 @@ app.get('/api/participants/import/history', authenticate, checkRole(['System Adm
     const [rows] = await pool.execute(
       `SELECT id, file_name, import_type, imported_by_name, participants_imported,
               participants_updated, attendance_imported, education_imported,
-              attendance_summaries_imported, skipped, failed, created_at
+              attendance_summaries_imported, events_imported, skipped, failed, created_at
        FROM participant_import_history ORDER BY created_at DESC, id DESC LIMIT 50`,
     );
     res.json(rows);
@@ -3771,7 +3852,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
       || childActions.some((action) => action.type === 'removed');
     const currentStatus = getParticipationStatus({
       totalAbsences: tracking.lifetime.absent,
-      monthlyCompliant: tracking.currentMonth.attended >= 2,
+      monthlyCompliant: tracking.currentMonth.attended >= tracking.currentMonth.required,
       secondChanceGranted: Boolean(secondChance),
       removed,
     });
