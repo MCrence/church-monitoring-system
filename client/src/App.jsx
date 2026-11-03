@@ -2396,7 +2396,6 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
       delete changes.sponsorContact;
       delete changes.sponsorshipType;
       delete changes.lifecycle;
-      delete changes.monthlyAllowance;
       const data = await apiCall(`/participants/${selected}`, {
         method: "PUT",
         body: JSON.stringify(changes),
