@@ -986,7 +986,7 @@ function Dashboard({ go, user }) {
           )}
           {(isAdmin || canViewCare) && (
             <div className="row g-4 mb-4">
-              {isAdmin && <section className="col-12 col-lg-5"><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Sponsored Care</h2><p>Participation status summary</p></div><button className="btn btn-outline-primary btn-sm" onClick={() => go("sponsorship")}>View Sponsored Care</button></div><div className="dashboard-overview-stats">{[["Active", d.sponsoredCare.active], ["Warning", d.sponsoredCare.warning], ["Grounds for Departure", d.sponsoredCare.groundsForDeparture], ["Second Chance", d.sponsoredCare.secondChance], ["Removed", d.sponsoredCare.removed]].map(([label, value]) => <div key={label}><small>{label}</small><strong>{formatCount(value)}</strong></div>)}</div></article></section>}
+              {isAdmin && <section className="col-12 col-lg-5"><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Sponsored Care</h2><p>Participation status summary</p></div><button className="btn btn-outline-primary btn-sm" onClick={() => go("sponsorship")}>View Sponsored Care</button></div><div className="dashboard-overview-stats">{[["Active", d.sponsoredCare.active], ["Warning", d.sponsoredCare.warning], ["Grounds for Departure", d.sponsoredCare.groundsForDeparture], ["Second Chance", d.sponsoredCare.secondChance], ["Inactive", d.sponsoredCare.removed]].map(([label, value]) => <div key={label}><small>{label}</small><strong>{formatCount(value)}</strong></div>)}</div></article></section>}
               <section className={isAdmin ? "col-12 col-lg-7" : "col-12"}><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Attendance Follow-up</h2><p>Participants who may need a conversation or support</p></div></div>{renderFollowups()}</article></section>
             </div>
           )}
@@ -5462,7 +5462,7 @@ const PARTICIPATION_STATUS_LABELS = {
   WARNING: "Warning",
   GROUNDS_FOR_DEPARTURE: "Grounds for Departure",
   SECOND_CHANCE: "Second Chance",
-  REMOVED_FROM_SPONSORSHIP: "Removed from program",
+  REMOVED_FROM_SPONSORSHIP: "Inactive",
 };
 
 function SponsoredCare({ user, onViewHistory }) {

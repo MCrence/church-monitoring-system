@@ -3826,7 +3826,8 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
     });
     const childActions = actionsByChild.get(Number(row.id)) || [];
     if (
-      tracking.lifetime.absent >= GROUNDS_FOR_DEPARTURE_ABSENCES
+      tracking.monthsMonitored >= 4
+      && tracking.lifetime.absent > GROUNDS_FOR_DEPARTURE_ABSENCES
       && !childActions.some((action) => action.type === 'grounds_for_departure')
       && !childActions.some((action) => action.type === 'second_chance')
       && options.recordThresholdHistory !== false
@@ -3835,7 +3836,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
         `INSERT IGNORE INTO sponsored_child_participation_history
          (participant_id, action_type, previous_status, current_status, reason, absence_count)
          VALUES (?, 'grounds_for_departure', 'WARNING', 'GROUNDS_FOR_DEPARTURE',
-                 'Six total absences reached', ?)`,
+                 'More than six absences after four months of monitoring', ?)`,
         [row.id, tracking.lifetime.absent],
       );
       if (result.affectedRows === 1) {
@@ -3844,7 +3845,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
           type: 'grounds_for_departure',
           previousStatus: 'WARNING',
           currentStatus: 'GROUNDS_FOR_DEPARTURE',
-          reason: 'Six total absences reached',
+          reason: 'More than six absences after four months of monitoring',
           absenceCount: tracking.lifetime.absent,
           administrator: 'System',
           createdAt: new Date(),
@@ -3859,6 +3860,8 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
       monthlyCompliant: tracking.currentMonth.attended >= tracking.currentMonth.required,
       secondChanceGranted: Boolean(secondChance),
       removed,
+      monthsMonitored: tracking.monthsMonitored,
+      recentThreeMonthAbsences: tracking.recentThreeMonthAbsences,
     });
     const postSecondChanceAbsences = secondChance
       ? Math.max(0, tracking.lifetime.absent - secondChance.absenceCount)
@@ -3933,7 +3936,7 @@ app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkPermi
     const [child] = await getSponsoredParticipationSummaries(participantId);
     if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
     if (child.status !== 'GROUNDS_FOR_DEPARTURE') {
-      return res.status(409).json({ error: 'A second chance is available only after the six-absence threshold is reached' });
+      return res.status(409).json({ error: 'A second chance is available only after more than six absences and at least four months of monitoring' });
     }
     const reason = String(req.body.reason || '').trim().slice(0, 1000);
     connection = await pool.getConnection();

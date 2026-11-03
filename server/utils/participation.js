@@ -15,6 +15,7 @@ const dateKey = (value) => {
 const monthKey = (value) => dateKey(value).slice(0, 7);
 
 function summarizeParticipation({ registrationDate, events = [], checkIns = [], asOf = new Date() }) {
+  const registrationDateKey = dateKey(registrationDate);
   const registrationMonth = monthKey(registrationDate);
   const finalMonth = monthKey(asOf);
   if (!registrationMonth || !finalMonth || registrationMonth > finalMonth) {
@@ -24,6 +25,9 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
       lifetime: { required: 0, attended: 0, absent: 0, attendanceRate: 0 },
       currentMonth: { required: MONTHLY_ACTIVITY_REQUIREMENT, attended: 0, absent: 0, attendanceRate: 0, status: "WARNING" },
       currentYear: { required: 0, attended: 0, absent: 0, attendanceRate: 0 },
+      monthsMonitored: 0,
+      recentThreeMonthAbsences: 0,
+      recentThreeMonthSummary: { required: 0, attended: 0, absent: 0, attendanceRate: 0, status: "ACTIVE" },
     };
   }
 
@@ -32,7 +36,7 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
   const activityByKey = new Map();
   for (const event of events) {
     const date = dateKey(event.date);
-    if (!date || date > lastDay) continue;
+    if (!date || date < registrationDateKey || date > lastDay) continue;
     const key = occurrenceKey(event.name, date);
     activityByKey.set(key, {
       name: event.name || "Activity",
@@ -46,7 +50,7 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
   const attendedKeys = new Set();
   for (const checkIn of checkIns) {
     const date = dateKey(checkIn.checkedInAt);
-    if (!date || date > lastDay) continue;
+    if (!date || date < registrationDateKey || date > lastDay) continue;
     const key = occurrenceKey(checkIn.eventName, date);
     attendedKeys.add(key);
     if (!activityByKey.has(key)) {
@@ -59,8 +63,8 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
       });
     }
   }
-  for (const [key, activity] of activityByKey) {
-    activity.attended = attendedKeys.has(key);
+  for (const activity of activityByKey.values()) {
+    activity.attended = attendedKeys.has(occurrenceKey(activity.name, activity.date));
   }
 
   const months = [];
@@ -136,6 +140,20 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
         ? Math.round((year.attended / year.required) * 10000) / 100
         : 0,
     }));
+  const recentMonths = months.slice(-3);
+  const recentThreeMonthAbsences = recentMonths.reduce((total, month) => total + month.absent, 0);
+  const recentThreeMonthSummary = recentMonths.reduce((summary, month) => {
+    summary.required += month.required;
+    summary.attended += month.attended;
+    summary.absent += month.absent;
+    return summary;
+  }, { required: 0, attended: 0, absent: 0 });
+  recentThreeMonthSummary.attendanceRate = recentThreeMonthSummary.required
+    ? Math.round((recentThreeMonthSummary.attended / recentThreeMonthSummary.required) * 10000) / 100
+    : 0;
+  recentThreeMonthSummary.status = recentThreeMonthSummary.required === 0 || recentThreeMonthSummary.attended >= recentThreeMonthSummary.required
+    ? "ACTIVE"
+    : "WARNING";
 
   return {
     months: months.reverse(),
@@ -155,13 +173,26 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
         ? Math.round((currentYear.attended / currentYear.required) * 10000) / 100
         : 0,
     },
+    monthsMonitored: months.length,
+    recentThreeMonthAbsences,
+    recentThreeMonthSummary,
   };
 }
 
-function getParticipationStatus({ totalAbsences, monthlyCompliant, secondChanceGranted, removed }) {
+function getParticipationStatus({
+  totalAbsences = 0,
+  monthlyCompliant = false,
+  secondChanceGranted = false,
+  removed = false,
+  monthsMonitored,
+  recentThreeMonthAbsences = 0,
+} = {}) {
   if (removed) return "REMOVED_FROM_SPONSORSHIP";
   if (secondChanceGranted) return "SECOND_CHANCE";
-  if (totalAbsences >= GROUNDS_FOR_DEPARTURE_ABSENCES) return "GROUNDS_FOR_DEPARTURE";
+  const monitoredMonths = Number.isFinite(Number(monthsMonitored)) ? Number(monthsMonitored) : 0;
+  const recentAbsences = Number(recentThreeMonthAbsences) || 0;
+  if (monitoredMonths >= 4 && totalAbsences > GROUNDS_FOR_DEPARTURE_ABSENCES) return "GROUNDS_FOR_DEPARTURE";
+  if (recentAbsences >= 3 && recentAbsences <= 4) return "WARNING";
   return monthlyCompliant ? "ACTIVE" : "WARNING";
 }
 
