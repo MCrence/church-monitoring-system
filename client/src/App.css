@@ -1089,12 +1089,25 @@ label.form-label:has(+ textarea[required])::after{
 .sponsor-create-form .form-label span{color:#c94f36;font-weight:700}
 .sponsor-create-footer{display:flex;justify-content:flex-end;gap:10px;padding-top:14px;border-top:1px solid #e0e9f2}
 .participant-register-action{gap:10px;flex-wrap:wrap}
-.participant-profile-education{margin-top:24px;padding-top:22px;border-top:1px solid #e1e9f1}
+.participant-profile-education{margin-top:22px;padding:22px;border:1px solid #e1eaf3;border-radius:18px;background:linear-gradient(145deg,#fff,#f8fbff);box-shadow:0 10px 28px rgba(20,57,94,.045)}
 .participant-profile-education h3{margin:0 0 8px;color:#173d64;font:600 18px 'Space Grotesk'}
 .participant-profile-education p{margin:0}
-.participant-education-history-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
-.participant-education-history-card{display:flex;flex-direction:column;gap:6px;padding:16px;border:1px solid #e0e9f2;border-radius:12px;background:#fff;color:#284a6c}
-.participant-education-history-card strong{color:#143961;font-size:15px}
+.participant-profile-history{background:radial-gradient(ellipse at 100% 0,rgba(49,145,207,.08),transparent 42%),linear-gradient(145deg,#fff,#f8fbff)}
+.education-history-heading{margin-bottom:17px}
+.education-history-heading .eyebrow{display:block;margin-bottom:5px;color:#3283b8;font-size:9px;font-weight:800;letter-spacing:.13em}
+.education-history-heading h3{margin-bottom:4px}
+.education-history-heading p{color:#71849a;font-size:12px}
+.participant-education-history-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}
+.participant-education-history-card{position:relative;display:flex;flex-direction:column;gap:8px;min-width:0;overflow:hidden;padding:18px;border:1px solid #e0e9f2;border-radius:15px;background:rgba(255,255,255,.92);color:#284a6c;box-shadow:0 5px 16px rgba(25,65,104,.04);transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease}
+.participant-education-history-card::before{position:absolute;inset:0 auto 0 0;width:3px;background:linear-gradient(180deg,#44b4d7,#2877bc);content:""}
+.participant-education-history-card:hover{transform:translateY(-3px);border-color:#b9d8ed;box-shadow:0 12px 25px rgba(25,75,120,.1)}
+.participant-education-history-card.is-current{border-color:#cfe6d4;background:linear-gradient(145deg,#fff,#f7fcf7)}
+.participant-education-history-card.is-current::before{background:linear-gradient(180deg,#8bd05e,#36a56f)}
+.participant-education-history-card strong{color:#143961;font-size:14px}
+.participant-education-history-card .education-history-school{color:#385975;font-size:13px;font-weight:600;line-height:1.5;overflow-wrap:anywhere}
+.participant-education-history-card .education-history-years{color:#6c8095;font-size:12px;font-weight:600}
+.participant-education-history-card .education-history-status{align-self:flex-start;padding:4px 9px;border:1px solid #dfe8ef;border-radius:999px;background:#f4f7fa;color:#63788d;font-size:10px;font-weight:700}
+.participant-education-history-card .education-history-status.is-current{border-color:#d4ebd0;background:#eff9ec;color:#3e7e35}
 .participant-education-history-card small{color:#60758b;overflow-wrap:anywhere}
 .participant-profile-education .form-label{font-size:13px;font-weight:600}
 .participant-register-action .btn{border:0;border-radius:12px;min-height:44px;padding:10px 22px;font-weight:700;background:linear-gradient(135deg,#0c315d,#1a5a96);box-shadow:0 8px 20px rgba(12,49,93,.25);transition:transform .18s,box-shadow .18s,background .18s}
@@ -1136,18 +1149,19 @@ label.form-label:has(+ textarea[required])::after{
 .participant-row-actions{display:flex;flex-wrap:wrap;align-items:center;gap:7px}
 .directory-arrow{display:grid;width:34px;height:34px;flex:0 0 34px;place-items:center;border-radius:11px;background:#eff6fb;color:#2871a6;transition:transform .18s}
 .directory-row:hover .directory-arrow{transform:translateX(4px)}
-.participant-profile-backdrop{z-index:1550}
-.participant-profile-modal{width:min(100%,980px);padding:0;overflow:auto;border:1px solid rgba(255,255,255,.8);background:#f6f9fc}
-.participant-profile-card{padding:clamp(20px,4vw,38px);text-align:left}
-.profile-card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;padding-bottom:18px;border-bottom:1px solid #e8eef4;margin-bottom:20px}
-.profile-card-header .eyebrow{color:#2c7cac}
-.profile-card-header h2{margin:9px 0 5px;color:#102f53;font:700 clamp(24px,4vw,34px) 'Space Grotesk';letter-spacing:-.8px}
+.participant-profile-backdrop{z-index:1550;background:rgba(3,18,40,.72);backdrop-filter:blur(8px)}
+.participant-profile-modal{width:min(100%,1040px);max-height:calc(100vh - 40px);max-height:calc(100dvh - 40px);padding:0;overflow:auto;border:1px solid rgba(255,255,255,.85);border-radius:24px;background:linear-gradient(160deg,#f5f9fd 0%,#edf4fa 100%);box-shadow:0 32px 100px rgba(0,20,48,.35);scrollbar-color:#b6cadb transparent;scrollbar-width:thin}
+.participant-profile-card{padding:clamp(18px,3vw,32px);text-align:left}
+.profile-card-header{position:relative;display:flex;justify-content:space-between;align-items:flex-start;gap:18px;overflow:hidden;margin-bottom:22px;padding:23px;border:1px solid rgba(255,255,255,.18);border-radius:19px;background:radial-gradient(circle at 88% 0,rgba(83,190,228,.32),transparent 33%),linear-gradient(120deg,#0b2d53,#14558a 72%,#147fba);box-shadow:0 14px 28px rgba(12,57,96,.18)}
+.profile-card-header .eyebrow{color:#bde98b}
+.profile-card-header h2{margin:9px 0 5px;color:#fff;font:700 clamp(24px,4vw,34px) 'Space Grotesk';letter-spacing:-.8px}
+.profile-card-header p{color:#d7e8f7!important}
 .profile-card-tools{display:flex;align-items:center;gap:8px;flex-shrink:0;padding-top:4px}
-.profile-card-tools .btn-close{width:34px;height:34px;padding:7px;opacity:.55;transition:opacity .18s ease,background .18s ease}
-.profile-card-tools .btn-close:hover{opacity:1;background:#eef3f8;border-radius:10px}
-.profile-tool-btn{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:11px;border:1px solid #dbe6f0;background:#fff;color:#2c5a86;cursor:pointer;transition:transform .18s ease,background .18s ease,border-color .18s ease,color .18s ease}
+.profile-card-tools .btn-close{width:34px;height:34px;padding:7px;filter:brightness(0) invert(1);opacity:.78;transition:opacity .18s ease,background .18s ease}
+.profile-card-tools .btn-close:hover{opacity:1;background:rgba(255,255,255,.16);border-radius:10px}
+.profile-tool-btn{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:11px;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff;cursor:pointer;transition:transform .18s ease,background .18s ease,border-color .18s ease,color .18s ease}
 .profile-tool-btn svg{width:18px;height:18px;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round;stroke-width:1.8}
-.profile-tool-btn:hover{background:#eef5fb;border-color:#b9d4e8;color:#0d3a63;transform:translateY(-1px)}
+.profile-tool-btn:hover{background:rgba(255,255,255,.24);border-color:rgba(255,255,255,.58);color:#fff;transform:translateY(-1px)}
 .profile-tool-btn:active{transform:translateY(0)}
 .profile-tool-btn-danger{color:#b3402f}
 .profile-tool-btn-danger:hover{background:#fdeeea;border-color:#f0c4b8;color:#8f2b19}
@@ -1158,7 +1172,7 @@ label.form-label:has(+ textarea[required])::after{
 .btn-print svg{width:15px;height:15px;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round;stroke-width:1.8}
 .btn-print:hover{transform:translateY(-1px);box-shadow:0 8px 18px rgba(13,58,99,.22)}
 .participant-profile-card .profile-grid{gap:12px;padding-top:18px}
-.participant-profile-card .profile-grid>div{min-width:0;padding:15px;border:1px solid #e4ecf4;border-radius:12px;background:#fff;transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease}
+.participant-profile-card .profile-grid>div{min-width:0;padding:15px;border:1px solid #e4ecf4;border-radius:14px;background:rgba(255,255,255,.9);box-shadow:0 4px 12px rgba(13,58,99,.025);transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease}
 .participant-profile-card .profile-grid>div:hover{transform:translateY(-2px);border-color:#c3d9ea;box-shadow:0 8px 18px rgba(13,58,99,.08)}
 .participant-profile-card .profile-grid small{display:block;color:#71849a;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 .participant-profile-card .profile-grid strong{overflow-wrap:anywhere;color:#173d64;font-size:13px}
@@ -1171,7 +1185,7 @@ label.form-label:has(+ textarea[required])::after{
 .participant-profile-edit>.row{margin-top:4px}
 .participant-status-description{display:block;margin-top:8px;color:#61758a;font-size:11px;line-height:1.5}
 .participant-account-status{max-width:320px;margin:0 0 20px}
-@media(max-width:760px){.participant-profile-backdrop{align-items:flex-end;padding:0}.participant-profile-modal{width:100%;max-height:94vh;max-height:94dvh;border-radius:22px 22px 0 0}.participant-profile-card .profile-grid{grid-template-columns:1fr 1fr}.directory-row{align-items:stretch;flex-direction:column}.directory-row-main{width:100%}.participant-row-actions{justify-content:flex-start}}
+@media(max-width:760px){.participant-profile-backdrop{align-items:flex-end;padding:0}.participant-profile-modal{width:100%;max-height:94vh;max-height:94dvh;border-radius:22px 22px 0 0}.participant-profile-card .profile-grid{grid-template-columns:1fr 1fr}.profile-card-header{padding:19px;border-radius:16px}.participant-profile-education{padding:18px;border-radius:16px}.directory-row{align-items:stretch;flex-direction:column}.directory-row-main{width:100%}.participant-row-actions{justify-content:flex-start}}
 @media(max-width:480px){.participant-directory-panel{padding:15px}.participant-directory-filters{gap:14px}.participant-filter-field .form-select,.participant-directory-sort .form-select{width:100%;max-width:none}.participant-profile-card .profile-grid{grid-template-columns:1fr}.profile-tool-btn{width:34px;height:34px}.profile-card-tools{gap:6px}.participant-profile-edit .btn.mt-4{margin-top:14px!important}.participant-profile-edit .btn-link{margin-left:0!important}}
 
 /* Delete confirmation dialog */

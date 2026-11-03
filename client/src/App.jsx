@@ -2283,17 +2283,6 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
   const [educationHistory, setEducationHistory] = useState([]);
   const [growthUpdates, setGrowthUpdates] = useState([]);
   const [profileAttendance, setProfileAttendance] = useState(null);
-  const [educationDraft, setEducationDraft] = useState({
-    educationLevel: "",
-    schoolName: "",
-    schoolAddress: "",
-    startYear: "",
-    endYear: "",
-    status: "",
-    courseStrand: "",
-    notes: "",
-  });
-  const [addingEducation, setAddingEducation] = useState(false);
   const [educationFilter, setEducationFilter] = useState("all");
   const [childStatusFilter, setChildStatusFilter] = useState("all");
   const [visiblePasscode, setVisiblePasscode] = useState(null);
@@ -2367,7 +2356,6 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
         passcode: '',
       });
       setEditing(startEditing);
-      setAddingEducation(false);
       setMessage(attendanceData.loadError
         ? `Attendance details could not be loaded: ${attendanceData.loadError}`
         : growthData.loadError ? `Growth & Activity could not be loaded: ${growthData.loadError}` : "");
@@ -2375,31 +2363,6 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
     } catch (error) {
       setMessage(error.message);
       return false;
-    }
-  };
-  const saveEducationRecord = async (event) => {
-    event.preventDefault();
-    if (!selected) return;
-    try {
-      await apiCall(`/participants/${selected}/education-history`, {
-        method: "POST",
-        body: JSON.stringify(educationDraft),
-      });
-      setEducationHistory(await apiCall(`/participants/${selected}/education-history`));
-      setEducationDraft({
-        educationLevel: "",
-        schoolName: "",
-        schoolAddress: "",
-        startYear: "",
-        endYear: "",
-        status: "",
-        courseStrand: "",
-        notes: "",
-      });
-      setAddingEducation(false);
-      setMessage("Education history saved.");
-    } catch (requestError) {
-      setMessage(requestError.message);
     }
   };
   const revealPasscode = async () => {
@@ -2810,60 +2773,32 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                   ))}
                 </div>
               </section>
-              <section className="participant-profile-education">
+              <section className="participant-profile-education participant-profile-history">
                 <div className="d-flex justify-content-between align-items-start gap-2">
-                  <div>
+                  <div className="education-history-heading">
+                    <span className="eyebrow">ACADEMIC JOURNEY</span>
                     <h3>Education History</h3>
-                    <p className="text-secondary">View the schools and education levels previously attended by the participant.</p>
+                    <p>Schools and levels attended by the participant.</p>
                   </div>
-                  {canEdit && <button type="button" className="btn btn-outline-primary btn-sm" onClick={() => setAddingEducation((value) => !value)}>+ Add Education History</button>}
                 </div>
                 {educationHistory.length ? (
                   <div className="participant-education-history-list">
                     {educationHistory.map((record) => (
-                      <article className="participant-education-history-card" key={record.id}>
+                      <article
+                        className={`participant-education-history-card ${record.status === "Currently Attending" ? "is-current" : ""}`}
+                        key={record.id}
+                      >
                         <strong>{record.educationLevel}</strong>
-                        <span>{record.schoolName}</span>
+                        <span className="education-history-school">{record.schoolName}</span>
                         {record.schoolAddress && <small>{record.schoolAddress}</small>}
-                        <span>{record.startYear} – {record.endYear || (record.status === "Currently Attending" ? "Present" : "End year not recorded")}</span>
-                        <span>{record.status}</span>
+                        <span className="education-history-years">{record.startYear} – {record.endYear || (record.status === "Currently Attending" ? "Present" : "End year not recorded")}</span>
+                        <span className={`education-history-status ${record.status === "Currently Attending" ? "is-current" : ""}`}>{record.status}</span>
                         {record.courseStrand && <small>{record.courseStrand}</small>}
-                        {record.notes && <small>{record.notes}</small>}
+                        {record.notes && !record.notes.startsWith("Synthetic demo history;") && <small>{record.notes}</small>}
                       </article>
                     ))}
                   </div>
                 ) : <p className="text-secondary">No education history has been recorded.</p>}
-                {addingEducation && canEdit && (
-                  <form className="row g-3 mt-2" onSubmit={saveEducationRecord}>
-                    <div className="col-12 col-md-6">
-                      <label className="form-label" htmlFor="education-history-level">Education level *</label>
-                      <select id="education-history-level" className="form-select" required value={educationDraft.educationLevel} onChange={(event) => setEducationDraft({ ...educationDraft, educationLevel: event.target.value })}>
-                        <option value="">Select education level</option>
-                        {["Elementary", "Junior High School", "Senior High School", "College", "Vocational", "Other"].map((level) => <option key={level}>{level}</option>)}
-                      </select>
-                    </div>
-                    <Field label="School name *" value={educationDraft.schoolName} onChange={(event) => setEducationDraft({ ...educationDraft, schoolName: event.target.value })} required />
-                    <Field label="School address" value={educationDraft.schoolAddress} onChange={(event) => setEducationDraft({ ...educationDraft, schoolAddress: event.target.value })} />
-                    <Field label="Start year *" type="number" min="1900" max={new Date().getFullYear() + 1} value={educationDraft.startYear} onChange={(event) => setEducationDraft({ ...educationDraft, startYear: event.target.value })} required />
-                    <Field label="End year" type="number" min={educationDraft.startYear || "1900"} max={new Date().getFullYear() + 1} value={educationDraft.endYear} onChange={(event) => setEducationDraft({ ...educationDraft, endYear: event.target.value })} required={["Graduated", "Completed"].includes(educationDraft.status)} />
-                    <div className="col-12 col-md-6">
-                      <label className="form-label" htmlFor="education-history-status">Status *</label>
-                      <select id="education-history-status" className="form-select" required value={educationDraft.status} onChange={(event) => setEducationDraft({ ...educationDraft, status: event.target.value })}>
-                        <option value="">Select status</option>
-                        {["Currently Attending", "Graduated", "Completed", "Transferred", "Dropped", "Other"].map((status) => <option key={status}>{status}</option>)}
-                      </select>
-                    </div>
-                    <Field label="Course / Strand" value={educationDraft.courseStrand} onChange={(event) => setEducationDraft({ ...educationDraft, courseStrand: event.target.value })} />
-                    <div className="col-12">
-                      <label className="form-label" htmlFor="education-history-notes">Notes</label>
-                      <textarea id="education-history-notes" className="form-control" rows="2" maxLength="2000" value={educationDraft.notes} onChange={(event) => setEducationDraft({ ...educationDraft, notes: event.target.value })} />
-                    </div>
-                    <div className="col-12 d-flex gap-2">
-                      <button type="submit" className="btn btn-primary btn-sm">Save education record</button>
-                      <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setAddingEducation(false)}>Cancel</button>
-                    </div>
-                  </form>
-                )}
               </section>
               {canViewSponsorship && form.participantType === "sponsored_child" && (
                 <section className="participant-profile-education">
