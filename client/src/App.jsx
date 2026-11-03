@@ -2276,7 +2276,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
   const [query, setQuery] = useState("");
   const [sortBy, setSortBy] = useState("newest");
   const [genderFilter, setGenderFilter] = useState("all");
-  const [recordStatusFilter, setRecordStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [message, setMessage] = useState("");
   const [showRegistration, setShowRegistration] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -2284,7 +2284,6 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
   const [growthUpdates, setGrowthUpdates] = useState([]);
   const [profileAttendance, setProfileAttendance] = useState(null);
   const [educationFilter, setEducationFilter] = useState("all");
-  const [childStatusFilter, setChildStatusFilter] = useState("all");
   const [visiblePasscode, setVisiblePasscode] = useState(null);
   const [passcodeMessage, setPasscodeMessage] = useState("");
   const [loadingPasscode, setLoadingPasscode] = useState(false);
@@ -2456,13 +2455,25 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
   const genderVisibleParticipants = genderFilter === "all"
     ? visibleParticipants
     : visibleParticipants.filter((item) => String(item.gender || "").toLowerCase() === genderFilter);
-  const recordStatusParticipants = recordStatusFilter === "all"
+  const statusVisibleParticipants = statusFilter === "all"
     ? genderVisibleParticipants
-    : genderVisibleParticipants.filter((item) => String(item.status || "").toLowerCase() === recordStatusFilter);
-  const statusVisibleParticipants = childStatusFilter === "all"
-    ? recordStatusParticipants
-    : recordStatusParticipants.filter((item) =>
-        normalizeParticipationStatus(item.participation_status) === childStatusFilter);
+    : genderVisibleParticipants.filter((item) => {
+        const isSponsoredChild = item.participant_type === "sponsored_child";
+        const recordStatus = String(item.status || "").toLowerCase();
+        if (statusFilter === "ACTIVE") {
+          return isSponsoredChild
+            ? normalizeParticipationStatus(item.participation_status) === "ACTIVE"
+            : recordStatus === "active";
+        }
+        if (statusFilter === "REMOVED_FROM_SPONSORSHIP") {
+          return isSponsoredChild
+            ? normalizeParticipationStatus(item.participation_status) === "REMOVED_FROM_SPONSORSHIP"
+              || recordStatus === "inactive"
+            : recordStatus === "inactive";
+        }
+        return isSponsoredChild
+          && normalizeParticipationStatus(item.participation_status) === statusFilter;
+      });
   const filtered = statusVisibleParticipants.filter((item) =>
     `${item.fullName || ""} ${item.participant_code || ""} ${item.participant_type || ""} ${item.gender || ""}`
       .toLocaleLowerCase()
@@ -2546,35 +2557,31 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                   <option value="female">Female</option>
                 </select>
               </div>
-              <div className="participant-filter-field">
-                <label className="form-label" htmlFor="participants-record-status">Status</label>
+              <div className="participant-filter-field participant-status-filter">
+                <label className="form-label" htmlFor="participants-status">Status</label>
                 <select
-                  id="participants-record-status"
+                  id="participants-status"
                   className="form-select"
-                  value={recordStatusFilter}
-                  onChange={(event) => setRecordStatusFilter(event.target.value)}
+                  value={statusFilter}
+                  onChange={(event) => setStatusFilter(event.target.value)}
                 >
                   <option value="all">All</option>
-                  <option value="active">Active</option>
-                  <option value="inactive">Inactive</option>
+                  {canViewSponsorship ? (
+                    <>
+                      <option value="ACTIVE">Active</option>
+                      <option value="WARNING">Warning</option>
+                      <option value="GROUNDS_FOR_DEPARTURE">Ground for Departure</option>
+                      <option value="SECOND_CHANCE">Second Chance</option>
+                      <option value="REMOVED_FROM_SPONSORSHIP">Remove from Sponsorship (Inactive)</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="ACTIVE">Active</option>
+                      <option value="REMOVED_FROM_SPONSORSHIP">Remove from Sponsorship (Inactive)</option>
+                    </>
+                  )}
                 </select>
               </div>
-              {canViewSponsorship && (
-                <div className="participant-filter-field">
-                  <label className="form-label" htmlFor="participants-child-status">Participation status</label>
-                  <select
-                    id="participants-child-status"
-                    className="form-select"
-                    value={childStatusFilter}
-                    onChange={(event) => setChildStatusFilter(event.target.value)}
-                  >
-                    <option value="all">All statuses</option>
-                    {PARTICIPATION_STATUSES.map(({ value, label }) => (
-                      <option key={value} value={value}>{label}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
               <div className="participant-directory-sort">
                 <label className="form-label" htmlFor="participants-sort">Sort by</label>
                 <select
@@ -2606,7 +2613,8 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                     <small>
                       {item.gender || "Sex not set"}
                       {Number.isFinite(item.age) ? ` · ${item.age} years old` : ""}
-                      {" · "}{participantHistoryStatusLabel(item.status)}
+                      {!(canViewSponsorship && item.participant_type === "sponsored_child")
+                        && ` · ${participantHistoryStatusLabel(item.status)}`}
                     </small>
                     <small>{item.participant_code || `Participant #${item.id}`}</small>
                     {canViewSponsorship && item.participant_type === "sponsored_child" && (
@@ -2617,7 +2625,11 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                   </span>
                   {canViewSponsorship && item.participant_type === "sponsored_child" && (
                     <span className={`participation-status-badge ${String(item.participation_status || "ACTIVE").toLowerCase().replaceAll("_", "-")}`}>
-                      {participationStatusLabel(item.participation_status)}
+                      {normalizeParticipationStatus(item.participation_status) === "REMOVED_FROM_SPONSORSHIP"
+                        ? "Remove from Sponsorship (Inactive)"
+                        : normalizeParticipationStatus(item.participation_status) === "GROUNDS_FOR_DEPARTURE"
+                          ? "Ground for Departure"
+                          : participationStatusLabel(item.participation_status)}
                     </span>
                   )}
                 </button>
