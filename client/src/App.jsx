@@ -112,7 +112,7 @@ const PARTICIPATION_STATUSES = [
   { value: "WARNING", label: "Warning" },
   { value: "GROUNDS_FOR_DEPARTURE", label: "Grounds for Departure" },
   { value: "SECOND_CHANCE", label: "Second Chance" },
-  { value: "REMOVED_FROM_SPONSORSHIP", label: "Removed from Sponsorship" },
+  { value: "REMOVED_FROM_SPONSORSHIP", label: "Inactive" },
 ];
 const normalizeParticipationStatus = (value) => {
   const status = String(value || "ACTIVE").toUpperCase().replaceAll(" ", "_");
@@ -2461,15 +2461,12 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
         const isSponsoredChild = item.participant_type === "sponsored_child";
         const recordStatus = String(item.status || "").toLowerCase();
         if (statusFilter === "ACTIVE") {
-          return isSponsoredChild
-            ? normalizeParticipationStatus(item.participation_status) === "ACTIVE"
-            : recordStatus === "active";
+          return recordStatus === "active"
+            && (!isSponsoredChild || normalizeParticipationStatus(item.participation_status) === "ACTIVE");
         }
         if (statusFilter === "REMOVED_FROM_SPONSORSHIP") {
-          return isSponsoredChild
-            ? normalizeParticipationStatus(item.participation_status) === "REMOVED_FROM_SPONSORSHIP"
-              || recordStatus === "inactive"
-            : recordStatus === "inactive";
+          return recordStatus === "inactive"
+            || (isSponsoredChild && normalizeParticipationStatus(item.participation_status) === "REMOVED_FROM_SPONSORSHIP");
         }
         return isSponsoredChild
           && normalizeParticipationStatus(item.participation_status) === statusFilter;
@@ -2572,12 +2569,12 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                       <option value="WARNING">Warning</option>
                       <option value="GROUNDS_FOR_DEPARTURE">Ground for Departure</option>
                       <option value="SECOND_CHANCE">Second Chance</option>
-                      <option value="REMOVED_FROM_SPONSORSHIP">Remove from Sponsorship (Inactive)</option>
+                      <option value="REMOVED_FROM_SPONSORSHIP">Inactive</option>
                     </>
                   ) : (
                     <>
                       <option value="ACTIVE">Active</option>
-                      <option value="REMOVED_FROM_SPONSORSHIP">Remove from Sponsorship (Inactive)</option>
+                      <option value="REMOVED_FROM_SPONSORSHIP">Inactive</option>
                     </>
                   )}
                 </select>
@@ -2626,7 +2623,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                   {canViewSponsorship && item.participant_type === "sponsored_child" && (
                     <span className={`participation-status-badge ${String(item.participation_status || "ACTIVE").toLowerCase().replaceAll("_", "-")}`}>
                       {normalizeParticipationStatus(item.participation_status) === "REMOVED_FROM_SPONSORSHIP"
-                        ? "Remove from Sponsorship (Inactive)"
+                        ? "Inactive"
                         : normalizeParticipationStatus(item.participation_status) === "GROUNDS_FOR_DEPARTURE"
                           ? "Ground for Departure"
                           : participationStatusLabel(item.participation_status)}

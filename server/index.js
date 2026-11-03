@@ -938,8 +938,12 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
     const participantParams = isGoer ? [req.user.goerEducationLevel] : [];
     const [[participantCounts]] = await pool.execute(
       `SELECT COUNT(*) AS total,
-              COALESCE(SUM(status = 'active'), 0) AS active,
-              COALESCE(SUM(status = 'inactive'), 0) AS inactive,
+              COALESCE(SUM(status = 'active'
+                AND NOT (participant_type = 'sponsored_child'
+                  AND participation_status = 'REMOVED_FROM_SPONSORSHIP')), 0) AS active,
+              COALESCE(SUM(status = 'inactive'
+                OR (participant_type = 'sponsored_child'
+                  AND participation_status = 'REMOVED_FROM_SPONSORSHIP')), 0) AS inactive,
               COALESCE(SUM(LOWER(gender) IN ('male', 'm')), 0) AS male,
               COALESCE(SUM(LOWER(gender) IN ('female', 'f')), 0) AS female,
               COALESCE(SUM(created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')), 0) AS newThisMonth
