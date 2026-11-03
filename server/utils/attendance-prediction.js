@@ -2,8 +2,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const HISTORY_DAYS = 90;
 const OUTCOME_DAYS = 30;
 const SNAPSHOT_DAYS = 30;
-const MODEL_VERSION = 'attendance-logistic-v1';
-const BASELINE_VERSION = 'attendance-baseline-v2';
+const MODEL_VERSION = 'attendance-logistic-sponsored-child-v2';
+const BASELINE_VERSION = 'attendance-baseline-sponsored-child-v2';
 
 const MINIMUMS = {
   trainingExamples: 100,

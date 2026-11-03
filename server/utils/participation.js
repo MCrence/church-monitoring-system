@@ -1,4 +1,3 @@
-const MONTHLY_ACTIVITY_REQUIREMENT = 2;
 const GROUNDS_FOR_DEPARTURE_ABSENCES = 6;
 
 const dateKey = (value) => {
@@ -23,7 +22,7 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
       months: [],
       years: [],
       lifetime: { required: 0, attended: 0, absent: 0, attendanceRate: 0 },
-      currentMonth: { required: MONTHLY_ACTIVITY_REQUIREMENT, attended: 0, absent: 0, attendanceRate: 0, status: "WARNING" },
+      currentMonth: { required: 0, attended: 0, absent: 0, attendanceRate: 0, status: "ACTIVE" },
       currentYear: { required: 0, attended: 0, absent: 0, attendanceRate: 0 },
       monthsMonitored: 0,
       recentThreeMonthAbsences: 0,
@@ -52,16 +51,7 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
     const date = dateKey(checkIn.checkedInAt);
     if (!date || date < registrationDateKey || date > lastDay) continue;
     const key = occurrenceKey(checkIn.eventName, date);
-    attendedKeys.add(key);
-    if (!activityByKey.has(key)) {
-      activityByKey.set(key, {
-        name: checkIn.eventName || "Activity",
-        date,
-        location: checkIn.location || "",
-        attended: true,
-        required: false,
-      });
-    }
+    if (activityByKey.has(key)) attendedKeys.add(key);
   }
   for (const activity of activityByKey.values()) {
     activity.attended = attendedKeys.has(occurrenceKey(activity.name, activity.date));
@@ -83,17 +73,10 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
     const occurrences = [...activityByKey.values()]
       .filter((activity) => activity.date.slice(0, 7) === key)
       .sort((first, second) => first.date.localeCompare(second.date) || first.name.localeCompare(second.name));
-    const required = Math.min(MONTHLY_ACTIVITY_REQUIREMENT, occurrences.length);
-    const requiredOccurrences = [
-      ...occurrences.filter((activity) => activity.attended),
-      ...occurrences.filter((activity) => !activity.attended),
-    ].slice(0, required);
-    requiredOccurrences.forEach((activity) => { activity.required = true; });
-    const attended = Math.min(
-      required,
-      new Set(occurrences.filter((activity) => activity.attended)
-        .map((activity) => occurrenceKey(activity.name, activity.date))).size,
-    );
+    const required = occurrences.length;
+    occurrences.forEach((activity) => { activity.required = true; });
+    const attended = occurrences.filter((activity) =>
+      attendedKeys.has(occurrenceKey(activity.name, activity.date))).length;
     const absent = required - attended;
     const monthSummary = {
       year,
@@ -121,9 +104,9 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
 
   const lifetimeAbsent = lifetimeRequired - lifetimeAttended;
   const currentMonth = months[months.length - 1] || {
-    required: MONTHLY_ACTIVITY_REQUIREMENT,
+    required: 0,
     attended: 0,
-    absent: MONTHLY_ACTIVITY_REQUIREMENT,
+    absent: 0,
     attendanceRate: 0,
     status: "WARNING",
   };
@@ -193,7 +176,7 @@ function getParticipationStatus({
   const recentAbsences = Number(recentThreeMonthAbsences) || 0;
   if (monitoredMonths >= 4 && totalAbsences > GROUNDS_FOR_DEPARTURE_ABSENCES) return "GROUNDS_FOR_DEPARTURE";
   if (recentAbsences >= 3 && recentAbsences <= 4) return "WARNING";
-  return monthlyCompliant ? "ACTIVE" : "WARNING";
+  return "ACTIVE";
 }
 
 function isRemovalEligible({ secondChanceGranted, postSecondChanceAbsences, removed }) {
@@ -202,7 +185,6 @@ function isRemovalEligible({ secondChanceGranted, postSecondChanceAbsences, remo
 
 module.exports = {
   GROUNDS_FOR_DEPARTURE_ABSENCES,
-  MONTHLY_ACTIVITY_REQUIREMENT,
   getParticipationStatus,
   isRemovalEligible,
   summarizeParticipation,

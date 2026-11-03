@@ -9,7 +9,7 @@ const {
 const event = (name, date) => ({ name, date });
 const checkIn = (eventName, checkedInAt) => ({ eventName, checkedInAt });
 
-test("counts no more than two unique attended activities per month", () => {
+test("counts all scheduled activities and deduplicates repeat check-ins", () => {
   const result = summarizeParticipation({
     registrationDate: "2026-10-01",
     asOf: "2026-10-24",
@@ -26,11 +26,11 @@ test("counts no more than two unique attended activities per month", () => {
     ],
   });
 
-  assert.equal(result.currentMonth.required, 2);
-  assert.equal(result.currentMonth.attended, 2);
+  assert.equal(result.currentMonth.required, 3);
+  assert.equal(result.currentMonth.attended, 3);
   assert.equal(result.currentMonth.absent, 0);
   assert.equal(result.currentMonth.status, "ACTIVE");
-  assert.equal(result.lifetime.attended, 2);
+  assert.equal(result.lifetime.attended, 3);
 });
 
 test("calculates missed monthly participation and yearly totals", () => {
@@ -69,7 +69,7 @@ test("does not count absences in months without scheduled activities", () => {
   assert.equal(result.lifetime.absent, 0);
 });
 
-test("counts only scheduled activities toward the monthly requirement", () => {
+test("counts actual scheduled activities rather than assuming two each month", () => {
   const result = summarizeParticipation({
     registrationDate: "2026-09-01",
     asOf: "2026-10-24",
@@ -81,12 +81,12 @@ test("counts only scheduled activities toward the monthly requirement", () => {
     checkIns: [checkIn("Sunday Service", "2026-09-19 09:00:00")],
   });
 
-  assert.equal(result.months[1].required, 1);
-  assert.equal(result.months[1].attended, 1);
-  assert.equal(result.months[1].absent, 0);
   assert.equal(result.months[0].required, 2);
   assert.equal(result.months[0].attended, 0);
   assert.equal(result.months[0].absent, 2);
+  assert.equal(result.months[1].required, 1);
+  assert.equal(result.months[1].attended, 1);
+  assert.equal(result.months[1].absent, 0);
   assert.equal(result.lifetime.absent, 2);
 });
 
@@ -131,8 +131,24 @@ test("counts attended activities even when they are not the first events that mo
   });
 
   assert.equal(result.currentMonth.attended, 2);
-  assert.equal(result.currentMonth.absent, 0);
-  assert.equal(result.currentMonth.status, "ACTIVE");
+  assert.equal(result.currentMonth.absent, 1);
+  assert.equal(result.currentMonth.status, "WARNING");
+});
+
+test("does not count check-ins that cannot be matched to a scheduled event", () => {
+  const result = summarizeParticipation({
+    registrationDate: "2026-10-01",
+    asOf: "2026-10-24",
+    events: [event("Sunday Service", "2026-10-05")],
+    checkIns: [
+      checkIn("Sunday Service", "2026-10-05 09:00:00"),
+      checkIn("Unscheduled Activity", "2026-10-07 09:00:00"),
+    ],
+  });
+
+  assert.equal(result.currentMonth.required, 1);
+  assert.equal(result.currentMonth.attended, 1);
+  assert.equal(result.lifetime.required, 1);
 });
 
 test("requires two post-second-chance absences before removal is eligible", () => {
@@ -184,20 +200,26 @@ test("treats 3 to 4 recent absences as a warning before grounds is triggered", (
     monthlyCompliant: true,
   }), "WARNING");
   assert.equal(getParticipationStatus({
+    totalAbsences: 5,
+    monthsMonitored: 2,
+    recentThreeMonthAbsences: 5,
+  }), "ACTIVE");
+  assert.equal(getParticipationStatus({
     totalAbsences: 7,
     monthsMonitored: 3,
     recentThreeMonthAbsences: 2,
     monthlyCompliant: false,
-  }), "WARNING");
+  }), "ACTIVE");
   assert.equal(getParticipationStatus({
     totalAbsences: 7,
     recentThreeMonthAbsences: 2,
     monthlyCompliant: false,
-  }), "WARNING");
+  }), "ACTIVE");
 });
 
 test("keeps second chance and removal distinct from the absence threshold", () => {
-  assert.equal(getParticipationStatus({ totalAbsences: 6, monthsMonitored: 4, monthlyCompliant: false }), "WARNING");
+  assert.equal(getParticipationStatus({ totalAbsences: 6, monthsMonitored: 4, recentThreeMonthAbsences: 3 }), "WARNING");
+  assert.equal(getParticipationStatus({ totalAbsences: 6, monthsMonitored: 4 }), "ACTIVE");
   assert.equal(getParticipationStatus({ totalAbsences: 7, monthsMonitored: 4, monthlyCompliant: false }), "GROUNDS_FOR_DEPARTURE");
   assert.equal(getParticipationStatus({ totalAbsences: 7, monthsMonitored: 4, monthlyCompliant: true, secondChanceGranted: true }), "SECOND_CHANCE");
   assert.equal(getParticipationStatus({ totalAbsences: 8, secondChanceGranted: true, removed: true }), "REMOVED_FROM_SPONSORSHIP");

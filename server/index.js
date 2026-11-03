@@ -22,7 +22,6 @@ const { getAttendanceTransition } = require('./utils/attendance-transition');
 const { createParticipantPasscode, isValidParticipantPasscode } = require('./utils/participant-passcode');
 const { createPersistentRateLimiter } = require('./utils/persistent-rate-limit');
 const { initializeSponsorshipTables } = require('./utils/sponsorship-tables');
-const { sponsorshipLifecycleStatuses } = require('./utils/sponsorship-lifecycle');
 const { sendEmailWithGmailApi } = require('./utils/gmail-api');
 const {
   calculateAge,
@@ -32,13 +31,10 @@ const {
   participantRegistrationErrors,
 } = require('./utils/participant-utils');
 const { sendSemaphoreSms } = require('./utils/semaphore-sms');
+const { buildAttendanceAnalytics, educationGroup } = require('./utils/attendance-analytics');
 const { inspectImportFile, safeImportFileName } = require('./utils/import-file');
 const { validateSponsor } = require('./utils/sponsor-utils');
-const {
-  calculateAllowanceBalance,
-  calculateReversalBalance,
-  parsePositiveAmountCents,
-} = require('./utils/allowance-utils');
+const { parsePositiveAmountCents } = require('./utils/amount-utils');
 const {
   getParticipationStatus,
   GROUNDS_FOR_DEPARTURE_ABSENCES,
@@ -59,11 +55,9 @@ const {
   validateEducationRecord,
 } = require('./utils/education-history');
 const {
-  BASELINE_VERSION,
   MODEL_VERSION,
   getCurrentAttendanceFeatures,
   predictInactivityProbability,
-  scoreAttendanceBaseline,
   validateAttendanceModel,
 } = require('./utils/attendance-prediction');
 
@@ -224,9 +218,9 @@ const participantProfileColumnsReady = (async () => {
        AND COLUMN_NAME IN (
          'education_level', 'grade_level', 'program_course_encrypted',
          'first_name_encrypted', 'middle_name_encrypted', 'last_name_encrypted',
-         'sponsorship_lifecycle', 'monthly_allowance', 'passcode_encrypted',
+         'sponsorship_lifecycle', 'passcode_encrypted',
          'school_name_encrypted', 'school_address_encrypted',
-         'available_allowance_balance', 'sponsorship_registered_at'
+         'sponsorship_registered_at'
        )`,
   );
   const existing = new Set(columns.map((column) => column.COLUMN_NAME));
@@ -238,8 +232,6 @@ const participantProfileColumnsReady = (async () => {
     ['middle_name_encrypted', 'TEXT DEFAULT NULL'],
     ['last_name_encrypted', 'TEXT DEFAULT NULL'],
     ['sponsorship_lifecycle', "VARCHAR(24) NOT NULL DEFAULT 'active'"],
-    ['monthly_allowance', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00'],
-    ['available_allowance_balance', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00'],
     ['passcode_encrypted', 'TEXT DEFAULT NULL'],
     ['school_name_encrypted', 'TEXT DEFAULT NULL'],
     ['school_address_encrypted', 'TEXT DEFAULT NULL'],
@@ -938,12 +930,18 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
     const participantParams = isGoer ? [req.user.goerEducationLevel] : [];
     const [[participantCounts]] = await pool.execute(
       `SELECT COUNT(*) AS total,
-              COALESCE(SUM(status = 'active'
+              COALESCE(SUM(
+                LOWER(TRIM(COALESCE(status, ''))) = 'active'
+                AND LOWER(TRIM(COALESCE(sponsorship_status, ''))) <> 'inactive'
                 AND NOT (participant_type = 'sponsored_child'
-                  AND participation_status = 'REMOVED_FROM_SPONSORSHIP')), 0) AS active,
-              COALESCE(SUM(status = 'inactive'
+                  AND UPPER(TRIM(COALESCE(participation_status, ''))) = 'REMOVED_FROM_SPONSORSHIP')
+              ), 0) AS active,
+              COALESCE(SUM(
+                LOWER(TRIM(COALESCE(status, ''))) = 'inactive'
+                OR LOWER(TRIM(COALESCE(sponsorship_status, ''))) = 'inactive'
                 OR (participant_type = 'sponsored_child'
-                  AND participation_status = 'REMOVED_FROM_SPONSORSHIP')), 0) AS inactive,
+                  AND UPPER(TRIM(COALESCE(participation_status, ''))) = 'REMOVED_FROM_SPONSORSHIP')
+              ), 0) AS inactive,
               COALESCE(SUM(LOWER(gender) IN ('male', 'm')), 0) AS male,
               COALESCE(SUM(LOWER(gender) IN ('female', 'f')), 0) AS female,
               COALESCE(SUM(created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')), 0) AS newThisMonth
@@ -2963,7 +2961,7 @@ app.post('/api/participants', authenticate, checkRole(['System Administrator']),
     const passcode = createParticipantPasscode();
     const participantCode = `FMC-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
     const [result] = await connection.execute(
-      'INSERT INTO participants (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted, last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted, passcode_hash, passcode_encrypted, medical_conditions_encrypted, weight_encrypted, height_encrypted, emergency_contact_name_encrypted, emergency_contact_phone_encrypted, sponsor_name_encrypted, sponsor_contact_encrypted, sponsorship_type, enrollment_date, program_affiliation_encrypted, education_level, grade_level, program_course_encrypted, school_name_encrypted, school_address_encrypted, status, participant_code, sponsorship_lifecycle, monthly_allowance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NOW(), NOW())',
+      'INSERT INTO participants (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted, last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted, passcode_hash, passcode_encrypted, medical_conditions_encrypted, weight_encrypted, height_encrypted, emergency_contact_name_encrypted, emergency_contact_phone_encrypted, sponsor_name_encrypted, sponsor_contact_encrypted, sponsorship_type, enrollment_date, program_affiliation_encrypted, education_level, grade_level, program_course_encrypted, school_name_encrypted, school_address_encrypted, status, participant_code, sponsorship_lifecycle, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
       [participantType, encrypt(fullName), encrypt(firstName), encrypt(middleName || null), encrypt(lastName), encrypt(req.body.dateOfBirth), gender, encrypt(req.body.phone), encrypt(address), await bcrypt.hash(passcode, 12), encrypt(passcode), encrypt(medicalConditions || null), encrypt(weight || null), encrypt(height || null), encrypt(guardianName), encrypt(req.body.emergencyContactPhone), null, null, null, null, null, req.body.educationLevel.trim(), req.body.gradeLevel.trim(), encrypt(programCourse || null), encrypt(schoolName), encrypt(schoolAddress), 'active', participantCode, 'new'],
     );
     const uid = crypto.randomUUID();
@@ -3383,7 +3381,7 @@ async function verifyPublicSponsoredChild(qrPayload, passcode) {
   const [rows] = await pool.execute(
     `SELECT p.id, p.full_name_encrypted, p.date_of_birth_encrypted, p.gender,
             p.participant_code, p.education_level, p.grade_level, p.school_name_encrypted,
-            p.sponsorship_status, p.sponsorship_lifecycle, p.monthly_allowance,
+            p.sponsorship_status, p.sponsorship_lifecycle,
             p.status, p.passcode_hash
      FROM participants p
      JOIN qr_codes q ON q.participant_id = p.id
@@ -3751,7 +3749,9 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
   ];
   const [participants] = await pool.execute(
     `SELECT p.id, p.participant_code, p.full_name_encrypted, p.date_of_birth_encrypted,
-            p.gender, p.created_at, p.education_level, p.grade_level, p.participation_status,
+            p.gender, p.created_at,
+            COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) AS participation_start_date,
+            p.education_level, p.grade_level, p.participation_status,
             p.status AS participant_status
      FROM participants p
      WHERE p.participant_type = 'sponsored_child'
@@ -3764,8 +3764,8 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
   const participantIds = participants.map((row) => row.id);
   const placeholders = participantIds.map(() => '?').join(', ');
   const [events] = await pool.query(
-    `SELECT name, starts_at, location FROM events
-     WHERE status <> 'cancelled' AND starts_at < NOW()
+    `SELECT id, name, starts_at, location FROM events
+     WHERE status = 'completed' AND starts_at < NOW()
      ORDER BY starts_at ASC, id ASC`,
   );
   const [checkIns] = await pool.execute(
@@ -3788,6 +3788,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
     participantIds,
   );
   const eventRows = events.map((event) => ({
+    id: event.id,
     name: event.name,
     date: event.starts_at,
     location: event.location,
@@ -3820,7 +3821,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
 
   return Promise.all(participants.map(async (row) => {
     const tracking = summarizeParticipation({
-      registrationDate: row.created_at,
+      registrationDate: row.participation_start_date,
       events: eventRows,
       checkIns: checkInsByChild.get(Number(row.id)) || [],
     });
@@ -3853,7 +3854,8 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
       }
     }
     const secondChance = childActions.find((action) => action.type === 'second_chance') || null;
-    const removed = row.participation_status === 'REMOVED_FROM_SPONSORSHIP'
+    const removed = row.participant_status === 'inactive'
+      || row.participation_status === 'REMOVED_FROM_SPONSORSHIP'
       || childActions.some((action) => action.type === 'removed');
     const currentStatus = getParticipationStatus({
       totalAbsences: tracking.lifetime.absent,
@@ -3872,7 +3874,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
       participantCode: row.participant_code,
       age: calculateAge(decrypt(row.date_of_birth_encrypted)),
       gender: row.gender || '',
-      registrationDate: row.created_at,
+      registrationDate: row.participation_start_date,
       educationLevel: row.education_level || '',
       gradeLevel: row.grade_level || '',
       status: currentStatus,
@@ -4029,214 +4031,6 @@ app.post('/api/sponsorship/children/:id/remove', authenticate, checkPermission('
   }
 });
 
-app.get('/api/sponsorship/children/:id/allowance-transactions', authenticate, checkPermission('sponsorship:view'), async (req, res, next) => {
-  try {
-    await sponsorshipTablesReady;
-    const [[child]] = await pool.execute(
-      `SELECT id FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1`,
-      [req.params.id],
-    );
-    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
-    const [rows] = await pool.execute(
-      `SELECT t.id, t.transaction_type, t.amount, t.previous_balance, t.updated_balance,
-              t.disbursement_id,
-              t.related_transaction_id, t.created_by, t.created_at,
-              u.username AS created_by_username,
-              CONCAT_WS(' ', u.first_name, u.middle_name, u.last_name) AS created_by_name,
-              u.role AS created_by_role
-       FROM sponsorship_allowance_transactions t
-       LEFT JOIN users u ON u.id = t.created_by
-       WHERE t.participant_id = ?
-       ORDER BY t.created_at DESC, t.id DESC
-       LIMIT 200`,
-      [child.id],
-    );
-    res.json(rows.map((row) => ({
-      id: row.id,
-      type: row.transaction_type,
-      amount: Number(row.amount),
-      previousBalance: Number(row.previous_balance),
-      updatedBalance: Number(row.updated_balance),
-      disbursementId: row.disbursement_id,
-      relatedTransactionId: row.related_transaction_id,
-      createdBy: row.created_by,
-      createdByName: row.created_by_name || row.created_by_username || null,
-      createdByRole: row.created_by_role,
-      createdAt: row.created_at,
-    })));
-  } catch (error) { next(error); }
-});
-
-app.post('/api/sponsorship/children/:id/allowance-transactions', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
-  let connection;
-  try {
-    await Promise.all([participantProfileColumnsReady, sponsorshipTablesReady]);
-    const type = String(req.body.type || '');
-    const amountCents = parsePositiveAmountCents(req.body.amount);
-    if (amountCents === null) {
-      return res.status(400).json({ error: 'Enter a positive amount up to 1,000,000.00 with no more than two decimal places' });
-    }
-    if (!['add', 'deduct'].includes(type)) {
-      return res.status(400).json({ error: 'Select whether to add or deduct an allowance amount' });
-    }
-    connection = await pool.getConnection();
-    await connection.beginTransaction();
-    const [[child]] = await connection.execute(
-      `SELECT id, available_allowance_balance
-       FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1 FOR UPDATE`,
-      [req.params.id],
-    );
-    if (!child) {
-      await connection.rollback();
-      return res.status(404).json({ error: 'Sponsored child not found' });
-    }
-    const balance = calculateAllowanceBalance(
-      child.available_allowance_balance,
-      amountCents,
-      type,
-    );
-    if (balance.error) {
-      await connection.rollback();
-      return res.status(400).json({ error: balance.error });
-    }
-    const amount = (amountCents / 100).toFixed(2);
-    const [result] = await connection.execute(
-      `INSERT INTO sponsorship_allowance_transactions
-         (participant_id, transaction_type, amount, previous_balance, updated_balance, created_by)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [child.id, type, amount, balance.previousBalance, balance.updatedBalance, req.user.id],
-    );
-    await connection.execute(
-      'UPDATE participants SET available_allowance_balance = ?, updated_at = NOW() WHERE id = ?',
-      [balance.updatedBalance, child.id],
-    );
-    await connection.commit();
-    await writeAuditLog(req.user, `sponsorship.allowance.${type}`, 'participant', child.id, {
-      transactionId: result.insertId,
-      amount,
-      previousBalance: balance.previousBalance,
-      updatedBalance: balance.updatedBalance,
-    });
-    res.status(201).json({
-      transaction: {
-        id: result.insertId,
-        type,
-        amount: Number(amount),
-        previousBalance: Number(balance.previousBalance),
-        updatedBalance: Number(balance.updatedBalance),
-        createdBy: req.user.id,
-        createdAt: new Date().toISOString(),
-      },
-    });
-  } catch (error) {
-    if (connection) await connection.rollback();
-    next(error);
-  } finally {
-    if (connection) connection.release();
-  }
-});
-
-app.post('/api/sponsorship/children/:id/allowance-transactions/:transactionId/reverse', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
-  let connection;
-  try {
-    await Promise.all([participantProfileColumnsReady, sponsorshipTablesReady]);
-    connection = await pool.getConnection();
-    await connection.beginTransaction();
-    const [[child]] = await connection.execute(
-      `SELECT id, available_allowance_balance
-       FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1 FOR UPDATE`,
-      [req.params.id],
-    );
-    if (!child) {
-      await connection.rollback();
-      return res.status(404).json({ error: 'Sponsored child not found' });
-    }
-    const [[original]] = await connection.execute(
-      `SELECT id, transaction_type, amount, related_transaction_id
-       FROM sponsorship_allowance_transactions
-       WHERE id = ? AND participant_id = ? LIMIT 1`,
-      [req.params.transactionId, child.id],
-    );
-    if (!original) {
-      await connection.rollback();
-      return res.status(404).json({ error: 'Allowance transaction not found' });
-    }
-    if (!['add', 'deduct'].includes(original.transaction_type)) {
-      await connection.rollback();
-      return res.status(400).json({ error: 'Only an addition or deduction can be reversed' });
-    }
-    if (original.related_transaction_id !== null) {
-      await connection.rollback();
-      return res.status(409).json({ error: 'This transaction cannot be reversed again' });
-    }
-    const [[existingReversal]] = await connection.execute(
-      `SELECT id FROM sponsorship_allowance_transactions
-       WHERE related_transaction_id = ? LIMIT 1`,
-      [original.id],
-    );
-    if (existingReversal) {
-      await connection.rollback();
-      return res.status(409).json({ error: 'This transaction has already been reversed' });
-    }
-    const amountCents = parsePositiveAmountCents(String(original.amount));
-    const balance = calculateReversalBalance(
-      child.available_allowance_balance,
-      amountCents,
-      original.transaction_type,
-    );
-    if (balance.error) {
-      await connection.rollback();
-      return res.status(400).json({ error: balance.error });
-    }
-    const amount = Number(original.amount).toFixed(2);
-    const [result] = await connection.execute(
-      `INSERT INTO sponsorship_allowance_transactions
-         (participant_id, transaction_type, amount, previous_balance, updated_balance,
-          related_transaction_id, created_by)
-       VALUES (?, 'reversal', ?, ?, ?, ?, ?)`,
-      [child.id, amount, balance.previousBalance, balance.updatedBalance, original.id, req.user.id],
-    );
-    await connection.execute(
-      'UPDATE participants SET available_allowance_balance = ?, updated_at = NOW() WHERE id = ?',
-      [balance.updatedBalance, child.id],
-    );
-    await connection.commit();
-    await writeAuditLog(req.user, 'sponsorship.allowance.reversed', 'participant', child.id, {
-      transactionId: result.insertId,
-      relatedTransactionId: original.id,
-      amount,
-      previousBalance: balance.previousBalance,
-      updatedBalance: balance.updatedBalance,
-    });
-    res.status(201).json({
-      transaction: {
-        id: result.insertId,
-        type: 'reversal',
-        amount: Number(amount),
-        previousBalance: Number(balance.previousBalance),
-        updatedBalance: Number(balance.updatedBalance),
-        relatedTransactionId: original.id,
-        createdBy: req.user.id,
-        createdAt: new Date().toISOString(),
-      },
-    });
-  } catch (error) {
-    if (connection) await connection.rollback();
-    if (error.code === 'ER_DUP_ENTRY' && connection) {
-      return res.status(409).json({ error: 'This transaction has already been reversed' });
-    }
-    next(error);
-  } finally {
-    if (connection) connection.release();
-  }
-});
-
 app.get('/api/sponsorship/children/:id/updates', authenticate, checkSponsorshipView, async (req, res, next) => {
   try {
     await sponsoredChildUpdatesReady;
@@ -4356,315 +4150,6 @@ app.post('/api/sponsorship/children/:id/updates', authenticate, checkSponsorship
   } catch (error) { next(error); }
 });
 
-app.put('/api/sponsorship/children/:id', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
-  try {
-    await participantProfileColumnsReady;
-    const lifecycle = String(req.body.lifecycle || '');
-    const monthlyAllowance = Number(req.body.monthlyAllowance);
-    const schoolNameProvided = Object.prototype.hasOwnProperty.call(req.body, 'schoolName');
-    const schoolAddressProvided = Object.prototype.hasOwnProperty.call(req.body, 'schoolAddress');
-    const schoolName = String(req.body.schoolName || '').trim();
-    const schoolAddress = String(req.body.schoolAddress || '').trim();
-    if (!sponsorshipLifecycleStatuses.has(lifecycle)) {
-      return res.status(400).json({ error: 'Select a valid child lifecycle status' });
-    }
-    if (!Number.isFinite(monthlyAllowance) || monthlyAllowance < 0 || monthlyAllowance > 1000000) {
-      return res.status(400).json({ error: 'Monthly allowance must be between 0 and 1,000,000' });
-    }
-    if (schoolName.length > 200) {
-      return res.status(400).json({ error: 'School name must be 200 characters or fewer' });
-    }
-    if (schoolAddress.length > 500) {
-      return res.status(400).json({ error: 'School address must be 500 characters or fewer' });
-    }
-    const [[child]] = await pool.execute(
-      `SELECT id FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1`,
-      [req.params.id],
-    );
-    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
-    const updates = [
-      'sponsorship_lifecycle = ?',
-      'monthly_allowance = ?',
-    ];
-    const values = [lifecycle, monthlyAllowance.toFixed(2)];
-    if (schoolNameProvided) {
-      updates.push('school_name_encrypted = ?');
-      values.push(encrypt(schoolName || null));
-    }
-    if (schoolAddressProvided) {
-      updates.push('school_address_encrypted = ?');
-      values.push(encrypt(schoolAddress || null));
-    }
-    values.push(req.params.id);
-    await pool.execute(
-      `UPDATE participants
-       SET ${updates.join(', ')}, updated_at = NOW()
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'`,
-      values,
-    );
-    await writeAuditLog(req.user, 'sponsorship.child.updated', 'participant', req.params.id, {
-      lifecycle,
-      monthlyAllowance: monthlyAllowance.toFixed(2),
-      schoolNameUpdated: schoolNameProvided,
-      schoolAddressUpdated: schoolAddressProvided,
-    });
-    res.json({
-      lifecycle,
-      monthlyAllowance: Number(monthlyAllowance.toFixed(2)),
-      ...(schoolNameProvided ? { schoolName } : {}),
-      ...(schoolAddressProvided ? { schoolAddress } : {}),
-    });
-  } catch (error) { next(error); }
-});
-
-app.get('/api/sponsorship/children/:id/disbursements', authenticate, checkSponsorshipView, async (req, res, next) => {
-  try {
-    await sponsorshipTablesReady;
-    const child = await getAccessibleSponsorshipChild(req.user, req.params.id);
-    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
-    const isGoer = isGoerRole(req.user.role);
-    const [disbursementRows, careRows] = isGoer
-      ? [[], (await pool.execute(
-        `SELECT id, amount, DATE_FORMAT(recorded_on, '%Y-%m-%d') AS recorded_on,
-                care_type, description, gift_from_encrypted, receipt_mime, created_at
-         FROM sponsored_child_care_records
-         WHERE participant_id = ?
-         ORDER BY recorded_on DESC, id DESC`,
-        [child.id],
-      ))[0]]
-      : await Promise.all([
-        pool.execute(
-          `SELECT id, amount, DATE_FORMAT(disbursed_on, '%Y-%m-%d') AS recorded_on,
-                  receipt_mime, created_at
-           FROM sponsorship_disbursements
-           WHERE participant_id = ?
-           ORDER BY disbursed_on DESC, id DESC`,
-          [child.id],
-        ).then(([rows]) => rows),
-        pool.execute(
-          `SELECT id, amount, DATE_FORMAT(recorded_on, '%Y-%m-%d') AS recorded_on,
-                  care_type, description, gift_from_encrypted, receipt_mime, created_at
-           FROM sponsored_child_care_records
-           WHERE participant_id = ?
-           ORDER BY recorded_on DESC, id DESC`,
-          [child.id],
-        ).then(([rows]) => rows),
-      ]);
-    const records = [
-      ...disbursementRows.map((row) => ({
-        id: `disbursement-${row.id}`,
-        recordType: 'disbursement',
-        amount: Number(row.amount),
-        recorded_on: row.recorded_on,
-        created_at: row.created_at,
-        receipt_mime: row.receipt_mime,
-        hasReceipt: Boolean(row.receipt_mime),
-      })),
-      ...careRows.map((row) => {
-        const { gift_from_encrypted: encryptedGiftFrom, ...careRecord } = row;
-        return {
-          ...careRecord,
-          id: `received-${row.id}`,
-          recordType: 'received',
-          amount: Number(row.amount),
-          giftsFrom: encryptedGiftFrom ? decrypt(encryptedGiftFrom) : '',
-          hasReceipt: Boolean(row.receipt_mime),
-        };
-      }),
-    ];
-    records.sort((left, right) =>
-      right.recorded_on.localeCompare(left.recorded_on) ||
-      new Date(right.created_at).getTime() - new Date(left.created_at).getTime(),
-    );
-    res.json(records);
-  } catch (error) { next(error); }
-});
-
-app.post('/api/sponsorship/children/:id/disbursements', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
-  let connection;
-  let transactionActive = false;
-  let amountCents = null;
-  let disbursedOn = '';
-  const idempotencyKey = String(req.body.idempotencyKey || '').trim();
-  try {
-    amountCents = parsePositiveAmountCents(req.body.amount);
-    disbursedOn = String(req.body.disbursedOn || '');
-    const receipt = parseReceipt(req.body.receiptData);
-    if (amountCents === null) {
-      return res.status(400).json({ error: 'Enter a positive disbursement amount up to 1,000,000.00 with no more than two decimal places' });
-    }
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
-      return res.status(400).json({ error: 'A valid disbursement request key is required. Please try again.' });
-    }
-    if (!validDate(disbursedOn)) return res.status(400).json({ error: 'Enter a valid disbursement date' });
-    if (receipt.error) return res.status(400).json({ error: receipt.error });
-    if (!receipt.data) return res.status(400).json({ error: 'A receipt proof is required for each allowance or gift record' });
-    await sponsorshipTablesReady;
-    connection = await pool.getConnection();
-    await connection.beginTransaction();
-    transactionActive = true;
-    const [[child]] = await connection.execute(
-      `SELECT id, available_allowance_balance
-       FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1 FOR UPDATE`,
-      [req.params.id],
-    );
-    if (!child) {
-      await connection.rollback();
-      transactionActive = false;
-      return res.status(404).json({ error: 'Sponsored child not found' });
-    }
-
-    const [[existing]] = await connection.execute(
-      `SELECT d.id, d.participant_id, d.amount, DATE_FORMAT(d.disbursed_on, '%Y-%m-%d') AS disbursed_on,
-              d.receipt_mime, d.created_by, d.created_at,
-              t.id AS transaction_id, t.previous_balance, t.updated_balance
-       FROM sponsorship_disbursements d
-       LEFT JOIN sponsorship_allowance_transactions t ON t.disbursement_id = d.id
-       WHERE d.idempotency_key = ?
-       LIMIT 1`,
-      [idempotencyKey],
-    );
-    if (existing) {
-      await connection.rollback();
-      transactionActive = false;
-      if (
-        String(existing.created_by) !== String(req.user.id) ||
-        String(existing.participant_id) !== String(child.id) ||
-        parsePositiveAmountCents(existing.amount) !== amountCents ||
-        existing.disbursed_on !== disbursedOn
-      ) {
-        return res.status(409).json({ error: 'This request key was already used for a different disbursement.' });
-      }
-      if (!existing.transaction_id) {
-        return res.status(500).json({ error: 'The saved disbursement is missing its allowance transaction. Contact an administrator.' });
-      }
-      return res.status(200).json({
-        id: existing.id,
-        transactionId: existing.transaction_id,
-        childId: existing.participant_id,
-        amount: Number(existing.amount),
-        previousBalance: Number(existing.previous_balance),
-        updatedBalance: Number(existing.updated_balance),
-        disbursedOn: existing.disbursed_on,
-        createdBy: existing.created_by,
-        createdAt: existing.created_at,
-        hasReceipt: Boolean(existing.receipt_mime),
-        duplicate: true,
-      });
-    }
-
-    const balance = calculateAllowanceBalance(
-      child.available_allowance_balance,
-      amountCents,
-      'deduct',
-    );
-    if (balance.error) {
-      await connection.rollback();
-      transactionActive = false;
-      return res.status(400).json({ error: balance.error });
-    }
-    const amount = (amountCents / 100).toFixed(2);
-    const [disbursementResult] = await connection.execute(
-      `INSERT INTO sponsorship_disbursements
-         (participant_id, amount, disbursed_on, description, receipt_mime, receipt_data, idempotency_key, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [child.id, amount, disbursedOn, null, receipt.mime, encryptBytes(receipt.data), idempotencyKey, req.user.id],
-    );
-    const [transactionResult] = await connection.execute(
-      `INSERT INTO sponsorship_allowance_transactions
-         (participant_id, transaction_type, amount, previous_balance, updated_balance,
-          disbursement_id, created_by)
-       VALUES (?, 'deduct', ?, ?, ?, ?, ?)`,
-      [
-        child.id,
-        amount,
-        balance.previousBalance,
-        balance.updatedBalance,
-        disbursementResult.insertId,
-        req.user.id,
-      ],
-    );
-    await connection.execute(
-      'UPDATE participants SET available_allowance_balance = ?, updated_at = NOW() WHERE id = ?',
-      [balance.updatedBalance, child.id],
-    );
-    const [[savedDisbursement]] = await connection.execute(
-      'SELECT created_at FROM sponsorship_disbursements WHERE id = ?',
-      [disbursementResult.insertId],
-    );
-    await connection.commit();
-    transactionActive = false;
-    await writeAuditLog(req.user, 'sponsorship.disbursement.created', 'participant', child.id, {
-      disbursementId: disbursementResult.insertId,
-      transactionId: transactionResult.insertId,
-      amount,
-      disbursedOn,
-      previousBalance: balance.previousBalance,
-      updatedBalance: balance.updatedBalance,
-      hasReceipt: Boolean(receipt.data),
-    });
-    res.status(201).json({
-      id: disbursementResult.insertId,
-      transactionId: transactionResult.insertId,
-      childId: child.id,
-      amount: Number(amount),
-      previousBalance: Number(balance.previousBalance),
-      updatedBalance: Number(balance.updatedBalance),
-      disbursedOn,
-      createdBy: req.user.id,
-      createdAt: savedDisbursement.created_at,
-      hasReceipt: Boolean(receipt.data),
-      duplicate: false,
-    });
-  } catch (error) {
-    if (connection && transactionActive) await connection.rollback();
-    if (error.code === 'ER_DUP_ENTRY') {
-      const [[existing]] = await connection.execute(
-        `SELECT d.id, d.participant_id, d.amount, DATE_FORMAT(d.disbursed_on, '%Y-%m-%d') AS disbursed_on,
-                d.receipt_mime, d.created_by, d.created_at,
-                t.id AS transaction_id, t.previous_balance, t.updated_balance
-         FROM sponsorship_disbursements d
-         LEFT JOIN sponsorship_allowance_transactions t ON t.disbursement_id = d.id
-         WHERE d.idempotency_key = ?
-         LIMIT 1`,
-        [idempotencyKey],
-      );
-      if (
-        existing &&
-        String(existing.created_by) === String(req.user.id) &&
-        String(existing.participant_id) === String(req.params.id) &&
-        parsePositiveAmountCents(existing.amount) === amountCents &&
-        existing.disbursed_on === disbursedOn &&
-        existing.transaction_id
-      ) {
-        return res.status(200).json({
-          id: existing.id,
-          transactionId: existing.transaction_id,
-          childId: existing.participant_id,
-          amount: Number(existing.amount),
-          previousBalance: Number(existing.previous_balance),
-          updatedBalance: Number(existing.updated_balance),
-          disbursedOn: existing.disbursed_on,
-          createdBy: existing.created_by,
-          createdAt: existing.created_at,
-          hasReceipt: Boolean(existing.receipt_mime),
-          duplicate: true,
-        });
-      }
-      if (existing) {
-        return res.status(409).json({ error: 'This request key was already used for a different disbursement.' });
-      }
-    }
-    next(error);
-  } finally {
-    if (connection) connection.release();
-  }
-});
-
 app.post('/api/sponsorship/children/:id/gifts', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
   try {
     const giftFrom = String(req.body?.giftsFrom || '').trim();
@@ -4711,8 +4196,8 @@ app.post('/api/sponsorship/children/:id/care-records', authenticate, checkSponso
     const recordedOn = String(req.body.recordedOn || '');
     const description = String(req.body.description || '').trim();
     const receipt = parseReceipt(req.body.receiptData);
-    if (!['gift', 'allowance'].includes(careType)) {
-      return res.status(400).json({ error: 'Select whether the child received a gift or allowance' });
+    if (careType !== 'gift') {
+      return res.status(400).json({ error: 'Only received gifts can be recorded' });
     }
     if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) {
       return res.status(400).json({ error: 'Enter an amount above 0 and no more than 1,000,000' });
@@ -4720,7 +4205,7 @@ app.post('/api/sponsorship/children/:id/care-records', authenticate, checkSponso
     if (!validDate(recordedOn)) return res.status(400).json({ error: 'Enter a valid record date' });
     if (description.length > 255) return res.status(400).json({ error: 'Description must be 255 characters or fewer' });
     if (receipt.error) return res.status(400).json({ error: receipt.error });
-    if (!receipt.data) return res.status(400).json({ error: 'Receipt proof is required for each received gift or allowance record' });
+    if (!receipt.data) return res.status(400).json({ error: 'Receipt proof is required for each received gift record' });
     await sponsorshipTablesReady;
     const child = await getAccessibleSponsorshipChild(req.user, req.params.id);
     if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
@@ -4752,35 +4237,6 @@ app.post('/api/sponsorship/children/:id/care-records', authenticate, checkSponso
       careType,
       hasReceipt: Boolean(receipt.data),
     });
-  } catch (error) { next(error); }
-});
-
-app.post('/api/sponsorship/disbursements/:id/receipt', authenticate, checkSponsorshipView, async (req, res, next) => {
-  try {
-    await sponsorshipTablesReady;
-    const routeId = String(req.params.id);
-    const match = routeId.match(/^(received|disbursement)-(\d+)$/);
-    const source = match ? match[1] : 'disbursement';
-    const id = match ? match[2] : routeId;
-    if (!/^\d+$/.test(id)) return res.status(404).json({ error: 'Receipt proof not found' });
-    if (isGoerRole(req.user.role) && source !== 'received') {
-      return res.status(404).json({ error: 'Receipt proof not found' });
-    }
-    const [rows] = source === 'received'
-      ? await pool.execute(
-        `SELECT receipt_mime, receipt_data, participant_id
-         FROM sponsored_child_care_records WHERE id = ? LIMIT 1`,
-        [id],
-      )
-      : await pool.execute(
-        `SELECT receipt_mime, receipt_data, participant_id
-         FROM sponsorship_disbursements WHERE id = ? LIMIT 1`,
-        [id],
-      );
-    if (!rows[0] || !rows[0].receipt_data) return res.status(404).json({ error: 'Receipt proof not found' });
-    const child = await getAccessibleSponsorshipChild(req.user, rows[0].participant_id);
-    if (!child) return res.status(404).json({ error: 'Receipt proof not found' });
-    res.json({ mimeType: rows[0].receipt_mime, data: decryptBytes(rows[0].receipt_data).toString('base64') });
   } catch (error) { next(error); }
 });
 
@@ -5078,27 +4534,6 @@ app.post('/api/public/sponsor-updates', guardianRateLimit, async (req, res, next
   } catch (error) { next(error); }
 });
 
-app.post('/api/public/sponsor-receipt', async (req, res, next) => {
-  try {
-    const qrPayload = String(req.body.qrPayload || '');
-    const passcode = String(req.body.passcode || '');
-    const disbursementId = Number(req.body.disbursementId);
-    if (!qrPayload || qrPayload.length > 4096 || !passcode || !Number.isSafeInteger(disbursementId)) {
-      return res.status(400).json({ error: 'Verify the child and select a valid receipt' });
-    }
-    const verification = await verifyPublicSponsoredChild(qrPayload, passcode);
-    if (verification.error) return res.status(verification.status).json({ error: verification.error });
-    await sponsorshipTablesReady;
-    const [rows] = await pool.execute(
-      `SELECT receipt_mime, receipt_data FROM sponsorship_disbursements
-       WHERE id = ? AND participant_id = ? LIMIT 1`,
-      [disbursementId, verification.child.id],
-    );
-    if (!rows[0] || !rows[0].receipt_data) return res.status(404).json({ error: 'Receipt proof not found' });
-    res.json({ mimeType: rows[0].receipt_mime, data: decryptBytes(rows[0].receipt_data).toString('base64') });
-  } catch (error) { next(error); }
-});
-
 app.post('/api/participants/:id/profile', authenticate, checkPermission('portal:view'), async (req, res, next) => {
   try {
     await goerQrRevocationReady;
@@ -5180,7 +4615,18 @@ app.get(
   },
 );
 
-app.get('/api/risk-scores', authenticate, checkPermission('analytics:view'), async (req, res, next) => { try { const [rows] = await pool.query('SELECT * FROM predictive_risk_scores ORDER BY computed_at DESC'); res.json(rows); } catch (error) { next(error); } });
+app.get('/api/risk-scores', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT r.*
+       FROM predictive_risk_scores r
+       JOIN participants p ON p.id = r.participant_id
+       WHERE p.participant_type = 'sponsored_child' AND p.status <> 'deleted'
+       ORDER BY r.computed_at DESC`,
+    );
+    res.json(rows);
+  } catch (error) { next(error); }
+});
 
 app.get('/api/risk-scores/validation', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
   try {
@@ -5311,179 +4757,299 @@ function buildRiskEvidence(dates, now) {
   };
 }
 
-async function computeRiskRecords(riskFilter) {
-  await attendanceModelValidationReady;
-  const levelClause = riskFilter === 'all' ? '' : ' AND r.risk_level = ?';
-  const params = riskFilter === 'all' ? [] : [riskFilter];
-  const [rows] = await pool.execute(
-    `SELECT r.participant_id, r.risk_score, r.risk_level, r.model_version, r.computed_at,
-            p.participant_code, p.participant_type, p.grade_level, p.education_level
-     FROM predictive_risk_scores r
-     JOIN participants p ON p.id = r.participant_id
-     JOIN (SELECT participant_id, MAX(computed_at) AS latest FROM predictive_risk_scores GROUP BY participant_id) latest
-       ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at
-     WHERE p.status = 'active'${levelClause}
-     ORDER BY r.risk_score DESC, p.participant_code ASC`,
-    params,
-  );
-  if (!rows.length) return [];
-  const placeholders = rows.map(() => '?').join(',');
-  const [history] = await pool.execute(
-    `SELECT participant_id, checked_in_at FROM check_in_logs
-     WHERE status = 'checked_in' AND checked_in_at >= DATE_SUB(NOW(), INTERVAL 180 DAY)
-       AND participant_id IN (${placeholders})
-     ORDER BY checked_in_at ASC`,
-    rows.map((row) => row.participant_id),
-  );
-  const byParticipant = new Map();
-  for (const row of history) {
-    const checkedInAt = row.checked_in_at instanceof Date ? row.checked_in_at : new Date(row.checked_in_at);
-    if (!byParticipant.has(row.participant_id)) byParticipant.set(row.participant_id, []);
-    byParticipant.get(row.participant_id).push(checkedInAt);
-  }
-  const now = Date.now();
-  return rows.map((row) => {
-    const dates = (byParticipant.get(row.participant_id) || []).sort((left, right) => left - right);
-    return {
-      participantId: row.participant_id,
-      participantCode: row.participant_code,
-      participantType: row.participant_type,
-      gradeLevel: row.grade_level || '',
-      educationLevel: row.education_level || '',
-      riskScore: Number(row.risk_score),
-      riskLevel: row.risk_level,
-      modelVersion: row.model_version,
-      computedAt: row.computed_at,
-      ...buildRiskEvidence(dates, now),
-    };
-  });
+function normalizeAnalyticsEducation(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'all') return '';
+  if (raw === 'high school') return 'High School';
+  return EDUCATION_LEVELS.find((level) => level.toLowerCase() === raw) || '';
 }
 
-async function computeAttendanceTrends(range, interval, event) {
-  const eventClause = event ? ' AND c.event_name = ?' : '';
-  const eventParams = event ? [event] : [];
-  const [rows] = await pool.execute(
-    `SELECT c.participant_id, p.participant_type, p.education_level, c.checked_in_at
-     FROM check_in_logs c
-     JOIN participants p ON p.id = c.participant_id
-     WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?${eventClause}
-     ORDER BY c.checked_in_at ASC`,
-    [...eventParams, range.start, range.endExclusive],
-  );
-  const [eventRows] = await pool.execute(
-    `SELECT DISTINCT c.event_name AS event_name
-     FROM check_in_logs c
-     JOIN participants p ON p.id = c.participant_id
-     WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?
-     ORDER BY c.event_name ASC`,
+function normalizeAnalyticsStatus(value) {
+  const raw = String(value || '').trim();
+  return raw.toLowerCase() === 'all' ? '' : raw.toUpperCase();
+}
+
+function matchesAnalyticsStatus(participant, status) {
+  if (!status || status === 'all') return true;
+  if (status === 'WARNING') return ['WARNING', 'SECOND_CHANCE'].includes(participant.participationStatus);
+  return participant.participationStatus === status;
+}
+
+async function loadSponsoredAttendanceData({ range, educationLevel = '', status = '', eventId = '', interval = 'month', participantId = null }) {
+  await Promise.all([participantProfileColumnsReady, eventsTableReady, participationTrackingReady]);
+  const education = normalizeAnalyticsEducation(educationLevel);
+  const participantConditions = [
+    "p.participant_type = 'sponsored_child'",
+    "p.status <> 'deleted'",
+    'COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) < ?',
+  ];
+  const participantParams = [range.endExclusive];
+  if (education === 'High School') {
+    participantConditions.push("p.education_level IN ('Junior High School', 'Senior High School', 'High School')");
+  } else if (education) {
+    participantConditions.push('p.education_level = ?');
+    participantParams.push(education);
+  }
+  if (participantId) {
+    participantConditions.push('p.id = ?');
+    participantParams.push(participantId);
+  }
+  if (eventId) {
+    participantConditions.push(
+      `COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) <= (
+         SELECT selected.starts_at
+         FROM events selected
+         WHERE selected.id = ?
+           AND selected.status = 'completed'
+           AND selected.starts_at < NOW()
+           AND selected.starts_at >= ? AND selected.starts_at < ?
+       )`,
+    );
+    participantParams.push(Number(eventId), range.start, range.endExclusive);
+  }
+  const [participantRows, summaries] = await Promise.all([
+    pool.execute(
+      `SELECT p.id, p.participant_code, p.full_name_encrypted, p.education_level, p.grade_level,
+              COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) AS registration_date,
+              p.participation_status, p.status AS participant_status
+       FROM participants p
+       WHERE ${participantConditions.join(' AND ')}
+       ORDER BY p.id`,
+      participantParams,
+    ).then(([rows]) => rows),
+    getSponsoredParticipationSummaries(null, { recordThresholdHistory: false }),
+  ]);
+  const summaryById = new Map(summaries.map((child) => [Number(child.id), child]));
+  const participants = participantRows
+    .map((row) => {
+      const summary = summaryById.get(Number(row.id));
+      const participationStatus = ['inactive', 'INACTIVE', 'REMOVED_FROM_SPONSORSHIP']
+        .includes(row.participant_status) || row.participation_status === 'REMOVED_FROM_SPONSORSHIP'
+        ? 'REMOVED_FROM_SPONSORSHIP'
+        : summary?.status || row.participation_status || 'ACTIVE';
+      const removal = summary?.history?.find((action) => action.type === 'removed');
+      return {
+        id: Number(row.id),
+        participantCode: row.participant_code || '',
+        name: summary?.name || decrypt(row.full_name_encrypted) || 'Unnamed child',
+        educationLevel: row.education_level || '',
+        gradeLevel: row.grade_level || '',
+        registrationDate: row.registration_date,
+        participationStatus,
+        secondChance: Boolean(summary?.secondChance),
+        inactiveReason: removal?.reason || '',
+        lifetime: summary?.lifetime || null,
+      };
+    })
+    .filter((participant) => matchesAnalyticsStatus(participant, status));
+  const eventOptions = await pool.execute(
+    `SELECT id, name, starts_at
+     FROM events
+     WHERE status = 'completed' AND starts_at < NOW()
+       AND starts_at >= ? AND starts_at < ?
+     ORDER BY starts_at, id`,
     [range.start, range.endExclusive],
+  ).then(([rows]) => rows);
+  if (!participants.length) {
+    return {
+      participants: [],
+      occurrences: [],
+      analytics: buildAttendanceAnalytics([], [], interval, range),
+      events: eventOptions,
+    };
+  }
+  const participantIds = participants.map((participant) => participant.id);
+  const placeholders = participantIds.map(() => '?').join(', ');
+  const eventCondition = eventId ? ' AND e.id = ?' : '';
+  const [occurrences] = await pool.execute(
+    `SELECT p.id AS participantId, e.id AS eventId, e.name AS eventName,
+            e.starts_at AS startsAt,
+            EXISTS (
+              SELECT 1
+              FROM check_in_logs c
+              WHERE c.participant_id = p.id
+                AND c.status = 'checked_in'
+                AND c.checked_in_at >= DATE(e.starts_at)
+                AND c.checked_in_at < DATE_ADD(DATE(e.starts_at), INTERVAL 1 DAY)
+                AND LOWER(TRIM(c.event_name)) = LOWER(TRIM(e.name))
+            ) AS present
+     FROM participants p
+     JOIN events e
+       ON e.status = 'completed'
+      AND e.starts_at < NOW()
+      AND e.starts_at >= COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at)
+      AND e.starts_at >= ? AND e.starts_at < ?${eventCondition}
+     WHERE p.id IN (${placeholders})
+     ORDER BY e.starts_at, e.id, p.id`,
+    eventId
+      ? [range.start, range.endExclusive, Number(eventId), ...participantIds]
+      : [range.start, range.endExclusive, ...participantIds],
   );
-  const buckets = new Map();
-  const emptyLevels = { Elementary: 0, 'Junior High School': 0, 'Senior High School': 0, College: 0 };
-  for (const row of rows) {
-    const checkedInAt = row.checked_in_at instanceof Date ? row.checked_in_at : new Date(row.checked_in_at);
-    let key;
-    if (interval === 'day') key = localDayKey(checkedInAt);
-    else if (interval === 'month') key = localMonthKey(checkedInAt);
-    else if (interval === 'year') key = String(checkedInAt.getFullYear());
-    else key = localDayKey(weekStart(checkedInAt));
-    if (!buckets.has(key)) {
-      buckets.set(key, {
-        totalCheckIns: 0,
-        participantIds: new Set(),
-        sponsoredCheckIns: 0,
-        goerCheckIns: 0,
-        sponsoredIds: new Set(),
-        goerIds: new Set(),
-        educationLevels: { Elementary: 0, 'Junior High School': 0, 'Senior High School': 0, College: 0 },
-      });
-    }
-    const bucket = buckets.get(key);
-    bucket.totalCheckIns += 1;
-    bucket.participantIds.add(row.participant_id);
-    if (row.participant_type === 'sponsored_child') {
-      bucket.sponsoredCheckIns += 1;
-      bucket.sponsoredIds.add(row.participant_id);
-      const level = row.education_level || '';
-      if (Object.prototype.hasOwnProperty.call(emptyLevels, level)) bucket.educationLevels[level] += 1;
-    } else {
-      bucket.goerCheckIns += 1;
-      bucket.goerIds.add(row.participant_id);
-    }
+  const analytics = buildAttendanceAnalytics(participants, occurrences, interval, range);
+  return { participants, occurrences, analytics, events: eventOptions };
+}
+
+async function getValidatedRiskScores() {
+  await attendanceModelValidationReady;
+  const [[validation]] = await pool.execute(
+    `SELECT status, model_version
+     FROM attendance_model_validation_runs
+     ORDER BY id DESC LIMIT 1`,
+  );
+  if (validation?.status !== 'validated' || validation.model_version !== MODEL_VERSION) return [];
+  return pool.execute(
+    `SELECT r.participant_id, r.risk_score, r.risk_level, r.model_version, r.computed_at
+     FROM predictive_risk_scores r
+     JOIN participants p ON p.id = r.participant_id
+     JOIN (
+       SELECT participant_id, MAX(computed_at) AS latest
+       FROM predictive_risk_scores
+       WHERE model_version = ?
+       GROUP BY participant_id
+     ) latest ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at
+     WHERE r.model_version = ?
+       AND p.participant_type = 'sponsored_child'
+       AND p.status <> 'deleted'
+     ORDER BY r.risk_score DESC, p.participant_code`,
+    [MODEL_VERSION, MODEL_VERSION],
+  ).then(([rows]) => rows);
+}
+
+async function loadRecentSponsoredAttendance(participantIds, { range, eventId = '' } = {}) {
+  if (!participantIds.length) return [];
+  const placeholders = participantIds.map(() => '?').join(', ');
+  const rangeStart = range ? new Date(Math.max(range.start.getTime(), Date.now() - 180 * 86400000)) : new Date(Date.now() - 180 * 86400000);
+  const rangeEnd = range?.endExclusive || new Date();
+  const eventCondition = eventId ? ' AND e.id = ?' : '';
+  const [rows] = await pool.execute(
+    `SELECT p.id AS participantId, e.id AS eventId, e.starts_at AS startsAt
+     FROM participants p
+     JOIN events e
+       ON e.status = 'completed'
+      AND e.starts_at >= ?
+      AND e.starts_at < ?
+      AND e.starts_at < NOW()
+      AND e.starts_at >= COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at)
+     WHERE p.id IN (${placeholders})
+       AND EXISTS (
+         SELECT 1
+         FROM check_in_logs c
+         WHERE c.participant_id = p.id
+           AND c.status = 'checked_in'
+           AND c.checked_in_at >= DATE(e.starts_at)
+           AND c.checked_in_at < DATE_ADD(DATE(e.starts_at), INTERVAL 1 DAY)
+           AND LOWER(TRIM(c.event_name)) = LOWER(TRIM(e.name))
+       )${eventCondition}
+     ORDER BY e.starts_at, e.id, p.id`,
+    [rangeStart, rangeEnd, ...participantIds, ...(eventId ? [Number(eventId)] : [])],
+  );
+  return rows;
+}
+
+function buildRiskRows(data, scores, recentOccurrences, riskFilter, referenceTime = Date.now()) {
+  const scoresById = new Map(scores.map((row) => [Number(row.participant_id), row]));
+  const attendanceById = new Map(data.analytics.participants.map((participant) => [participant.id, participant]));
+  const datesById = new Map();
+  for (const occurrence of recentOccurrences) {
+    const dates = datesById.get(Number(occurrence.participantId)) || [];
+    dates.push(occurrence.startsAt instanceof Date ? occurrence.startsAt : new Date(occurrence.startsAt));
+    datesById.set(Number(occurrence.participantId), dates);
   }
-  const series = [];
-  const cursor = new Date(range.start.getFullYear(), range.start.getMonth(), range.start.getDate());
-  if (interval === 'week') cursor.setDate(cursor.getDate() - cursor.getDay());
-  else if (interval === 'month') cursor.setDate(1);
-  else if (interval === 'year') cursor.setMonth(0, 1);
-  const end = new Date(range.end.getFullYear(), range.end.getMonth(), range.end.getDate());
-  while (cursor <= end && series.length < 400) {
-    let key;
-    if (interval === 'day') key = localDayKey(cursor);
-    else if (interval === 'month') key = localMonthKey(cursor);
-    else if (interval === 'year') key = String(cursor.getFullYear());
-    else key = localDayKey(cursor);
-    const bucket = buckets.get(key);
-    const levels = bucket ? bucket.educationLevels : { Elementary: 0, 'Junior High School': 0, 'Senior High School': 0, College: 0 };
-    series.push({
-      key,
-      label: bucketLabel(key, interval),
-      totalCheckIns: bucket ? bucket.totalCheckIns : 0,
-      uniqueParticipants: bucket ? bucket.participantIds.size : 0,
-      sponsoredCheckIns: bucket ? bucket.sponsoredCheckIns : 0,
-      goerCheckIns: bucket ? bucket.goerCheckIns : 0,
-      sponsoredUnique: bucket ? bucket.sponsoredIds.size : 0,
-      goerUnique: bucket ? bucket.goerIds.size : 0,
-      elementaryCheckIns: levels.Elementary,
-      juniorHighSchoolCheckIns: levels['Junior High School'],
-      seniorHighSchoolCheckIns: levels['Senior High School'],
-      collegeCheckIns: levels.College,
-    });
-    if (interval === 'day') cursor.setDate(cursor.getDate() + 1);
-    else if (interval === 'week') cursor.setDate(cursor.getDate() + 7);
-    else if (interval === 'month') cursor.setMonth(cursor.getMonth() + 1);
-    else cursor.setFullYear(cursor.getFullYear() + 1);
-  }
+  return data.participants.map((participant) => {
+    const evidence = buildRiskEvidence((datesById.get(participant.id) || []).sort((a, b) => a - b), referenceTime);
+    const score = scoresById.get(participant.id);
+    const hasEnoughData = !evidence.insufficientData;
+    const currentAttendance = attendanceById.get(participant.id);
+    const riskLevel = score && hasEnoughData ? score.risk_level : 'insufficient_data';
+    return {
+      participantId: participant.id,
+      participantCode: participant.participantCode,
+      participantName: participant.name,
+      participantType: 'sponsored_child',
+      educationLevel: participant.educationLevel,
+      gradeLevel: participant.gradeLevel,
+      participationStatus: participant.participationStatus,
+      attendanceRate: currentAttendance?.attendanceRate ?? null,
+      recommendedAction: riskLevel === 'high'
+        ? 'Review attendance promptly and contact the family.'
+        : riskLevel === 'medium'
+          ? 'Monitor attendance and discuss any barriers with the family.'
+          : riskLevel === 'low'
+            ? 'Continue regular support and monitoring.'
+            : 'Insufficient validated history; continue routine attendance recording.',
+      riskScore: score && hasEnoughData ? Number(score.risk_score) : null,
+      riskLevel,
+      modelVersion: score && hasEnoughData ? score.model_version : null,
+      computedAt: score && hasEnoughData ? score.computed_at : null,
+      ...evidence,
+    };
+  }).filter((row) => riskFilter === 'all' || row.riskLevel === riskFilter);
+}
+
+async function computeRiskRecords(riskFilter, filters = {}) {
+  const range = filters.range || analyticsDateRange({ query: {} });
+  const data = await loadSponsoredAttendanceData({
+    range,
+    educationLevel: filters.educationLevel,
+    status: filters.status,
+    eventId: filters.eventId,
+    interval: 'month',
+  });
+  const [riskRows, recentOccurrences] = await Promise.all([
+    getValidatedRiskScores(),
+    loadRecentSponsoredAttendance(data.participants.map((participant) => participant.id), {
+      range,
+      eventId: filters.eventId,
+    }),
+  ]);
+  return buildRiskRows(
+    data,
+    riskRows,
+    recentOccurrences,
+    riskFilter,
+    Math.min(Date.now(), range.endExclusive.getTime()),
+  );
+}
+
+async function computeAttendanceTrends(range, interval, eventId, filters = {}) {
+  const data = await loadSponsoredAttendanceData({
+    range,
+    educationLevel: filters.educationLevel,
+    status: filters.status,
+    eventId,
+    interval,
+  });
   return {
     interval,
-    event: event || null,
-    events: eventRows.map((row) => row.event_name),
-    records: series,
+    eventId: eventId || null,
+    events: data.events.map((event) => ({
+      id: event.id,
+      name: event.name,
+      startsAt: event.starts_at,
+    })),
+    records: data.analytics.records,
   };
 }
 
 async function computeSponsoredChildren(filters) {
-  const [children, riskRows] = await Promise.all([
-    getSponsoredParticipationSummaries(),
-    pool.query(
-      `SELECT r.participant_id, r.risk_score, r.risk_level, r.computed_at
-       FROM predictive_risk_scores r
-       JOIN (SELECT participant_id, MAX(computed_at) AS latest
-             FROM predictive_risk_scores GROUP BY participant_id) latest
-         ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at`,
-    ).then(([rows]) => rows),
-  ]);
-  const risksByParticipant = new Map(riskRows.map((row) => [Number(row.participant_id), row]));
-  return children
-    .filter((child) => (!filters.educationLevel || child.educationLevel === filters.educationLevel)
-      && (!filters.gradeLevel || child.gradeLevel === filters.gradeLevel)
-      && (!filters.participationStatus || filters.participationStatus === 'all'
-        || child.status === filters.participationStatus))
-    .map((child) => {
-      const risk = risksByParticipant.get(Number(child.id));
+  const range = filters.range || analyticsDateRange({ query: {} });
+  const data = await loadSponsoredAttendanceData({
+    range,
+    educationLevel: filters.educationLevel,
+    status: filters.participationStatus,
+    eventId: filters.eventId,
+    interval: 'month',
+  });
+  const riskRows = await getValidatedRiskScores();
+  const riskById = new Map(riskRows.map((row) => [Number(row.participant_id), row]));
+  return data.analytics.participants
+    .filter((participant) => (!filters.gradeLevel || participant.gradeLevel === filters.gradeLevel))
+    .map((participant) => {
+      const risk = riskById.get(participant.id);
       return {
-        id: child.id,
-        participantCode: child.participantCode,
-        name: child.name,
-        gradeLevel: child.gradeLevel,
-        educationLevel: child.educationLevel,
-        participationStatus: child.status,
-        monthly: child.monthly,
-        lifetime: child.lifetime,
-        riskScore: risk?.risk_score === null || risk?.risk_score === undefined
-          ? null
-          : Number(risk.risk_score),
-        riskLevel: risk?.risk_level || 'not_scored',
+        ...participant,
+        riskScore: risk ? Number(risk.risk_score) : null,
+        riskLevel: risk?.risk_level || 'insufficient_data',
         computedAt: risk?.computed_at || null,
       };
     })
@@ -5841,47 +5407,87 @@ async function loadParticipantDetailHistory(participantId, options) {
 }
 
 async function computeParticipantHistory(participantId) {
+  await Promise.all([participantProfileColumnsReady, eventsTableReady, participationTrackingReady]);
   const [[participant]] = await pool.execute(
-    `SELECT id, participant_code, full_name_encrypted, participant_type, grade_level, education_level, status
-     FROM participants WHERE id = ? LIMIT 1`,
+    `SELECT id, participant_code, full_name_encrypted, participant_type, grade_level, education_level,
+            COALESCE(sponsorship_registered_at, sponsorship_start_date, created_at) AS registration_date,
+            status AS participant_status, participation_status
+     FROM participants WHERE id = ? AND status <> 'deleted' LIMIT 1`,
     [participantId],
   );
-  if (!participant) return null;
-  const [attendance] = await pool.execute(
-    `SELECT event_name, location, checked_in_at, checked_out_at, status
-     FROM check_in_logs WHERE participant_id = ?
-     ORDER BY checked_in_at DESC, id DESC LIMIT 200`,
-    [participantId],
-  );
-  const [[summary]] = await pool.execute(
-    `SELECT COUNT(*) AS totalCheckIns, COUNT(DISTINCT event_name) AS uniqueEvents,
-            MAX(checked_in_at) AS lastCheckIn, MIN(checked_in_at) AS firstCheckIn
-     FROM check_in_logs WHERE participant_id = ? AND status = 'checked_in'`,
-    [participantId],
-  );
+  if (!participant || participant.participant_type !== 'sponsored_child') return null;
+  const start = participant.registration_date
+    ? new Date(participant.registration_date)
+    : new Date('1900-01-01T00:00:00');
+  const end = new Date();
+  const range = {
+    start,
+    end,
+    endExclusive: new Date(end.getFullYear(), end.getMonth(), end.getDate() + 1),
+  };
+  const data = await loadSponsoredAttendanceData({
+    range,
+    educationLevel: participant.education_level,
+    participantId,
+    interval: 'month',
+  });
+  const child = data.analytics.participants[0];
+  if (!child) return null;
+  const attendance = data.occurrences.map((row) => ({
+    eventId: row.eventId,
+    eventName: row.eventName,
+    startsAt: row.startsAt,
+    status: Number(row.present) ? 'present' : 'absent',
+  }));
+  const yearlyMap = new Map();
+  for (const month of child.months) {
+    const yearly = yearlyMap.get(month.year) || { year: month.year, scheduled: 0, present: 0, absent: 0 };
+    yearly.scheduled += month.scheduled;
+    yearly.present += month.present;
+    yearly.absent += month.absent;
+    yearlyMap.set(month.year, yearly);
+  }
+  const yearly = [...yearlyMap.values()]
+    .sort((first, second) => second.year - first.year)
+    .map((item) => ({
+      ...item,
+      attendanceRate: item.scheduled ? roundRate((item.present / item.scheduled) * 100) : null,
+    }));
+  const lastCheckIn = attendance
+    .filter((row) => row.status === 'present')
+    .reduce((latest, row) => !latest || row.startsAt > latest ? row.startsAt : latest, null);
+  const firstCheckIn = attendance
+    .filter((row) => row.status === 'present')
+    .reduce((earliest, row) => !earliest || row.startsAt < earliest ? row.startsAt : earliest, null);
+  const summaries = await getSponsoredParticipationSummaries(participantId, { recordThresholdHistory: false });
+  const currentStatus = ['inactive', 'INACTIVE', 'REMOVED_FROM_SPONSORSHIP']
+    .includes(participant.participant_status) || participant.participation_status === 'REMOVED_FROM_SPONSORSHIP'
+    ? 'REMOVED_FROM_SPONSORSHIP'
+    : summaries[0]?.status || participant.participation_status || 'ACTIVE';
   return {
     participant: {
       id: participant.id,
       participantCode: participant.participant_code,
       name: decrypt(participant.full_name_encrypted) || 'Unnamed participant',
-      participantType: participant.participant_type,
+      participantType: 'sponsored_child',
       gradeLevel: participant.grade_level || '',
       educationLevel: participant.education_level || '',
-      status: participant.status,
+      registrationDate: participant.registration_date,
+      status: currentStatus,
     },
     summary: {
-      totalCheckIns: Number(summary.totalCheckIns) || 0,
-      uniqueEvents: Number(summary.uniqueEvents) || 0,
-      lastCheckIn: summary.lastCheckIn,
-      firstCheckIn: summary.firstCheckIn,
+      totalScheduledEvents: child.scheduled,
+      totalPresent: child.present,
+      totalAbsent: child.absent,
+      attendanceRate: child.attendanceRate,
+      totalCheckIns: child.present,
+      uniqueEvents: child.scheduled,
+      lastCheckIn,
+      firstCheckIn,
     },
-    attendance: attendance.map((row) => ({
-      eventName: row.event_name,
-      location: row.location,
-      checkedInAt: row.checked_in_at,
-      checkedOutAt: row.checked_out_at,
-      status: row.status,
-    })),
+    monthly: child.months,
+    yearly,
+    attendance,
   };
 }
 
@@ -5939,53 +5545,122 @@ app.get('/api/analytics/overview', authenticate, checkPermission('analytics:view
   try {
     const range = analyticsDateRange(req);
     if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
-    const educationLevel = normalizeEducationLevel(req.query.educationLevel);
-    const levelClause = educationLevel ? ' AND p.education_level = ?' : '';
-    const levelParams = educationLevel ? [educationLevel] : [];
-    const [[participants]] = await pool.execute(
-      `SELECT COUNT(*) AS total FROM participants p WHERE p.status = 'active'${levelClause}`,
-      levelParams,
-    );
-    const [checkins] = await pool.execute(
-      `SELECT COUNT(*) AS totalCheckIns,
-              COUNT(DISTINCT c.participant_id) AS uniqueParticipants,
-              COALESCE(SUM(p.participant_type = 'sponsored_child'), 0) AS sponsoredCheckIns,
-              COALESCE(SUM(p.participant_type = 'goer'), 0) AS goerCheckIns,
-              COUNT(DISTINCT CASE WHEN p.participant_type = 'sponsored_child' THEN c.participant_id END) AS sponsoredUnique,
-              COUNT(DISTINCT CASE WHEN p.participant_type = 'goer' THEN c.participant_id END) AS goerUnique
-       FROM check_in_logs c
-       JOIN participants p ON p.id = c.participant_id
-       WHERE c.status = 'checked_in' AND c.checked_in_at >= ? AND c.checked_in_at < ?${levelClause}`,
-      [...levelParams, range.start, range.endExclusive],
-    );
-    const [[atRisk]] = await pool.execute(
-      `SELECT COUNT(*) AS atRiskChildren
-       FROM predictive_risk_scores r
-       JOIN participants p ON p.id = r.participant_id
-       JOIN (SELECT participant_id, MAX(computed_at) AS latest FROM predictive_risk_scores GROUP BY participant_id) latest
-         ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at
-       WHERE p.participant_type = 'sponsored_child' AND p.status = 'active'${levelClause} AND r.risk_level IN ('medium', 'high')`,
-      levelParams,
-    );
-    const total = Number(participants.total) || 0;
-    const unique = Number(checkins.uniqueParticipants) || 0;
+    const educationLevel = normalizeAnalyticsEducation(req.query.educationLevel);
+    const status = normalizeAnalyticsStatus(req.query.status);
+    const eventId = String(req.query.event || '').trim();
+    const data = await loadSponsoredAttendanceData({
+      range,
+      educationLevel,
+      status,
+      eventId,
+      interval: 'month',
+    });
+    const totalScheduledRecords = data.analytics.participants
+      .reduce((sum, participant) => sum + participant.scheduled, 0);
+    const totalPresentRecords = data.analytics.participants
+      .reduce((sum, participant) => sum + participant.present, 0);
+    const atRiskRecords = await computeRiskRecords('all', { range, educationLevel, status, eventId });
+    const statusCounts = data.participants.reduce((counts, participant) => {
+      const key = participant.participationStatus === 'SECOND_CHANCE'
+        ? 'WARNING'
+        : participant.participationStatus === 'REMOVED_FROM_SPONSORSHIP'
+          ? 'INACTIVE'
+          : participant.participationStatus;
+      counts[key] = (counts[key] || 0) + 1;
+      return counts;
+    }, {});
     res.json({
       from: localDayKey(range.start),
       to: localDayKey(range.end),
       educationLevel,
-      totalParticipants: total,
-      totalCheckIns: Number(checkins.totalCheckIns) || 0,
-      uniqueParticipants: unique,
-      attendanceRate: total ? roundRate((unique / total) * 100) : 0,
-      atRiskChildren: Number(atRisk.atRiskChildren) || 0,
-      sponsored: {
-        checkIns: Number(checkins.sponsoredCheckIns) || 0,
-        uniqueParticipants: Number(checkins.sponsoredUnique) || 0,
+      status,
+      totalParticipants: data.participants.length,
+      totalScheduledRecords,
+      totalPresentRecords,
+      totalAbsentRecords: totalScheduledRecords - totalPresentRecords,
+      totalCheckIns: totalPresentRecords,
+      uniqueParticipants: data.analytics.participants.filter((participant) => participant.present > 0).length,
+      attendanceRate: totalScheduledRecords
+        ? roundRate((totalPresentRecords / totalScheduledRecords) * 100)
+        : null,
+      atRiskChildren: atRiskRecords.filter((row) => ['medium', 'high'].includes(row.riskLevel)).length,
+      statusCounts,
+      educationComparison: data.analytics.educationComparison,
+    });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/analytics/data', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    const range = analyticsDateRange(req);
+    if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
+    const interval = normalizeInterval(req.query.interval);
+    const educationLevel = normalizeAnalyticsEducation(req.query.educationLevel);
+    const status = normalizeAnalyticsStatus(req.query.status);
+    const eventId = String(req.query.event || '').trim();
+    const riskFilter = normalizeRiskFilter(req.query.riskLevel);
+    const data = await loadSponsoredAttendanceData({
+      range,
+      educationLevel,
+      status,
+      eventId,
+      interval,
+    });
+    const [riskScores, recentOccurrences] = await Promise.all([
+      getValidatedRiskScores(),
+      loadRecentSponsoredAttendance(data.participants.map((participant) => participant.id), {
+        range,
+        eventId,
+      }),
+    ]);
+    const allRiskRecords = buildRiskRows(
+      data,
+      riskScores,
+      recentOccurrences,
+      'all',
+      Math.min(Date.now(), range.endExclusive.getTime()),
+    );
+    const riskRecords = allRiskRecords.filter((row) => riskFilter === 'all' || row.riskLevel === riskFilter);
+    const totalScheduledRecords = data.analytics.participants
+      .reduce((sum, participant) => sum + participant.scheduled, 0);
+    const totalPresentRecords = data.analytics.participants
+      .reduce((sum, participant) => sum + participant.present, 0);
+    const statusCounts = data.participants.reduce((counts, participant) => {
+      const key = participant.participationStatus === 'SECOND_CHANCE'
+        ? 'WARNING'
+        : participant.participationStatus === 'REMOVED_FROM_SPONSORSHIP'
+          ? 'INACTIVE'
+          : participant.participationStatus;
+      counts[key] = (counts[key] || 0) + 1;
+      return counts;
+    }, {});
+    res.json({
+      overview: {
+        from: localDayKey(range.start),
+        to: localDayKey(range.end),
+        educationLevel,
+        status,
+        totalParticipants: data.participants.length,
+        totalScheduledRecords,
+        totalPresentRecords,
+        totalAbsentRecords: totalScheduledRecords - totalPresentRecords,
+        totalCheckIns: totalPresentRecords,
+        uniqueParticipants: data.analytics.participants.filter((participant) => participant.present > 0).length,
+        attendanceRate: totalScheduledRecords
+          ? roundRate((totalPresentRecords / totalScheduledRecords) * 100)
+          : null,
+        atRiskChildren: allRiskRecords.filter((row) => ['medium', 'high'].includes(row.riskLevel)).length,
+        statusCounts,
+        educationComparison: data.analytics.educationComparison,
       },
-      goers: {
-        checkIns: Number(checkins.goerCheckIns) || 0,
-        uniqueParticipants: Number(checkins.goerUnique) || 0,
+      trends: {
+        interval,
+        eventId: eventId || null,
+        events: data.events.map((event) => ({ id: event.id, name: event.name, startsAt: event.starts_at })),
+        records: data.analytics.records,
       },
+      participants: data.analytics.participants,
+      riskRecords,
     });
   } catch (error) { next(error); }
 });
@@ -5997,23 +5672,61 @@ app.get('/api/analytics/trends', authenticate, checkPermission('analytics:view')
     res.json(await computeAttendanceTrends(
       range,
       normalizeInterval(req.query.interval),
-      String(req.query.event || '').trim().slice(0, 100),
+      String(req.query.event || '').trim(),
+      {
+        educationLevel: req.query.educationLevel,
+        status: normalizeAnalyticsStatus(req.query.status),
+      },
     ));
   } catch (error) { next(error); }
 });
 
 app.get('/api/analytics/risk', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
   try {
-    res.json({ records: await computeRiskRecords(normalizeRiskFilter(req.query.riskLevel)) });
+    const range = analyticsDateRange(req);
+    if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
+    res.json({
+      records: await computeRiskRecords(normalizeRiskFilter(req.query.riskLevel), {
+        range,
+        educationLevel: req.query.educationLevel,
+        status: normalizeAnalyticsStatus(req.query.status),
+        eventId: String(req.query.event || '').trim(),
+      }),
+    });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/analytics/participants', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    const range = analyticsDateRange(req);
+    if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
+    const data = await loadSponsoredAttendanceData({
+      range,
+      educationLevel: req.query.educationLevel,
+      status: normalizeAnalyticsStatus(req.query.status),
+      eventId: String(req.query.event || '').trim(),
+      interval: 'month',
+    });
+    res.json({
+      records: data.analytics.participants.map((participant) => ({
+        ...participant,
+        registrationDate: data.participants.find((row) => row.id === participant.id)?.registrationDate || null,
+        participationStatus: data.participants.find((row) => row.id === participant.id)?.participationStatus || 'ACTIVE',
+        secondChance: data.participants.find((row) => row.id === participant.id)?.secondChance || false,
+        inactiveReason: data.participants.find((row) => row.id === participant.id)?.inactiveReason || '',
+      })),
+    });
   } catch (error) { next(error); }
 });
 
 app.get('/api/analytics/sponsored-children', authenticate, checkPermission('analytics:view'), checkPermission('sponsorship:view'), async (req, res, next) => {
   try {
     res.json({ records: await computeSponsoredChildren({
+      range: analyticsDateRange(req),
       educationLevel: String(req.query.educationLevel || '').trim(),
       gradeLevel: String(req.query.gradeLevel || '').trim(),
       participationStatus: String(req.query.participationStatus || '').trim(),
+      eventId: String(req.query.event || '').trim(),
       riskLevel: normalizeRiskFilter(req.query.riskLevel),
     }) });
   } catch (error) { next(error); }
@@ -6036,25 +5749,31 @@ app.get('/api/reports/analytics-attendance', authenticate, checkPermission('repo
     const range = analyticsDateRange(req);
     if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
     const interval = normalizeInterval(req.query.interval);
-    const event = String(req.query.event || '').trim().slice(0, 100);
+    const eventId = String(req.query.event || '').trim();
     const password = req.query.password ? String(req.query.password) : '';
-    const trends = await computeAttendanceTrends(range, interval, event);
-    const totalCheckIns = trends.records.reduce((sum, row) => sum + row.totalCheckIns, 0);
-    const uniqueIds = new Set();
+    const trends = await computeAttendanceTrends(range, interval, eventId, {
+      educationLevel: req.query.educationLevel,
+      status: normalizeAnalyticsStatus(req.query.status),
+    });
+    const totals = trends.records.reduce((sum, row) => ({
+      scheduled: sum.scheduled + row.scheduled,
+      present: sum.present + row.present,
+      absent: sum.absent + row.absent,
+    }), { scheduled: 0, present: 0, absent: 0 });
     const stamp = new Date().toISOString().slice(0, 10);
     const filename = `attendance-summary-${interval}-${stamp}`;
     if (req.query.format === 'pdf') {
       const pdf = await renderPdf((doc) => {
         doc.fontSize(18).text('Attendance Summary Report');
         doc.fontSize(10).text(`Generated: ${new Date().toLocaleString()}`);
-        doc.text(`Range: ${localDayKey(range.start)} to ${localDayKey(range.end)} · Interval: ${interval}${event ? ` · Event: ${event}` : ''}`);
+        doc.text(`Range: ${localDayKey(range.start)} to ${localDayKey(range.end)} · Interval: ${interval}${eventId ? ` · Event ID: ${eventId}` : ''}`);
         doc.moveDown();
-        doc.fontSize(11).text('Date · Check-ins · Unique participants · Elementary · Junior High School · Senior High School · College');
+        doc.fontSize(11).text('Period · Scheduled participant-events · Present · Absent · Attendance rate');
         trends.records.forEach((row) => {
-          doc.fontSize(9).text(`${row.label} | ${row.totalCheckIns} check-ins | ${row.uniqueParticipants} unique | Elementary ${row.elementaryCheckIns} | JHS ${row.juniorHighSchoolCheckIns} | SHS ${row.seniorHighSchoolCheckIns} | College ${row.collegeCheckIns}`);
+          doc.fontSize(9).text(`${row.label} | ${row.scheduled} | ${row.present} | ${row.absent} | ${row.attendanceRate == null ? 'N/A' : `${row.attendanceRate}%`}`);
         });
         doc.moveDown();
-        doc.fontSize(10).text(`Total check-ins in range: ${totalCheckIns}`);
+        doc.fontSize(10).text(`Totals: ${totals.scheduled} scheduled · ${totals.present} present · ${totals.absent} absent · attendance rate ${totals.scheduled ? `${roundRate((totals.present / totals.scheduled) * 100)}%` : 'N/A'}`);
       });
       return sendReport(res, `${filename}.pdf`, pdf, password);
     }
@@ -6062,7 +5781,7 @@ app.get('/api/reports/analytics-attendance', authenticate, checkPermission('repo
       res,
       `${filename}.csv`,
       csvPayload(
-        ['label', 'totalCheckIns', 'uniqueParticipants', 'elementaryCheckIns', 'juniorHighSchoolCheckIns', 'seniorHighSchoolCheckIns', 'collegeCheckIns'],
+        ['label', 'scheduled', 'present', 'absent', 'attendanceRate'],
         trends.records,
       ),
       password,
@@ -6074,7 +5793,14 @@ app.get('/api/reports/at-risk', authenticate, checkPermission('reports:view'), c
   try {
     const riskLevel = normalizeRiskFilter(req.query.riskLevel);
     const password = req.query.password ? String(req.query.password) : '';
-    const records = await computeRiskRecords(riskLevel);
+    const range = analyticsDateRange(req);
+    if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
+    const records = await computeRiskRecords(riskLevel, {
+      range,
+      educationLevel: req.query.educationLevel,
+      status: normalizeAnalyticsStatus(req.query.status),
+      eventId: String(req.query.event || '').trim(),
+    });
     const stamp = new Date().toISOString().slice(0, 10);
     const filename = `at-risk-participants-${riskLevel}-${stamp}`;
     if (req.query.format === 'pdf') {
@@ -6082,9 +5808,9 @@ app.get('/api/reports/at-risk', authenticate, checkPermission('reports:view'), c
         doc.fontSize(18).text('At-Risk Participant Report');
         doc.fontSize(10).text(`Generated: ${new Date().toLocaleString()} · Risk level filter: ${riskLevel}`);
         doc.moveDown();
-        doc.fontSize(11).text('Participant code · Type · Risk score · Risk level · Evidence');
+        doc.fontSize(11).text('Participant · Education · Attendance rate · Predicted risk · Risk level · Recommendation');
         records.forEach((row) => {
-          doc.fontSize(9).text(`${row.participantCode} | ${row.participantType} | ${row.riskScore} | ${row.riskLevel} | ${row.insufficientData ? 'Insufficient data' : row.summary}`);
+          doc.fontSize(9).text(`${row.participantName} (ID ${row.participantId}) | ${row.educationLevel || '—'} | ${row.attendanceRate == null ? 'N/A' : `${row.attendanceRate}%`} | ${row.riskScore == null ? 'Insufficient data' : `${row.riskScore}%`} | ${row.riskLevel} | ${row.recommendedAction}`);
         });
         doc.moveDown();
         doc.fontSize(10).text('Risk scores are decision-support information and require staff review. They are not a sole basis for decisions about a child.');
@@ -6095,20 +5821,21 @@ app.get('/api/reports/at-risk', authenticate, checkPermission('reports:view'), c
       res,
       `${filename}.csv`,
       csvPayload(
-        ['participantCode', 'participantType', 'gradeLevel', 'riskScore', 'riskLevel', 'modelVersion', 'checkInsPerWeek', 'regularity', 'recencyDays', 'trend', 'insufficientData', 'evidence'],
+        ['participantId', 'participantCode', 'name', 'educationLevel', 'attendanceRate', 'participationStatus', 'riskScore', 'riskLevel', 'modelVersion', 'trend', 'insufficientData', 'evidence', 'recommendedAction'],
         records.map((row) => ({
+          participantId: row.participantId,
           participantCode: row.participantCode,
-          participantType: row.participantType,
-          gradeLevel: row.gradeLevel,
+          name: row.participantName,
+          educationLevel: row.educationLevel,
+          attendanceRate: row.attendanceRate,
+          participationStatus: row.participationStatus,
           riskScore: row.riskScore,
           riskLevel: row.riskLevel,
           modelVersion: row.modelVersion,
-          checkInsPerWeek: row.checkInsPerWeek,
-          regularity: row.regularity,
-          recencyDays: row.recencyDays,
           trend: row.trend,
           insufficientData: row.insufficientData,
           evidence: row.summary,
+          recommendedAction: row.recommendedAction,
         })),
       ),
       password,
@@ -6133,11 +5860,22 @@ app.get('/api/reports/participant-history', authenticate, checkPermission('repor
         doc.fontSize(10).text(`Generated: ${new Date().toLocaleString()}`);
         doc.moveDown();
         doc.fontSize(11).text(`${history.participant.name} (${history.participant.participantCode})`);
-        doc.fontSize(9).text(`Type: ${history.participant.participantType} · Grade: ${history.participant.gradeLevel || '—'} · Check-ins: ${history.summary.totalCheckIns} across ${history.summary.uniqueEvents} events`);
+        doc.fontSize(9).text(`ID: ${history.participant.id} · Education: ${history.participant.educationLevel || '—'} · Registered: ${formatDateTime(history.participant.registrationDate)} · Status: ${history.participant.status}`);
+        doc.fontSize(9).text(`Scheduled: ${history.summary.totalScheduledEvents} · Present: ${history.summary.totalPresent} · Absent: ${history.summary.totalAbsent} · Rate: ${history.summary.attendanceRate == null ? 'N/A' : `${history.summary.attendanceRate}%`}`);
         doc.moveDown();
-        doc.fontSize(11).text('Date · Event · Location · Checked in · Checked out');
+        doc.fontSize(11).text('Monthly summaries');
+        history.monthly.forEach((row) => {
+          doc.fontSize(9).text(`${row.key} | Scheduled ${row.scheduled} | Present ${row.present} | Absent ${row.absent} | Rate ${row.attendanceRate == null ? 'N/A' : `${row.attendanceRate}%`}`);
+        });
+        doc.moveDown();
+        doc.fontSize(11).text('Yearly summaries');
+        history.yearly.forEach((row) => {
+          doc.fontSize(9).text(`${row.year} | Scheduled ${row.scheduled} | Present ${row.present} | Absent ${row.absent} | Rate ${row.attendanceRate == null ? 'N/A' : `${row.attendanceRate}%`}`);
+        });
+        doc.moveDown();
+        doc.fontSize(11).text('Completed event · Present / Absent');
         history.attendance.forEach((row) => {
-          doc.fontSize(9).text(`${formatDateTime(row.checkedInAt)} | ${row.eventName} | ${row.location || '—'} | ${formatDateTime(row.checkedInAt)} | ${row.checkedOutAt ? formatDateTime(row.checkedOutAt) : 'Not checked out'}`);
+          doc.fontSize(9).text(`${formatDateTime(row.startsAt)} | ${row.eventName} | ${row.status}`);
         });
       });
       return sendReport(res, `${filename}.pdf`, pdf, password);
@@ -6146,17 +5884,62 @@ app.get('/api/reports/participant-history', authenticate, checkPermission('repor
       res,
       `${filename}.csv`,
       csvPayload(
-        ['participantCode', 'name', 'participantType', 'eventName', 'location', 'checkedInAt', 'checkedOutAt', 'status'],
-        history.attendance.map((row) => ({
-          participantCode: history.participant.participantCode,
-          name: history.participant.name,
-          participantType: history.participant.participantType,
-          eventName: row.eventName,
-          location: row.location || '',
-          checkedInAt: row.checkedInAt,
-          checkedOutAt: row.checkedOutAt || '',
-          status: row.status,
-        })),
+        ['recordType', 'participantId', 'participantCode', 'name', 'educationLevel', 'registrationDate', 'period', 'scheduled', 'present', 'absent', 'attendanceRate', 'eventDate', 'eventName', 'attendanceStatus'],
+        [
+          {
+            recordType: 'overall',
+            participantId: history.participant.id,
+            participantCode: history.participant.participantCode,
+            name: history.participant.name,
+            educationLevel: history.participant.educationLevel,
+            registrationDate: history.participant.registrationDate,
+            period: 'All history',
+            scheduled: history.summary.totalScheduledEvents,
+            present: history.summary.totalPresent,
+            absent: history.summary.totalAbsent,
+            attendanceRate: history.summary.attendanceRate ?? 'N/A',
+            attendanceStatus: history.participant.status,
+          },
+          ...history.monthly.map((row) => ({
+            recordType: 'monthly',
+            participantId: history.participant.id,
+            participantCode: history.participant.participantCode,
+            name: history.participant.name,
+            educationLevel: history.participant.educationLevel,
+            registrationDate: history.participant.registrationDate,
+            period: row.key,
+            scheduled: row.scheduled,
+            present: row.present,
+            absent: row.absent,
+            attendanceRate: row.attendanceRate ?? 'N/A',
+            attendanceStatus: history.participant.status,
+          })),
+          ...history.yearly.map((row) => ({
+            recordType: 'yearly',
+            participantId: history.participant.id,
+            participantCode: history.participant.participantCode,
+            name: history.participant.name,
+            educationLevel: history.participant.educationLevel,
+            registrationDate: history.participant.registrationDate,
+            period: row.year,
+            scheduled: row.scheduled,
+            present: row.present,
+            absent: row.absent,
+            attendanceRate: row.attendanceRate ?? 'N/A',
+            attendanceStatus: history.participant.status,
+          })),
+          ...history.attendance.map((row) => ({
+            recordType: 'event',
+            participantId: history.participant.id,
+            participantCode: history.participant.participantCode,
+            name: history.participant.name,
+            educationLevel: history.participant.educationLevel,
+            registrationDate: history.participant.registrationDate,
+            eventDate: row.startsAt,
+            eventName: row.eventName,
+            attendanceStatus: row.status,
+          })),
+        ],
       ),
       password,
     );
@@ -6211,12 +5994,29 @@ app.get('/api/reports/audit-trail', authenticate, checkPermission('reports:view'
 app.use((error, req, res, next) => { console.error(error); res.status(500).json({ error: 'Internal server error' }); });
 
 async function refreshRiskScores() {
-  await attendanceModelValidationReady;
+  await Promise.all([
+    attendanceModelValidationReady,
+    participantProfileColumnsReady,
+    eventsTableReady,
+    participationTrackingReady,
+  ]);
   const [history] = await pool.query(`
-    SELECT participant_id, UNIX_TIMESTAMP(checked_in_at) * 1000 AS checked_in_at_ms
-    FROM check_in_logs
-    WHERE status = 'checked_in' AND checked_in_at IS NOT NULL
-    ORDER BY checked_in_at ASC
+    SELECT c.participant_id, UNIX_TIMESTAMP(MIN(c.checked_in_at)) * 1000 AS checked_in_at_ms
+    FROM check_in_logs c
+    JOIN participants p ON p.id = c.participant_id
+    JOIN events e
+      ON LOWER(TRIM(e.name)) = LOWER(TRIM(c.event_name))
+     AND c.checked_in_at >= DATE(e.starts_at)
+     AND c.checked_in_at < DATE_ADD(DATE(e.starts_at), INTERVAL 1 DAY)
+     AND e.status = 'completed'
+     AND e.starts_at < NOW()
+    WHERE p.participant_type = 'sponsored_child'
+      AND p.status <> 'deleted'
+      AND c.status = 'checked_in'
+      AND c.checked_in_at IS NOT NULL
+      AND c.checked_in_at >= COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at)
+    GROUP BY c.participant_id, e.id
+    ORDER BY MIN(c.checked_in_at) ASC
   `);
   const attendanceHistory = history.map((row) => ({
     participantId: row.participant_id,
@@ -6231,32 +6031,40 @@ async function refreshRiskScores() {
     [validationReport.status, validationReport.modelVersion, JSON.stringify(validationReport)],
   );
   const [participants] = await pool.query(
-    "SELECT id FROM participants WHERE status = 'active'",
+    "SELECT id FROM participants WHERE participant_type = 'sponsored_child' AND status <> 'deleted'",
   );
   const currentFeatures = getCurrentAttendanceFeatures(
     attendanceHistory,
     participants.map((participant) => participant.id),
     evaluatedAt,
   );
+  const recentCounts = new Map();
+  for (const attendance of attendanceHistory) {
+    if (evaluatedAt - attendance.checkedInAt <= 180 * 86400000) {
+      recentCounts.set(
+        String(attendance.participantId),
+        (recentCounts.get(String(attendance.participantId)) || 0) + 1,
+      );
+    }
+  }
+  let refreshed = 0;
   for (const participant of participants) {
     const features = currentFeatures.get(String(participant.id));
-    const trainedProbability = coefficients
-      ? predictInactivityProbability(features, coefficients)
-      : null;
-    const score = trainedProbability === null
-      ? scoreAttendanceBaseline(features[0] * 13, features[1] * 45)
-      : Math.round(trainedProbability * 10000) / 100;
+    if (!coefficients || (recentCounts.get(String(participant.id)) || 0) < 2) continue;
+    const trainedProbability = predictInactivityProbability(features, coefficients);
+    const score = Math.round(trainedProbability * 10000) / 100;
     await pool.execute(
       'INSERT INTO predictive_risk_scores (participant_id, risk_score, risk_level, model_version, computed_at, created_at) VALUES (?, ?, ?, ?, NOW(), NOW())',
       [
         participant.id,
         score,
         score >= 70 ? 'high' : score >= 40 ? 'medium' : 'low',
-        trainedProbability === null ? BASELINE_VERSION : MODEL_VERSION,
+        MODEL_VERSION,
       ],
     );
+    refreshed += 1;
   }
-  return { refreshed: participants.length, validation: validationReport };
+  return { refreshed, validation: validationReport };
 }
 cron.schedule('0 2 * * *', () => refreshRiskScores().catch(console.error));
 cron.schedule('23 * * * *', () => {

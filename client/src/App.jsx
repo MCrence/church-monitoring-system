@@ -2050,7 +2050,7 @@ function ParticipantHistoryPage({ participantId, onBack }) {
                     <span className="attendance-check">{record.endYear || record.startYear}</span>
                     <div>
                       <strong>{record.status} {record.educationLevel}</strong>
-                      <small>{record.schoolName} · {record.startYear} – {record.endYear || (record.status === "Currently Attending" ? "Present" : "End year not recorded")}</small>
+                      <small>{record.schoolName} · {record.startYear} – {record.endYear || (record.status === "Currently Enrolled" ? "Present" : "End year not recorded")}</small>
                       {record.courseStrand && <small>{record.courseStrand}</small>}
                     </div>
                   </li>
@@ -2586,12 +2586,12 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                   value={sortBy}
                   onChange={(event) => setSortBy(event.target.value)}
                 >
-                  <option value="newest">Newest registered</option>
-                  <option value="oldest">Oldest registered</option>
+                  <option value="newest">New</option>
+                  <option value="oldest">Old</option>
                   <option value="name-asc">Name (A–Z)</option>
                   <option value="name-desc">Name (Z–A)</option>
-                  <option value="age-asc">Age (youngest first)</option>
-                  <option value="age-desc">Age (oldest first)</option>
+                  <option value="age-asc">Age +</option>
+                  <option value="age-desc">Age -</option>
                 </select>
               </div>
               <p className="participant-directory-count" role="status">
@@ -4537,7 +4537,6 @@ function Events({ canManage, canImport = false }) {
 }
 function Analytics({ user }) {
   const canExportReports = canAccessPermission("reports:view", user);
-  const canViewSponsorship = canAccessPermission("sponsorship:view", user);
   const isSystemAdmin = String(user?.role).toLowerCase() === "system administrator";
   const dateInput = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   const defaultRangeStart = new Date();
@@ -4545,23 +4544,21 @@ function Analytics({ user }) {
   const [from, setFrom] = useState(dateInput(defaultRangeStart));
   const [to, setTo] = useState(dateInput(new Date()));
   const [educationLevel, setEducationLevel] = useState("");
+  const [participantStatus, setParticipantStatus] = useState("");
   const [overview, setOverview] = useState(null);
-  const [overviewLoading, setOverviewLoading] = useState(true);
+  const [loadedDataKey, setLoadedDataKey] = useState("");
   const [loadError, setLoadError] = useState("");
   const [trendInterval, setTrendInterval] = useState("week");
   const [trendEvent, setTrendEvent] = useState("");
   const [trends, setTrends] = useState([]);
   const [trendEvents, setTrendEvents] = useState([]);
-  const [trendsLoading, setTrendsLoading] = useState(true);
   const trendCanvas = useRef(null);
   const [validation, setValidation] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [riskRows, setRiskRows] = useState([]);
   const [riskLevel, setRiskLevel] = useState("all");
-  const [riskLoading, setRiskLoading] = useState(true);
-  const [sponsoredFilters, setSponsoredFilters] = useState({ educationLevel: "", gradeLevel: "", participationStatus: "", riskLevel: "" });
-  const [sponsoredRows, setSponsoredRows] = useState([]);
-  const [sponsoredLoading, setSponsoredLoading] = useState(true);
+  const [participantRows, setParticipantRows] = useState([]);
+  const [dataRevision, setDataRevision] = useState(0);
   const [history, setHistory] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [reportType, setReportType] = useState("attendance");
@@ -4575,57 +4572,47 @@ function Analytics({ user }) {
   const [decryptBusy, setDecryptBusy] = useState(false);
   const [decryptError, setDecryptError] = useState("");
   const [decryptMessage, setDecryptMessage] = useState("");
+  const dataParams = new URLSearchParams({
+    from,
+    to,
+    interval: trendInterval,
+    educationLevel,
+    status: participantStatus,
+    event: trendEvent,
+    riskLevel,
+  }).toString();
+  const dataRequestKey = `${dataParams}|${dataRevision}`;
+  const overviewLoading = loadedDataKey !== dataRequestKey;
+  const trendsLoading = overviewLoading;
+  const riskLoading = overviewLoading;
 
   useEffect(() => {
     let mounted = true;
-    setOverviewLoading(true);
-    apiCall(`/analytics/overview?from=${from}&to=${to}&educationLevel=${encodeURIComponent(educationLevel)}`)
-      .then((data) => { if (mounted) setOverview(data); })
-      .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
-      .finally(() => { if (mounted) setOverviewLoading(false); });
-    return () => { mounted = false; };
-  }, [from, to, educationLevel]);
-
-  useEffect(() => {
-    let mounted = true;
-    setTrendsLoading(true);
-    apiCall(`/analytics/trends?from=${from}&to=${to}&interval=${trendInterval}&event=${encodeURIComponent(trendEvent)}`)
+    apiCall(`/analytics/data?${dataParams}`)
       .then((data) => {
         if (!mounted) return;
-        setTrends(data.records || []);
-        setTrendEvents(data.events || []);
+        setOverview(data.overview);
+        setTrends(data.trends?.records || []);
+        setTrendEvents(data.trends?.events || []);
+        setParticipantRows(data.participants || []);
+        setRiskRows(data.riskRecords || []);
+        setLoadError("");
       })
       .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
-      .finally(() => { if (mounted) setTrendsLoading(false); });
-    return () => { mounted = false; };
-  }, [from, to, trendInterval, trendEvent]);
-
-  useEffect(() => {
-    let mounted = true;
-    setRiskLoading(true);
-    apiCall(`/analytics/risk?riskLevel=${riskLevel}`)
-      .then((data) => { if (mounted) setRiskRows(data.records || []); })
-      .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
-      .finally(() => { if (mounted) setRiskLoading(false); });
-    return () => { mounted = false; };
-  }, [riskLevel]);
-
-  useEffect(() => {
-    let mounted = true;
-    setSponsoredLoading(true);
-    Promise.all([
-      apiCall("/risk-scores/validation"),
-      ...(canViewSponsorship ? [apiCall(`/analytics/sponsored-children?educationLevel=${encodeURIComponent(sponsoredFilters.educationLevel)}&gradeLevel=${encodeURIComponent(sponsoredFilters.gradeLevel)}&participationStatus=${encodeURIComponent(sponsoredFilters.participationStatus)}&riskLevel=${sponsoredFilters.riskLevel}`)] : []),
-    ])
-      .then(([validationReport, sponsored]) => {
+      .finally(() => {
         if (!mounted) return;
-        setValidation(validationReport);
-        if (canViewSponsorship && sponsored) setSponsoredRows(sponsored.records || []);
-      })
-      .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
-      .finally(() => { if (mounted) setSponsoredLoading(false); });
+        setLoadedDataKey(dataRequestKey);
+      });
     return () => { mounted = false; };
-  }, [canViewSponsorship, sponsoredFilters.educationLevel, sponsoredFilters.gradeLevel, sponsoredFilters.participationStatus, sponsoredFilters.riskLevel]);
+  }, [dataParams, dataRequestKey]);
+
+  useEffect(() => {
+    let mounted = true;
+    apiCall("/risk-scores/validation")
+      .then((report) => { if (mounted) setValidation(report); })
+      .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); });
+    return () => { mounted = false; };
+  }, []);
 
   useEffect(() => {
     if (!history && !historyLoading) return undefined;
@@ -4642,14 +4629,14 @@ function Analytics({ user }) {
   useEffect(() => {
     if (!trendCanvas.current || trends.length === 0) return;
     const chart = new Chart(trendCanvas.current, {
-      type: "line",
+      type: "bar",
       data: {
         labels: trends.map((row) => row.label),
         datasets: [
-          { label: "Elementary", data: trends.map((row) => row.elementaryCheckIns), borderColor: "#2e7dd5", backgroundColor: "rgba(46,125,213,.12)", fill: false, tension: 0.4, borderWidth: 2, pointRadius: 3 },
-          { label: "Junior High School", data: trends.map((row) => row.juniorHighSchoolCheckIns), borderColor: "#16a34a", backgroundColor: "rgba(22,163,74,.12)", fill: false, tension: 0.4, borderWidth: 2, pointRadius: 3 },
-          { label: "Senior High School", data: trends.map((row) => row.seniorHighSchoolCheckIns), borderColor: "#ca8a04", backgroundColor: "rgba(202,138,4,.12)", fill: false, tension: 0.4, borderWidth: 2, pointRadius: 3 },
-          { label: "College", data: trends.map((row) => row.collegeCheckIns), borderColor: "#9333ea", backgroundColor: "rgba(147,51,234,.12)", fill: false, tension: 0.4, borderWidth: 2, pointRadius: 3 },
+          { label: "Present", data: trends.map((row) => row.present), backgroundColor: "#2e7dd5", yAxisID: "attendance" },
+          { label: "Absent", data: trends.map((row) => row.absent), backgroundColor: "#e87979", yAxisID: "attendance" },
+          { label: "Scheduled events", data: trends.map((row) => row.scheduled), backgroundColor: "#9bb4ce", yAxisID: "attendance" },
+          { type: "line", label: "Attendance rate", data: trends.map((row) => row.attendanceRate), borderColor: "#178b63", backgroundColor: "#178b63", yAxisID: "rate", spanGaps: true, tension: 0.25, borderWidth: 2, pointRadius: 2 },
         ],
       },
       options: {
@@ -4657,7 +4644,10 @@ function Analytics({ user }) {
         maintainAspectRatio: false,
         interaction: { mode: "index", intersect: false },
         plugins: { legend: { position: "bottom" } },
-        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+        scales: {
+          attendance: { beginAtZero: true, position: "left", ticks: { precision: 0 }, title: { display: true, text: "Participant-event records" } },
+          rate: { beginAtZero: true, max: 100, position: "right", grid: { drawOnChartArea: false }, title: { display: true, text: "Attendance rate (%)" } },
+        },
       },
     });
     return () => chart.destroy();
@@ -4678,8 +4668,7 @@ function Analytics({ user }) {
     try {
       const report = await apiCall("/risk-scores/refresh", { method: "POST" });
       setValidation(report.validation);
-      const riskData = await apiCall(`/analytics/risk?riskLevel=${riskLevel}`);
-      setRiskRows(riskData.records || []);
+      setDataRevision((revision) => revision + 1);
     } catch (refreshError) {
       setLoadError(refreshError.message);
     } finally {
@@ -4701,10 +4690,10 @@ function Analytics({ user }) {
   };
 
   const trendTotals = trends.reduce((acc, row) => ({
-    totalCheckIns: acc.totalCheckIns + row.totalCheckIns,
-    sponsoredCheckIns: acc.sponsoredCheckIns + row.sponsoredCheckIns,
-    goerCheckIns: acc.goerCheckIns + row.goerCheckIns,
-  }), { totalCheckIns: 0, sponsoredCheckIns: 0, goerCheckIns: 0 });
+    present: acc.present + row.present,
+    absent: acc.absent + row.absent,
+    scheduled: acc.scheduled + row.scheduled,
+  }), { present: 0, absent: 0, scheduled: 0 });
 
   const downloadReport = async () => {
     setExportBusy(true);
@@ -4717,10 +4706,17 @@ function Analytics({ user }) {
         params.set("from", from);
         params.set("to", to);
         params.set("interval", trendInterval);
+        params.set("educationLevel", educationLevel);
+        params.set("status", participantStatus);
         if (trendEvent) params.set("event", trendEvent);
         path = "analytics-attendance";
       } else if (reportType === "at-risk") {
         params.set("riskLevel", riskLevel);
+        params.set("from", from);
+        params.set("to", to);
+        params.set("educationLevel", educationLevel);
+        params.set("status", participantStatus);
+        if (trendEvent) params.set("event", trendEvent);
         path = "at-risk";
       } else if (reportType === "participant-history") {
         if (!exportParticipantId) {
@@ -4798,10 +4794,15 @@ function Analytics({ user }) {
     }
   };
 
-  const educationOptions = [...new Set(sponsoredRows.map((row) => row.educationLevel).filter(Boolean))].sort();
-  const gradeOptions = [...new Set(sponsoredRows.map((row) => row.gradeLevel).filter(Boolean))].sort();
+  const educationOptions = ["Elementary", "High School", "College"];
   const riskFilterOptions = [["all", "All levels"], ["high", "High"], ["medium", "Medium"], ["low", "Low"]];
-  const participationStatusOptions = [["", "Any status"], ...PARTICIPATION_STATUSES.map(({ value, label }) => [value, label])];
+  const participationStatusOptions = [
+    ["", "All statuses"],
+    ["ACTIVE", "Active"],
+    ["WARNING", "Warning (Second Chance)"],
+    ["GROUNDS_FOR_DEPARTURE", "Grounds for Departure"],
+    ["REMOVED_FROM_SPONSORSHIP", "Inactive"],
+  ];
   return (
     <>
       <Title
@@ -4819,8 +4820,8 @@ function Analytics({ user }) {
       <section className="surface analytics-section">
         <div className="analytics-section-heading">
           <div>
-            <h2>Overview</h2>
-            <p className="analytics-section-sub">Live statistics for the selected range and participant group.</p>
+            <h2>Analytics overview</h2>
+            <p className="analytics-section-sub">Sponsored-child participants only. Counts include active, warning, grounds for departure, and inactive children unless filtered.</p>
           </div>
           <div className="analytics-filters">
             <div className="analytics-filter-field">
@@ -4835,7 +4836,24 @@ function Analytics({ user }) {
               <label className="form-label" htmlFor="analytics-education">Education level</label>
               <select id="analytics-education" className="form-select" value={educationLevel} onChange={(event) => setEducationLevel(event.target.value)}>
                 <option value="">All education levels</option>
-                {EDUCATION_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
+                {educationOptions.map((level) => <option key={level} value={level}>{level}</option>)}
+              </select>
+            </div>
+            <div className="analytics-filter-field">
+              <label className="form-label" htmlFor="analytics-status">Participant status</label>
+              <select id="analytics-status" className="form-select" value={participantStatus} onChange={(event) => setParticipantStatus(event.target.value)}>
+                {participationStatusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}
+              </select>
+            </div>
+            <div className="analytics-filter-field">
+              <label className="form-label" htmlFor="analytics-event">Completed event</label>
+              <select id="analytics-event" className="form-select" value={trendEvent} onChange={(event) => setTrendEvent(event.target.value)}>
+                <option value="">All completed events</option>
+                {trendEvents.map((event) => (
+                  <option key={event.id} value={event.id}>
+                    {`${event.name} · ${new Date(event.startsAt).toLocaleDateString()}`}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
@@ -4844,17 +4862,21 @@ function Analytics({ user }) {
           <div className="analytics-stat-card">
             <span className="analytics-stat-label">Total participants</span>
             <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? formatCount(overview.totalParticipants) : "0")}</strong>
-            <span className="analytics-stat-sub">Active in the selected scope</span>
+            <span className="analytics-stat-sub">
+              {participantStatus
+                ? `Filtered to ${PARTICIPATION_STATUS_LABELS[participantStatus] || participantStatus}`
+                : `All statuses · A ${formatCount(overview?.statusCounts?.ACTIVE)} · W ${formatCount(overview?.statusCounts?.WARNING)} · G ${formatCount(overview?.statusCounts?.GROUNDS_FOR_DEPARTURE)} · I ${formatCount(overview?.statusCounts?.INACTIVE)}`}
+            </span>
           </div>
           <div className="analytics-stat-card">
             <span className="analytics-stat-label">Attendance rate</span>
-            <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? `${Number(overview.attendanceRate) || 0}%` : "0%")}</strong>
-            <span className="analytics-stat-sub">Unique participants who attended</span>
+            <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview?.attendanceRate === null ? "N/A" : `${Number(overview?.attendanceRate) || 0}%`)}</strong>
+            <span className="analytics-stat-sub">Present ÷ completed scheduled participant-events</span>
           </div>
           <div className="analytics-stat-card">
             <span className="analytics-stat-label">Recorded check-ins</span>
             <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? formatCount(overview.totalCheckIns) : "0")}</strong>
-            <span className="analytics-stat-sub">In the selected range</span>
+            <span className="analytics-stat-sub">Valid sponsored-child check-ins in range</span>
           </div>
           <div className="analytics-stat-card analytics-stat-alert">
             <span className="analytics-stat-label">At-risk sponsored children</span>
@@ -4862,25 +4884,13 @@ function Analytics({ user }) {
             <span className="analytics-stat-sub">Medium or high predictive risk</span>
           </div>
         </div>
-        {overview && (
-          <div className="analytics-split">
-            <div className="analytics-split-item">
-              <strong>{formatCount(overview?.sponsored?.checkIns)}</strong>
-              <span>Sponsored-child check-ins ({formatCount(overview?.sponsored?.uniqueParticipants)} unique)</span>
-            </div>
-            <div className="analytics-split-item">
-              <strong>{formatCount(overview?.goers?.checkIns)}</strong>
-              <span>Church goer check-ins ({formatCount(overview?.goers?.uniqueParticipants)} unique)</span>
-            </div>
-          </div>
-        )}
       </section>
 
       <section className="surface analytics-section">
         <div className="analytics-section-heading">
           <div>
             <h2>Attendance trends</h2>
-            <p className="analytics-section-sub">Daily, weekly, monthly, and yearly attendance broken down by education level.</p>
+            <p className="analytics-section-sub">Present and absent records from completed events, limited to sponsored children.</p>
           </div>
           <div className="analytics-filters">
             <div className="analytics-filter-field">
@@ -4892,31 +4902,51 @@ function Analytics({ user }) {
                 <option value="year">Yearly</option>
               </select>
             </div>
-            <div className="analytics-filter-field">
-              <label className="form-label" htmlFor="analytics-event">Event</label>
-              <select id="analytics-event" className="form-select" value={trendEvent} onChange={(event) => setTrendEvent(event.target.value)}>
-                <option value="">All events</option>
-                {trendEvents.map((name) => <option key={name} value={name}>{name}</option>)}
-              </select>
-            </div>
           </div>
         </div>
         {trendsLoading ? (
           <div className="analytics-empty">Loading attendance trends…</div>
-        ) : trends.length === 0 ? (
-          <div className="analytics-empty">No attendance records found for the selected filters.</div>
+        ) : trendTotals.scheduled === 0 ? (
+          <div className="analytics-empty">Insufficient attendance history: no completed scheduled events match the selected filters.</div>
         ) : (
           <>
             <div className="analytics-trend-summary">
-              <div><strong>{formatCount(trendTotals.totalCheckIns)}</strong><span>Total attendance</span></div>
-              <div><strong>{overview ? formatCount(overview.uniqueParticipants) : "—"}</strong><span>Unique participants</span></div>
-              <div><strong>{formatCount(trendTotals.sponsoredCheckIns)}</strong><span>Sponsored-child check-ins</span></div>
+              <div><strong>{formatCount(trendTotals.present)}</strong><span>Total present</span></div>
+              <div><strong>{formatCount(trendTotals.absent)}</strong><span>Total absent</span></div>
+              <div><strong>{formatCount(trendTotals.scheduled)}</strong><span>Scheduled participant-events</span></div>
+              <div><strong>{overview?.attendanceRate == null ? "N/A" : `${overview.attendanceRate}%`}</strong><span>Attendance rate</span></div>
             </div>
             <div className="analytics-chart-wrap">
               <canvas ref={trendCanvas} />
             </div>
           </>
         )}
+      </section>
+
+      <section className="surface analytics-section">
+        <div className="analytics-section-heading">
+          <div>
+            <h2>Education level comparison</h2>
+            <p className="analytics-section-sub">Actual completed event attendance in the selected date range.</p>
+          </div>
+        </div>
+        <div className="analytics-table-wrap">
+          <table className="analytics-table">
+            <thead><tr><th>Education level</th><th>Participants</th><th>Scheduled</th><th>Present</th><th>Absent</th><th>Attendance rate</th></tr></thead>
+            <tbody>
+              {(overview?.educationComparison || []).map((row) => (
+                <tr key={row.educationLevel}>
+                  <td>{row.educationLevel}</td>
+                  <td>{formatCount(row.participants)}</td>
+                  <td>{formatCount(row.scheduled)}</td>
+                  <td>{formatCount(row.present)}</td>
+                  <td>{formatCount(row.absent)}</td>
+                  <td>{row.attendanceRate == null ? "N/A" : `${row.attendanceRate}%`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section className="surface analytics-section">
@@ -4986,38 +5016,37 @@ function Analytics({ user }) {
               <thead>
                 <tr>
                   <th>Participant</th>
-                  <th>Type</th>
-                  <th>Score</th>
-                  <th>Level</th>
-                  <th>Trend</th>
-                  <th>Evidence</th>
+                  <th>Education</th>
+                  <th>Attendance rate</th>
+                  <th>Recent attendance pattern</th>
+                  <th>Predicted risk</th>
+                  <th>Risk level</th>
+                  <th>Current attendance status</th>
+                  <th>Recommended staff action</th>
                 </tr>
               </thead>
               <tbody>
                 {riskRows.map((row) => (
                   <tr key={row.participantId}>
                     <td>
-                      <strong>{row.participantCode}</strong>
-                      {row.gradeLevel && <small>{row.gradeLevel}</small>}
+                      <strong>{row.participantName}</strong>
+                      <small>ID {row.participantId}{row.participantCode ? ` · ${row.participantCode}` : ""}</small>
                     </td>
-                    <td>{row.participantType === "sponsored_child" ? "Sponsored child" : "Church goer"}</td>
-                    <td><strong>{Number(row.riskScore).toFixed(0)}</strong></td>
-                    <td><Badge level={row.riskLevel} /></td>
-                    <td>
-                      <span className={`trend-badge trend-${row.trend}`}>{row.trend === "unknown" ? "Unknown" : row.trend}</span>
-                    </td>
+                    <td>{row.educationLevel || "—"}</td>
+                    <td>{row.attendanceRate == null ? "N/A" : `${row.attendanceRate}%`}</td>
                     <td>
                       {row.insufficientData ? (
-                        <span className="insufficient-badge">Insufficient data</span>
+                        <span className="insufficient-badge">Insufficient Data</span>
                       ) : (
-                        <span className="evidence-text" title={row.summary}>{row.summary}</span>
-                      )}
-                      {!row.insufficientData && (
-                        <small className="evidence-meta">
-                          {row.checkInsPerWeek}/week · {row.regularity}% regularity · last check-in {row.recencyDays}d ago · {row.modelVersion}
-                        </small>
+                        <span className="evidence-text" title={row.summary}>
+                          {row.trend} · {row.checkInsPerWeek} present events/week · last present {row.recencyDays} days ago
+                        </span>
                       )}
                     </td>
+                    <td>{row.riskScore == null ? "Insufficient Data" : `${Number(row.riskScore).toFixed(0)}%`}</td>
+                    <td>{row.riskLevel === "insufficient_data" ? <span className="insufficient-badge">Insufficient Data</span> : <Badge level={row.riskLevel} />}</td>
+                    <td>{PARTICIPATION_STATUS_LABELS[row.participationStatus] || row.participationStatus}</td>
+                    <td>{row.recommendedAction}</td>
                   </tr>
                 ))}
               </tbody>
@@ -5026,89 +5055,57 @@ function Analytics({ user }) {
         )}
       </section>
 
-      {canViewSponsorship && (
-        <section className="surface analytics-section">
-          <div className="analytics-section-heading">
-            <div>
-              <h2>Sponsored-child analytics</h2>
-              <p className="analytics-section-sub">Monthly activity compliance and yearly absence summaries for each sponsored child.</p>
-            </div>
-            <div className="analytics-filters">
-              <div className="analytics-filter-field">
-                <label className="form-label" htmlFor="sponsored-education">Education year</label>
-                <select id="sponsored-education" className="form-select" value={sponsoredFilters.educationLevel} onChange={(event) => setSponsoredFilters({ ...sponsoredFilters, educationLevel: event.target.value })}>
-                  <option value="">All education years</option>
-                  {educationOptions.map((level) => <option key={level} value={level}>{level}</option>)}
-                </select>
-              </div>
-              <div className="analytics-filter-field">
-                <label className="form-label" htmlFor="sponsored-grade">Grade level</label>
-                <select id="sponsored-grade" className="form-select" value={sponsoredFilters.gradeLevel} onChange={(event) => setSponsoredFilters({ ...sponsoredFilters, gradeLevel: event.target.value })}>
-                  <option value="">All grade levels</option>
-                  {gradeOptions.map((grade) => <option key={grade} value={grade}>{grade}</option>)}
-                </select>
-              </div>
-              <div className="analytics-filter-field">
-                <label className="form-label" htmlFor="sponsored-status">Participation status</label>
-                <select id="sponsored-status" className="form-select" value={sponsoredFilters.participationStatus} onChange={(event) => setSponsoredFilters({ ...sponsoredFilters, participationStatus: event.target.value })}>
-                  {participationStatusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}
-                </select>
-              </div>
-              <div className="analytics-filter-field">
-                <label className="form-label" htmlFor="sponsored-risk">Risk level</label>
-                <select id="sponsored-risk" className="form-select" value={sponsoredFilters.riskLevel} onChange={(event) => setSponsoredFilters({ ...sponsoredFilters, riskLevel: event.target.value })}>
-                  {riskFilterOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                </select>
-              </div>
-            </div>
+      <section className="surface analytics-section">
+        <div className="analytics-section-heading">
+          <div>
+            <h2>Participant attendance history</h2>
+            <p className="analytics-section-sub">Each row is one sponsored child. Attendance totals use completed events and unique participant-event records in the selected range.</p>
           </div>
-          {sponsoredLoading ? (
-            <div className="analytics-empty">Loading sponsored-child analytics…</div>
-          ) : sponsoredRows.length === 0 ? (
-            <div className="analytics-empty">No sponsored children match the selected filters.</div>
-          ) : (
-            <div className="analytics-table-wrap">
-              <table className="analytics-table">
-                <thead>
-                  <tr>
-                    <th>Child</th>
-                    <th>Education</th>
-                    <th>Grade</th>
-                    <th>Monthly attendance</th>
-                    <th>Attended</th>
-                    <th>Absent</th>
-                    <th>Yearly absences</th>
-                    <th>Current status</th>
-                    <th>Risk</th>
-                    <th aria-label="Actions" />
+        </div>
+        {overviewLoading ? (
+          <div className="analytics-empty">Loading participant attendance history…</div>
+        ) : participantRows.length === 0 ? (
+          <div className="analytics-empty">No sponsored-child participants match the selected filters.</div>
+        ) : (
+          <div className="analytics-table-wrap">
+            <table className="analytics-table">
+              <thead>
+                <tr>
+                  <th>Participant</th>
+                  <th>Participant ID</th>
+                  <th>Education level</th>
+                  <th>Registration date</th>
+                  <th>Scheduled</th>
+                  <th>Present</th>
+                  <th>Absent</th>
+                  <th>Attendance rate</th>
+                  <th>Current status</th>
+                  <th aria-label="Actions" />
+                </tr>
+              </thead>
+              <tbody>
+                {participantRows.map((row) => (
+                  <tr key={row.id}>
+                    <td><strong>{row.name}</strong>{row.inactiveReason && <small>{row.inactiveReason}</small>}</td>
+                    <td>{row.id}{row.participantCode ? ` · ${row.participantCode}` : ""}</td>
+                    <td>{row.educationLevel || "—"}</td>
+                    <td>{row.registrationDate ? new Date(row.registrationDate).toLocaleDateString() : "—"}</td>
+                    <td>{formatCount(row.scheduled)}</td>
+                    <td>{formatCount(row.present)}</td>
+                    <td>{formatCount(row.absent)}</td>
+                    <td>{row.attendanceRate == null ? "N/A" : `${row.attendanceRate}%`}</td>
+                    <td>
+                      <span className="status-pill">{PARTICIPATION_STATUS_LABELS[row.participationStatus] || row.participationStatus}</span>
+                      {row.secondChance && <small>Second Chance</small>}
+                    </td>
+                    <td><button className="btn btn-sm btn-outline-dark" type="button" onClick={() => openHistory(row.id)}>Full history</button></td>
                   </tr>
-                </thead>
-                <tbody>
-                  {sponsoredRows.map((row) => (
-                    <tr key={row.id}>
-                      <td>
-                        <strong>{row.name}</strong>
-                        <small>{row.participantCode}</small>
-                      </td>
-                      <td>{row.educationLevel || "—"}</td>
-                      <td>{row.gradeLevel || "—"}</td>
-                      <td>{row.monthly.key}</td>
-                      <td>{row.monthly.attended} / {row.monthly.required}</td>
-                      <td>{row.monthly.absent}</td>
-                      <td>{row.lifetime.absent}</td>
-                      <td><span className="status-pill">{PARTICIPATION_STATUS_LABELS[row.participationStatus] || row.participationStatus}</span></td>
-                      <td>{row.riskScore === null ? <span className="insufficient-badge">Not scored</span> : <Badge level={row.riskLevel} />}</td>
-                      <td>
-                        <button className="btn btn-sm btn-outline-dark" type="button" onClick={() => openHistory(row.id)}>History</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       {canExportReports && (
         <section className="surface analytics-section">
@@ -5137,14 +5134,10 @@ function Analytics({ user }) {
               {reportType === "participant-history" && (
                 <div className="analytics-filter-field">
                   <label className="form-label" htmlFor="report-participant">Participant</label>
-                  {canViewSponsorship && sponsoredRows.length > 0 ? (
-                    <select id="report-participant" className="form-select" value={exportParticipantId} onChange={(event) => setExportParticipantId(event.target.value)}>
-                      <option value="">Select a child</option>
-                      {sponsoredRows.map((row) => <option key={row.id} value={row.id}>{row.name} ({row.participantCode})</option>)}
-                    </select>
-                  ) : (
-                    <input id="report-participant" className="form-control" type="number" min="1" value={exportParticipantId} onChange={(event) => setExportParticipantId(event.target.value)} placeholder="Participant ID" />
-                  )}
+                  <select id="report-participant" className="form-select" value={exportParticipantId} onChange={(event) => setExportParticipantId(event.target.value)}>
+                    <option value="">Select a sponsored child</option>
+                    {participantRows.map((row) => <option key={row.id} value={row.id}>{row.name} (ID {row.id})</option>)}
+                  </select>
                 </div>
               )}
               <div className="analytics-filter-field">
@@ -5161,9 +5154,9 @@ function Analytics({ user }) {
           </div>
           {exportError && <div className="alert alert-danger" role="alert">{exportError}</div>}
           <div className="analytics-export-note">
-            {reportType === "attendance" && `Uses the selected range (${from} to ${to}), participant type, interval, and event filters.`}
-            {reportType === "at-risk" && `Includes participant codes, risk scores, and supporting evidence for ${riskLevel === "all" ? "all risk levels" : `${riskLevel} risk`}.`}
-            {reportType === "participant-history" && "Includes one participant's complete check-in history with names, events, locations, and check-out times."}
+            {reportType === "attendance" && `Uses the selected range (${from} to ${to}), sponsored-child education/status, interval, and completed-event filters.`}
+            {reportType === "at-risk" && `Includes sponsored children and validated risk evidence for ${riskLevel === "all" ? "all risk levels" : `${riskLevel} risk`}.`}
+            {reportType === "participant-history" && "Includes one sponsored child's completed-event attendance history and monthly/yearly summaries."}
             {reportType === "audit-trail" && "System audit trail is restricted to System Administrators and includes the 5,000 most recent entries."}
             {reportPassword ? "This export will be encrypted with AES-256-GCM (PBKDF2-derived key) and downloaded as a .enc file." : "Leave the password blank to download an unencrypted file."}
           </div>
@@ -5197,7 +5190,7 @@ function Analytics({ user }) {
               <div>
                 <span className="eyebrow">PARTICIPANT / ATTENDANCE HISTORY</span>
                 <h2 id="history-title">{history ? history.participant.name : "Attendance history"}</h2>
-                <p>{history ? `${history.participant.participantCode} · ${history.participant.participantType === "sponsored_child" ? "Sponsored child" : "Church goer"}${history.participant.gradeLevel ? ` · ${history.participant.gradeLevel}` : ""}` : "Loading attendance history…"}</p>
+                <p>{history ? `ID ${history.participant.id}${history.participant.participantCode ? ` · ${history.participant.participantCode}` : ""} · ${history.participant.educationLevel || "Education level not recorded"} · Registered ${history.participant.registrationDate ? new Date(history.participant.registrationDate).toLocaleDateString() : "—"}` : "Loading attendance history…"}</p>
               </div>
               <button type="button" className="btn-close" aria-label="Close attendance history" onClick={() => { setHistory(null); setHistoryLoading(false); }} />
             </header>
@@ -5206,30 +5199,61 @@ function Analytics({ user }) {
             ) : history && (
               <>
                 <div className="analytics-trend-summary">
-                  <div><strong>{formatCount(history?.summary?.totalCheckIns)}</strong><span>Total check-ins</span></div>
-                  <div><strong>{formatCount(history?.summary?.uniqueEvents)}</strong><span>Unique events</span></div>
+                  <div><strong>{formatCount(history?.summary?.totalScheduledEvents)}</strong><span>Scheduled completed events</span></div>
+                  <div><strong>{formatCount(history?.summary?.totalPresent)}</strong><span>Present</span></div>
+                  <div><strong>{formatCount(history?.summary?.totalAbsent)}</strong><span>Absent</span></div>
+                  <div><strong>{history?.summary?.attendanceRate == null ? "N/A" : `${history.summary.attendanceRate}%`}</strong><span>Attendance rate</span></div>
+                  <div><strong>{PARTICIPATION_STATUS_LABELS[history?.participant?.status] || history?.participant?.status}</strong><span>Current status</span></div>
                   <div><strong>{history.summary.lastCheckIn ? new Date(history.summary.lastCheckIn).toLocaleDateString() : "—"}</strong><span>Last check-in</span></div>
-                  <div><strong>{history.summary.firstCheckIn ? new Date(history.summary.firstCheckIn).toLocaleDateString() : "—"}</strong><span>First check-in</span></div>
                 </div>
+                <h3 className="h6 mt-3">Monthly attendance</h3>
+                <div className="analytics-table-wrap analytics-history-table">
+                  <table className="analytics-table">
+                    <thead><tr><th>Month</th><th>Scheduled</th><th>Present</th><th>Absent</th><th>Attendance rate</th><th>Current status</th></tr></thead>
+                    <tbody>
+                      {history.monthly.map((row) => (
+                        <tr key={row.key}>
+                          <td>{new Date(row.year, row.month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" })}</td>
+                          <td>{row.scheduled}</td><td>{row.present}</td><td>{row.absent}</td>
+                          <td>{row.attendanceRate == null ? "N/A" : `${row.attendanceRate}%`}</td>
+                          <td>{PARTICIPATION_STATUS_LABELS[history.participant.status] || history.participant.status}</td>
+                        </tr>
+                      ))}
+                      {!history.monthly.length && <tr><td colSpan="6">No completed event history.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+                <h3 className="h6 mt-3">Yearly attendance</h3>
+                <div className="analytics-table-wrap analytics-history-table">
+                  <table className="analytics-table">
+                    <thead><tr><th>Year</th><th>Scheduled</th><th>Present</th><th>Absent</th><th>Attendance rate</th></tr></thead>
+                    <tbody>
+                      {history.yearly.map((row) => (
+                        <tr key={row.year}><td>{row.year}</td><td>{row.scheduled}</td><td>{row.present}</td><td>{row.absent}</td><td>{row.attendanceRate == null ? "N/A" : `${row.attendanceRate}%`}</td></tr>
+                      ))}
+                      {!history.yearly.length && <tr><td colSpan="5">No completed event history.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+                <h3 className="h6 mt-3">Completed event records</h3>
                 <div className="analytics-table-wrap analytics-history-table">
                   <table className="analytics-table">
                     <thead>
                       <tr>
-                        <th>Checked in</th>
+                        <th>Event date</th>
                         <th>Event</th>
-                        <th>Location</th>
-                        <th>Checked out</th>
+                        <th>Attendance</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {history.attendance.map((row, index) => (
-                        <tr key={`${row.checkedInAt}-${index}`}>
-                          <td>{row.checkedInAt ? new Date(row.checkedInAt).toLocaleString() : "—"}</td>
+                      {history.attendance.map((row) => (
+                        <tr key={row.eventId}>
+                          <td>{new Date(row.startsAt).toLocaleString()}</td>
                           <td>{row.eventName}</td>
-                          <td>{row.location || "—"}</td>
-                          <td>{row.checkedOutAt ? new Date(row.checkedOutAt).toLocaleString() : <span className="text-secondary">Not checked out</span>}</td>
+                          <td>{row.status === "present" ? "Present" : "Absent"}</td>
                         </tr>
                       ))}
+                      {!history.attendance.length && <tr><td colSpan="3">No completed event history.</td></tr>}
                     </tbody>
                   </table>
                 </div>
