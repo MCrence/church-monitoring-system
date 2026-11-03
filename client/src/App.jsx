@@ -1485,6 +1485,13 @@ const IMPORT_FIELDS = {
     ["eventDate", "Event Date"],
     ["attendanceStatus", "Attendance Status"],
   ],
+  events: [
+    ["eventName", "Event Name"],
+    ["eventDescription", "Description"],
+    ["eventStart", "Starts At"],
+    ["eventEnd", "Ends At"],
+    ["eventLocation", "Location"],
+  ],
   attendanceSummary: [
     ["participantIdentifier", "Participant ID"],
     ["year", "Year"],
@@ -1523,6 +1530,10 @@ const IMPORT_ALIASES = {
   eventId: ["event id"],
   eventName: ["event name", "event"],
   eventDate: ["event date", "attendance date", "date"],
+  eventDescription: ["description", "event description"],
+  eventStart: ["starts at", "start date", "start time", "event start", "event starts at"],
+  eventEnd: ["ends at", "end date", "end time", "event end", "event ends at"],
+  eventLocation: ["location", "event location"],
   attendanceStatus: ["attendance status", "status", "attendance"],
   year: ["year", "attendance year"],
   required: ["required", "required activities"],
@@ -1550,8 +1561,8 @@ function csvDownload(fileName, rows) {
   URL.revokeObjectURL(url);
 }
 
-function ImportDataModal({ onClose, onCompleted }) {
-  const [importType, setImportType] = useState("participants");
+function ImportDataModal({ onClose, onCompleted, initialImportType = "participants" }) {
+  const [importType, setImportType] = useState(initialImportType);
   const [file, setFile] = useState(null);
   const [worksheet, setWorksheet] = useState(null);
   const [mapping, setMapping] = useState([]);
@@ -1626,6 +1637,12 @@ function ImportDataModal({ onClose, onCompleted }) {
       for (const field of ["dateOfBirth", "registrationDate", "sponsorshipRegistrationDate", "eventDate"]) {
         if (row[field]) row[field] = normalizeImportDate(row[field]);
       }
+      for (const field of ["eventStart", "eventEnd"]) {
+        if (row[field]) {
+          const dateTime = row[field].match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+          if (dateTime) row[field] = `${dateTime[1]} ${dateTime[2]}:${dateTime[3]}:${dateTime[4] || "00"}`;
+        }
+      }
       for (const field of ["eventId", "startYear", "endYear"]) {
         if (row[field] !== undefined && row[field] !== "") row[field] = String(row[field]).trim();
       }
@@ -1680,7 +1697,9 @@ function ImportDataModal({ onClose, onCompleted }) {
   const downloadTemplate = (type) => {
     const fields = IMPORT_FIELDS[type].map(([, label]) => label);
     const name = type === "participants" ? "participant-template.csv"
-      : type === "education" ? "education-history-template.csv" : "attendance-template.csv";
+      : type === "education" ? "education-history-template.csv"
+        : type === "events" ? "events-template.csv"
+          : type === "attendanceSummary" ? "attendance-summary-template.csv" : "attendance-template.csv";
     csvDownload(name, [fields]);
   };
   const downloadErrors = () => {
@@ -1688,7 +1707,7 @@ function ImportDataModal({ onClose, onCompleted }) {
     const rows = [["Row", "Errors", "Warnings"]];
     preview.rows.filter((row) => !row.valid || row.warnings.length)
       .forEach((row) => rows.push([row.rowNumber, row.errors.join("; "), row.warnings.join("; ")]));
-    csvDownload("participant-import-errors.csv", rows);
+    csvDownload("data-import-errors.csv", rows);
   };
 
   return createPortal(
@@ -1698,7 +1717,7 @@ function ImportDataModal({ onClose, onCompleted }) {
       <section className="participant-modal" role="dialog" aria-modal="true" aria-labelledby="participant-import-title">
         <header className="d-flex justify-content-between align-items-start gap-3 mb-4">
           <div>
-            <span className="eyebrow">PARTICIPANTS / IMPORT</span>
+            <span className="eyebrow">DATA / IMPORT</span>
             <h2 id="participant-import-title">Import Data</h2>
             <p className="text-secondary mb-0">Supported formats: Excel (.xlsx, .xls) and CSV (.csv). Maximum file size: 5 MB.</p>
           </div>
@@ -1713,6 +1732,7 @@ function ImportDataModal({ onClose, onCompleted }) {
             <p className="mb-1">Attendance records imported: {result.attendanceImported}</p>
             <p className="mb-1">Historical attendance summaries imported: {result.attendanceSummariesImported}</p>
             <p className="mb-1">Education records imported: {result.educationImported}</p>
+            <p className="mb-1">Events imported: {result.eventsImported}</p>
             <p className="mb-0">Skipped: {result.skipped} · Errors: {result.failed}</p>
           </div>
         ) : (
@@ -1722,6 +1742,7 @@ function ImportDataModal({ onClose, onCompleted }) {
                 <label className="form-label" htmlFor="participant-import-type">Import type</label>
                 <select id="participant-import-type" className="form-select" value={importType} onChange={(event) => chooseImportType(event.target.value)}>
                   <option value="participants">Participant information</option>
+                  <option value="events">Events</option>
                   <option value="education">Education history</option>
                   <option value="attendance">Detailed attendance records</option>
                   <option value="attendanceSummary">Historical attendance summary</option>
@@ -1734,6 +1755,7 @@ function ImportDataModal({ onClose, onCompleted }) {
             </div>
             <div className="d-flex flex-wrap gap-2 mb-4">
               <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("participants")}>Download Participant Template</button>
+              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("events")}>Download Events Template</button>
               <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("education")}>Download Education History Template</button>
               <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("attendance")}>Download Attendance Template</button>
               <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("attendanceSummary")}>Download Attendance Summary Template</button>
@@ -1802,7 +1824,7 @@ function ImportDataModal({ onClose, onCompleted }) {
             <div className="table-responsive"><table className="table table-sm">
               <thead><tr><th>File</th><th>Imported by</th><th>Date</th><th>Type</th><th>Records</th><th>Failed</th></tr></thead>
               <tbody>{history.map((item) => (
-                <tr key={item.id}><td>{item.file_name}</td><td>{item.imported_by_name}</td><td>{formatParticipantHistoryDate(item.created_at)}</td><td>{item.import_type}</td><td>{Number(item.participants_imported) + Number(item.participants_updated) + Number(item.attendance_imported) + Number(item.attendance_summaries_imported) + Number(item.education_imported)}</td><td>{item.failed}</td></tr>
+                <tr key={item.id}><td>{item.file_name}</td><td>{item.imported_by_name}</td><td>{formatParticipantHistoryDate(item.created_at)}</td><td>{item.import_type}</td><td>{Number(item.participants_imported) + Number(item.participants_updated) + Number(item.attendance_imported) + Number(item.attendance_summaries_imported) + Number(item.education_imported) + Number(item.events_imported)}</td><td>{item.failed}</td></tr>
               ))}</tbody>
             </table></div>
           ) : <p className="text-secondary">No previous imports.</p>}
@@ -3482,7 +3504,8 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
   const participation = child.participation;
   const months = participation?.months || [];
   const monthly = participation?.monthly;
-  const monthlyComplete = Boolean(monthly?.required > 0 && monthly.attended >= monthly.required);
+  const noScheduledActivities = monthly?.required === 0;
+  const monthlyComplete = Boolean(noScheduledActivities || monthly?.attended >= monthly?.required);
   const status = participation?.status || "WARNING";
   const statusClass = status.toLowerCase().replaceAll("_", "-");
   const statusDetails = {
@@ -3646,9 +3669,11 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
               <span style={{ width: `${monthly?.required ? Math.min(100, (monthly.attended / monthly.required) * 100) : 0}%` }} />
             </div>
             <p className={`guardian-requirement-message ${monthlyComplete ? "complete" : "incomplete"}`}>
-              <strong>{monthlyComplete ? "✓ Monthly requirement completed" : "⚠ Monthly requirement not completed"}</strong>
-              <span>{monthlyComplete
-                ? `Your child attended the required ${monthly?.required} activities this month.`
+              <strong>{noScheduledActivities ? "No activities scheduled" : monthlyComplete ? "✓ Monthly requirement completed" : "⚠ Monthly requirement not completed"}</strong>
+              <span>{noScheduledActivities
+                ? "No activities were scheduled this month, so there are no absences to record."
+                : monthlyComplete
+                  ? `Your child attended the required ${monthly?.required} activities this month.`
                 : `Your child needs to attend ${Math.max(0, (monthly?.required ?? 0) - (monthly?.attended ?? 0))} more ${Math.max(0, (monthly?.required ?? 0) - (monthly?.attended ?? 0)) === 1 ? "activity" : "activities"} to meet this month's requirement.`}</span>
             </p>
             {(monthly?.absent ?? 0) > 0 && <p className="guardian-absence-note">Your child has {monthly.absent} recorded {monthly.absent === 1 ? "absence" : "absences"} this month.</p>}
@@ -4233,7 +4258,7 @@ function encodeEventPhotos(files) {
   })));
 }
 
-function Events({ canManage }) {
+function Events({ canManage, canImport = false }) {
   const [events, setEvents] = useState([]);
   const [selected, setSelected] = useState(null);
   const [attendance, setAttendance] = useState([]);
@@ -4246,6 +4271,7 @@ function Events({ canManage }) {
   const [uploadPhotoError, setUploadPhotoError] = useState("");
   const [message, setMessage] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [savingEvent, setSavingEvent] = useState(false);
   const [form, setForm] = useState({ name: "", description: "", startsAt: "", endsAt: "", location: "" });
   const createPhotoInput = useRef(null);
@@ -4394,6 +4420,11 @@ function Events({ canManage }) {
       {canManage && (
         <button type="button" className="event-create-btn" onClick={() => setShowCreate(true)}>
           <span className="event-create-btn-icon" aria-hidden="true">＋</span> Create event
+        </button>
+      )}
+      {canImport && (
+        <button type="button" className="btn btn-outline-primary" onClick={() => setShowImport(true)}>
+          Import events
         </button>
       )}
     </div>
@@ -4551,6 +4582,13 @@ function Events({ canManage }) {
         </section>
       </div>,
       document.body,
+    )}
+    {showImport && (
+      <ImportDataModal
+        initialImportType="events"
+        onClose={() => setShowImport(false)}
+        onCompleted={load}
+      />
     )}
   </>;
 }
@@ -5664,7 +5702,7 @@ function SponsoredCare({ user, onViewHistory }) {
       <section className="sponsorship-summary-grid participation-summary-grid" aria-label="Participation overview">
         {[
           ["Active children", children.filter((entry) => entry.status === "ACTIVE").length],
-          ["Meeting monthly requirements", children.filter((entry) => entry.monthly.attended >= 2).length],
+          ["Meeting monthly requirements", children.filter((entry) => entry.monthly.required > 0 && entry.monthly.attended >= entry.monthly.required).length],
           ["Attendance warnings", children.filter((entry) => entry.status === "WARNING").length],
           ["Grounds for departure", children.filter((entry) => entry.status === "GROUNDS_FOR_DEPARTURE").length],
           ["Second chance", children.filter((entry) => entry.status === "SECOND_CHANCE").length],
@@ -5763,7 +5801,7 @@ function SponsoredCare({ user, onViewHistory }) {
             <section className="surface participation-month-card">
               <div className="participant-history-section-heading">
                 <div><span className="sponsorship-section-eyebrow">MONTHLY ACTIVITY</span><h3>{monthly.key}</h3></div>
-                <span className={`participation-status-badge ${statusClass(monthly.status)}`}>{monthly.status === "ACTIVE" ? "Compliant" : "Warning"}</span>
+                <span className={`participation-status-badge ${statusClass(monthly.status)}`}>{monthly.required === 0 ? "No events scheduled" : monthly.status === "ACTIVE" ? "Compliant" : "Warning"}</span>
               </div>
               <div className="participation-number-grid">
                 {[["Required activities", monthly.required], ["Attended", monthly.attended], ["Absent", monthly.absent], ["Attendance", `${monthly.attendanceRate}%`]].map(([label, value]) => (
@@ -6908,7 +6946,7 @@ function App() {
       />
     ),
     participantHistory: <ParticipantHistoryPage key={participantHistoryId} participantId={participantHistoryId} onBack={backToParticipants} />,
-    events: <Events canManage={canAccessPermission("events:manage", user)} />,
+    events: <Events canManage={canAccessPermission("events:manage", user)} canImport={isAdmin} />,
     scanner: <Scanner user={user} />,
     sponsorship: <SponsoredCare user={user} onViewHistory={openParticipantHistory} />,
     analytics: <Analytics user={user} />,
