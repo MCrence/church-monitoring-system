@@ -32,6 +32,7 @@ const {
 } = require('./utils/participant-utils');
 const { sendSemaphoreSms } = require('./utils/semaphore-sms');
 const { buildAttendanceAnalytics, educationGroup } = require('./utils/attendance-analytics');
+const { summarizeAtRiskParticipants } = require('./utils/at-risk-summary');
 const { inspectImportFile, safeImportFileName } = require('./utils/import-file');
 const { validateSponsor } = require('./utils/sponsor-utils');
 const { parsePositiveAmountCents } = require('./utils/amount-utils');
@@ -311,6 +312,21 @@ const participationTrackingReady = participantProfileColumnsReady.then(async () 
       `ALTER TABLE sponsored_child_participation_history
        ADD UNIQUE KEY uq_child_participation_action (participant_id, action_type)`,
     );
+  }
+  const [historyColumns] = await pool.execute(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'sponsored_child_participation_history'
+       AND COLUMN_NAME = 'notes'`,
+  );
+  if (!historyColumns.length) {
+    try {
+      await pool.query(
+        'ALTER TABLE sponsored_child_participation_history ADD COLUMN notes TEXT DEFAULT NULL',
+      );
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+    }
   }
 });
 const attendanceModelValidationReady = pool.query(`
@@ -3741,6 +3757,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
   const educationFilter = options.educationLevel ? 'AND p.education_level = ?' : '';
   const activeFilter = options.activeOnly
     ? `AND p.status = 'active'
+       AND COALESCE(p.sponsorship_status, 'active') <> 'inactive'
        AND (p.participation_status IS NULL OR p.participation_status <> 'REMOVED_FROM_SPONSORSHIP')`
     : '';
   const childParams = [
@@ -3751,7 +3768,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
     `SELECT p.id, p.participant_code, p.full_name_encrypted, p.date_of_birth_encrypted,
             p.gender, p.created_at,
             COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) AS participation_start_date,
-            p.education_level, p.grade_level, p.participation_status,
+            p.education_level, p.grade_level, p.participation_status, p.sponsorship_status,
             p.status AS participant_status
      FROM participants p
      WHERE p.participant_type = 'sponsored_child'
@@ -3778,7 +3795,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
   );
   const [actions] = await pool.execute(
     `SELECT h.id, h.participant_id, h.action_type, h.previous_status,
-            h.current_status, h.reason, h.absence_count, h.created_by, h.created_at,
+            h.current_status, h.reason, h.notes, h.absence_count, h.created_by, h.created_at,
             u.username AS administrator_username,
             CONCAT_WS(' ', u.first_name, u.middle_name, u.last_name) AS administrator_name
      FROM sponsored_child_participation_history h
@@ -3812,6 +3829,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
       previousStatus: row.previous_status,
       currentStatus: row.current_status,
       reason: row.reason || '',
+      notes: row.notes || '',
       absenceCount: Number(row.absence_count) || 0,
       administrator: row.administrator_name || row.administrator_username || 'System',
       createdAt: row.created_at,
@@ -3854,8 +3872,11 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
       }
     }
     const secondChance = childActions.find((action) => action.type === 'second_chance') || null;
-    const removed = row.participant_status === 'inactive'
+    const inactiveAction = childActions.find((action) => action.type === 'set_inactive') || null;
+    const removed = String(row.participant_status || '').toLowerCase() === 'inactive'
+      || String(row.sponsorship_status || '').toLowerCase() === 'inactive'
       || row.participation_status === 'REMOVED_FROM_SPONSORSHIP'
+      || Boolean(inactiveAction)
       || childActions.some((action) => action.type === 'removed');
     const currentStatus = getParticipationStatus({
       totalAbsences: tracking.lifetime.absent,
@@ -3890,6 +3911,10 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
         postSecondChanceAbsences,
         removed,
       }),
+      inactiveReason: inactiveAction?.reason || '',
+      inactiveNotes: inactiveAction?.notes || '',
+      inactiveAt: inactiveAction?.createdAt || null,
+      inactiveAdministrator: inactiveAction?.administrator || '',
       history: childActions,
     };
   }));
@@ -3975,6 +4000,112 @@ app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkPermi
     res.json(updatedChild);
   } catch (error) {
     if (connection) await connection.rollback();
+    next(error);
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+const INACTIVE_REASONS = new Set([
+  'Graduated / Completed Program',
+  'Voluntarily Left',
+  'Removed from Sponsorship',
+  'Grounds for Departure',
+  'No Longer Eligible',
+  'Other',
+]);
+
+app.post('/api/sponsorship/children/:id/set-inactive', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+  let connection;
+  let transactionActive = false;
+  try {
+    const participantId = Number(req.params.id);
+    if (!Number.isSafeInteger(participantId) || participantId < 1) {
+      return res.status(400).json({ error: 'Select a valid participant' });
+    }
+    const reason = String(req.body.reason || '').trim();
+    if (!INACTIVE_REASONS.has(reason)) {
+      return res.status(400).json({ error: 'Select a valid inactive reason' });
+    }
+    const notes = String(req.body.notes || '').trim();
+    if (notes.length > 2000) {
+      return res.status(400).json({ error: 'Notes must be 2000 characters or fewer' });
+    }
+
+    await participationTrackingReady;
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionActive = true;
+    const [[participant]] = await connection.execute(
+      `SELECT id, status, participant_type
+       FROM participants WHERE id = ? FOR UPDATE`,
+      [participantId],
+    );
+    if (!participant || participant.participant_type !== 'sponsored_child' || participant.status === 'deleted') {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(404).json({ error: 'Sponsored child not found' });
+    }
+    if (String(participant.status).toLowerCase() === 'inactive') {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(409).json({ error: 'This participant is already inactive' });
+    }
+
+    const [child] = await getSponsoredParticipationSummaries(participantId, { recordThresholdHistory: false });
+    if (!child || child.status !== 'GROUNDS_FOR_DEPARTURE') {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(409).json({ error: 'Only participants at Grounds for Departure can be set to inactive' });
+    }
+    await connection.execute(
+      `INSERT IGNORE INTO sponsored_child_participation_history
+       (participant_id, action_type, previous_status, current_status, reason, absence_count)
+       VALUES (?, 'grounds_for_departure', 'WARNING', 'GROUNDS_FOR_DEPARTURE',
+               'More than six absences after four months of monitoring', ?)`,
+      [participantId, child.lifetime.absent],
+    );
+    const [existingInactiveAction] = await connection.execute(
+      `SELECT id FROM sponsored_child_participation_history
+       WHERE participant_id = ? AND action_type = 'set_inactive'
+       LIMIT 1 FOR UPDATE`,
+      [participantId],
+    );
+    if (existingInactiveAction.length) {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(409).json({ error: 'This participant already has an inactive decision' });
+    }
+    const [updated] = await connection.execute(
+      `UPDATE participants SET status = 'inactive'
+       WHERE id = ? AND participant_type = 'sponsored_child' AND status = 'active'`,
+      [participantId],
+    );
+    if (updated.affectedRows !== 1) {
+      await connection.rollback();
+      transactionActive = false;
+      return res.status(409).json({ error: 'The participant status changed before the decision could be saved' });
+    }
+    await connection.execute(
+      `INSERT INTO sponsored_child_participation_history
+       (participant_id, action_type, previous_status, current_status, reason, notes, absence_count, created_by)
+       VALUES (?, 'set_inactive', 'GROUNDS_FOR_DEPARTURE', 'INACTIVE', ?, ?, ?, ?)`,
+      [participantId, reason, notes || null, child.lifetime.absent, req.user.id],
+    );
+    await writeAuditLog(req.user, 'sponsorship.child.set_inactive', 'participant', participantId, {
+      previousStatus: 'GROUNDS_FOR_DEPARTURE',
+      newStatus: 'INACTIVE',
+      reason,
+      notes: notes || null,
+      totalAbsences: child.lifetime.absent,
+      attendanceRate: child.lifetime.attendanceRate,
+    }, connection);
+    await connection.commit();
+    transactionActive = false;
+    const [updatedChild] = await getSponsoredParticipationSummaries(participantId, { recordThresholdHistory: false });
+    res.json(updatedChild);
+  } catch (error) {
+    if (connection && transactionActive) await connection.rollback();
     next(error);
   } finally {
     if (connection) connection.release();
@@ -4811,7 +4942,7 @@ async function loadSponsoredAttendanceData({ range, educationLevel = '', status 
     pool.execute(
       `SELECT p.id, p.participant_code, p.full_name_encrypted, p.education_level, p.grade_level,
               COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) AS registration_date,
-              p.participation_status, p.status AS participant_status
+              p.participation_status, p.sponsorship_status, p.status AS participant_status
        FROM participants p
        WHERE ${participantConditions.join(' AND ')}
        ORDER BY p.id`,
@@ -4823,8 +4954,9 @@ async function loadSponsoredAttendanceData({ range, educationLevel = '', status 
   const participants = participantRows
     .map((row) => {
       const summary = summaryById.get(Number(row.id));
-      const participationStatus = ['inactive', 'INACTIVE', 'REMOVED_FROM_SPONSORSHIP']
-        .includes(row.participant_status) || row.participation_status === 'REMOVED_FROM_SPONSORSHIP'
+      const participationStatus = String(row.participant_status || '').toLowerCase() === 'inactive'
+        || String(row.sponsorship_status || '').toLowerCase() === 'inactive'
+        || row.participation_status === 'REMOVED_FROM_SPONSORSHIP'
         ? 'REMOVED_FROM_SPONSORSHIP'
         : summary?.status || row.participation_status || 'ACTIVE';
       const removal = summary?.history?.find((action) => action.type === 'removed');
@@ -4837,7 +4969,7 @@ async function loadSponsoredAttendanceData({ range, educationLevel = '', status 
         registrationDate: row.registration_date,
         participationStatus,
         secondChance: Boolean(summary?.secondChance),
-        inactiveReason: removal?.reason || '',
+        inactiveReason: summary?.inactiveReason || removal?.reason || '',
         lifetime: summary?.lifetime || null,
       };
     })
@@ -4896,20 +5028,25 @@ async function getValidatedRiskScores() {
      FROM attendance_model_validation_runs
      ORDER BY id DESC LIMIT 1`,
   );
-  if (validation?.status !== 'validated' || validation.model_version !== MODEL_VERSION) return [];
+  if (
+    String(validation?.status || '').toLowerCase() !== 'validated'
+    || validation.model_version !== MODEL_VERSION
+  ) return [];
   return pool.execute(
     `SELECT r.participant_id, r.risk_score, r.risk_level, r.model_version, r.computed_at
      FROM predictive_risk_scores r
      JOIN participants p ON p.id = r.participant_id
      JOIN (
-       SELECT participant_id, MAX(computed_at) AS latest
+       SELECT participant_id, MAX(id) AS latest_id
        FROM predictive_risk_scores
        WHERE model_version = ?
        GROUP BY participant_id
-     ) latest ON latest.participant_id = r.participant_id AND latest.latest = r.computed_at
+     ) latest ON latest.participant_id = r.participant_id AND latest.latest_id = r.id
      WHERE r.model_version = ?
        AND p.participant_type = 'sponsored_child'
-       AND p.status <> 'deleted'
+       AND p.status = 'active'
+       AND COALESCE(p.sponsorship_status, 'active') <> 'inactive'
+       AND p.participation_status <> 'REMOVED_FROM_SPONSORSHIP'
      ORDER BY r.risk_score DESC, p.participant_code`,
     [MODEL_VERSION, MODEL_VERSION],
   ).then(([rows]) => rows);
@@ -4960,7 +5097,9 @@ function buildRiskRows(data, scores, recentOccurrences, riskFilter, referenceTim
     const score = scoresById.get(participant.id);
     const hasEnoughData = !evidence.insufficientData;
     const currentAttendance = attendanceById.get(participant.id);
-    const riskLevel = score && hasEnoughData ? score.risk_level : 'insufficient_data';
+    const riskLevel = score && hasEnoughData
+      ? String(score.risk_level || '').toLowerCase()
+      : 'insufficient_data';
     return {
       participantId: participant.id,
       participantCode: participant.participantCode,
@@ -5411,7 +5550,7 @@ async function computeParticipantHistory(participantId) {
   const [[participant]] = await pool.execute(
     `SELECT id, participant_code, full_name_encrypted, participant_type, grade_level, education_level,
             COALESCE(sponsorship_registered_at, sponsorship_start_date, created_at) AS registration_date,
-            status AS participant_status, participation_status
+            status AS participant_status, sponsorship_status, participation_status
      FROM participants WHERE id = ? AND status <> 'deleted' LIMIT 1`,
     [participantId],
   );
@@ -5460,8 +5599,10 @@ async function computeParticipantHistory(participantId) {
     .filter((row) => row.status === 'present')
     .reduce((earliest, row) => !earliest || row.startsAt < earliest ? row.startsAt : earliest, null);
   const summaries = await getSponsoredParticipationSummaries(participantId, { recordThresholdHistory: false });
-  const currentStatus = ['inactive', 'INACTIVE', 'REMOVED_FROM_SPONSORSHIP']
-    .includes(participant.participant_status) || participant.participation_status === 'REMOVED_FROM_SPONSORSHIP'
+  const currentStatus = ['INACTIVE', 'REMOVED_FROM_SPONSORSHIP']
+    .includes(String(participant.participant_status || '').toUpperCase())
+    || String(participant.sponsorship_status || '').toLowerCase() === 'inactive'
+    || participant.participation_status === 'REMOVED_FROM_SPONSORSHIP'
     ? 'REMOVED_FROM_SPONSORSHIP'
     : summaries[0]?.status || participant.participation_status || 'ACTIVE';
   return {
@@ -5560,6 +5701,7 @@ app.get('/api/analytics/overview', authenticate, checkPermission('analytics:view
     const totalPresentRecords = data.analytics.participants
       .reduce((sum, participant) => sum + participant.present, 0);
     const atRiskRecords = await computeRiskRecords('all', { range, educationLevel, status, eventId });
+    const atRiskBreakdown = summarizeAtRiskParticipants(data.participants, atRiskRecords);
     const statusCounts = data.participants.reduce((counts, participant) => {
       const key = participant.participationStatus === 'SECOND_CHANCE'
         ? 'WARNING'
@@ -5583,7 +5725,8 @@ app.get('/api/analytics/overview', authenticate, checkPermission('analytics:view
       attendanceRate: totalScheduledRecords
         ? roundRate((totalPresentRecords / totalScheduledRecords) * 100)
         : null,
-      atRiskChildren: atRiskRecords.filter((row) => ['medium', 'high'].includes(row.riskLevel)).length,
+      atRiskChildren: atRiskBreakdown.total,
+      atRiskBreakdown,
       statusCounts,
       educationComparison: data.analytics.educationComparison,
     });
@@ -5621,6 +5764,7 @@ app.get('/api/analytics/data', authenticate, checkPermission('analytics:view'), 
       Math.min(Date.now(), range.endExclusive.getTime()),
     );
     const riskRecords = allRiskRecords.filter((row) => riskFilter === 'all' || row.riskLevel === riskFilter);
+    const atRiskBreakdown = summarizeAtRiskParticipants(data.participants, allRiskRecords);
     const totalScheduledRecords = data.analytics.participants
       .reduce((sum, participant) => sum + participant.scheduled, 0);
     const totalPresentRecords = data.analytics.participants
@@ -5649,7 +5793,8 @@ app.get('/api/analytics/data', authenticate, checkPermission('analytics:view'), 
         attendanceRate: totalScheduledRecords
           ? roundRate((totalPresentRecords / totalScheduledRecords) * 100)
           : null,
-        atRiskChildren: allRiskRecords.filter((row) => ['medium', 'high'].includes(row.riskLevel)).length,
+        atRiskChildren: atRiskBreakdown.total,
+        atRiskBreakdown,
         statusCounts,
         educationComparison: data.analytics.educationComparison,
       },

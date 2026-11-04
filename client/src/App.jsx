@@ -48,7 +48,7 @@ const STAFF_PERMISSION_OPTIONS = [
   { key: "analytics:view", label: "Analytics", description: "View and refresh participant analytics." },
   { key: "reports:view", label: "Reports", description: "View and export attendance reports and sponsored-child monitoring data when authorized." },
   { key: "sponsorship:view", label: "View sponsored care", description: "View sponsored-child participation and attendance history." },
-  { key: "sponsorship:manage", label: "Manage sponsored care", description: "Grant second chances and record sponsorship removals after attendance review." },
+  { key: "sponsorship:manage", label: "Manage sponsored care", description: "Grant second chances, set final inactive status, and record sponsorship decisions after attendance review." },
 ];
 const DEFAULT_STAFF_PERMISSION_KEYS = STAFF_PERMISSION_OPTIONS
   .map(({ key }) => key)
@@ -3176,15 +3176,15 @@ function PublicHome({ onLogin }) {
       </header>
       <section className="public-home-hero">
         <div className="public-home-intro">
-          <span className="public-home-kicker"><span /> FMC FIELD CARE · COMMUNITY FIRST</span>
-          <h1>Care that<br /><em>moves lives forward.</em></h1>
+          <span className="public-home-kicker"><span />COMMUNITY FIRST</span>
+          <h1>Care that<br />makes a difference</h1>
           <p>One caring community. Every child supported, every milestone celebrated, and every story connected.</p>
           <div className="public-home-actions">
             <button type="button" className="public-home-primary-action" onClick={() => setScreen("sponsor")}>
-              Visit guardian space <span aria-hidden="true">↗</span>
+              Scan QR Code <span aria-hidden="true">↗</span>
             </button>
             <button type="button" className="public-home-secondary-action" onClick={() => setScreen("staff")}>
-              Staff & Goer sign in <span aria-hidden="true">→</span>
+              Sign in <span aria-hidden="true">→</span>
             </button>
           </div>
         </div>
@@ -3212,16 +3212,16 @@ function PublicHome({ onLogin }) {
           <span className="public-access-card-top"><span className="public-access-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-13Z" /><path d="M8 9h8M8 13h5M8 17h3" /></svg>
           </span><span className="public-access-number">01 / STAFF</span></span>
-          <strong>Staff & Goers</strong>
-          <span>Sign in to manage care, record attendance, and support your assigned group.</span>
+          <strong>Staff &amp; Admin</strong>
+          <span>Sign in to manage participants, view attendance, and track child progress.</span>
           <b>Continue to sign in <span aria-hidden="true">↗</span></b>
         </button>
         <button className="public-access-card public-access-guardian" onClick={() => setScreen("sponsor")}>
           <span className="public-access-card-top"><span className="public-access-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none"><path d="M20.8 8.7c0 5.4-8.8 11-8.8 11s-8.8-5.6-8.8-11A4.7 4.7 0 0 1 12 6.1a4.7 4.7 0 0 1 8.8 2.6Z" /><path d="M8.5 12h2l1.2-2.2 1.7 4.4 1.1-2.2h1" /></svg>
           </span><span className="public-access-number">02 / GUARDIAN</span></span>
-          <strong>Sponsored Child Guardian</strong>
-          <span>View your child’s progress, attendance, and care updates with their QR code and passcode.</span>
+          <strong>Guardian Space</strong>
+          <span>Scan your child’s QR code and enter the 6-digit passcode to view their progress and participation.</span>
           <b>View child progress <span aria-hidden="true">↗</span></b>
         </button>
         </div>
@@ -4881,7 +4881,16 @@ function Analytics({ user }) {
           <div className="analytics-stat-card analytics-stat-alert">
             <span className="analytics-stat-label">At-risk sponsored children</span>
             <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? formatCount(overview.atRiskChildren) : "0")}</strong>
-            <span className="analytics-stat-sub">Medium or high predictive risk</span>
+            <div className="analytics-stat-sub analytics-risk-breakdown">
+              <span>Warning (Second Chance): {formatCount(overview?.atRiskBreakdown?.warning)}</span>
+              <span>Grounds for Departure: {formatCount(overview?.atRiskBreakdown?.groundsForDeparture)}</span>
+              <span>Medium Predictive Risk: {formatCount(overview?.atRiskBreakdown?.mediumPredictiveRisk)}</span>
+              <span>High Predictive Risk: {formatCount(overview?.atRiskBreakdown?.highPredictiveRisk)}</span>
+              {!overviewLoading && !overview?.atRiskBreakdown?.predictiveDataAvailable && (
+                <strong className="insufficient-badge">Predictive Data Unavailable</strong>
+              )}
+              <span>Unique participants; inactive participants excluded</span>
+            </div>
           </div>
         </div>
       </section>
@@ -5009,7 +5018,7 @@ function Analytics({ user }) {
         {riskLoading ? (
           <div className="analytics-empty">Loading risk scores…</div>
         ) : riskRows.length === 0 ? (
-          <div className="analytics-empty">No predictive risk records found for the selected level. Evaluate and refresh scores to generate them.</div>
+          <div className="analytics-empty">Predictive Data Unavailable for the selected filters. No validated risk scores are available yet; evaluate attendance history to refresh eligible participants.</div>
         ) : (
           <div className="analytics-table-wrap">
             <table className="analytics-table">
@@ -5518,6 +5527,9 @@ function SponsoredCare({ user, onViewHistory }) {
   const [secondChanceReason, setSecondChanceReason] = useState("");
   const [removalReason, setRemovalReason] = useState("");
   const [confirmRemoval, setConfirmRemoval] = useState(false);
+  const [inactiveReason, setInactiveReason] = useState("");
+  const [inactiveNotes, setInactiveNotes] = useState("");
+  const [confirmInactive, setConfirmInactive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -5569,7 +5581,19 @@ function SponsoredCare({ user, onViewHistory }) {
         apiCall(`/sponsorship/children/${entry.id}/updates`),
       ]);
       if (requestId !== childDetailsRequest.current) return;
-      setDetails(history);
+      setDetails({
+        ...entry,
+        ...history,
+        id: history.participant?.id ?? entry.id,
+        participantCode: history.participant?.participantCode ?? entry.participantCode,
+        name: history.participant?.name ?? entry.name,
+        status: history.participant?.status ?? entry.status,
+        educationLevel: history.participant?.educationLevel ?? entry.educationLevel,
+        gradeLevel: history.participant?.gradeLevel ?? entry.gradeLevel,
+        monthly: entry.monthly,
+        months: history.monthly ?? entry.months,
+        lifetime: entry.lifetime,
+      });
       setGrowthUpdates(updates);
     } catch (requestError) {
       if (requestId === childDetailsRequest.current) setError(requestError.message);
@@ -5649,8 +5673,53 @@ function SponsoredCare({ user, onViewHistory }) {
       setSaving(false);
     }
   };
+  const setChildInactive = async () => {
+    if (!selectedChild || !inactiveReason) return;
+    setSaving(true);
+    setError("");
+    try {
+      const updatedChild = await apiCall(`/sponsorship/children/${selectedChild.id}/set-inactive`, {
+        method: "POST",
+        body: JSON.stringify({ reason: inactiveReason, notes: inactiveNotes }),
+      });
+      setDetails((current) => ({ ...current, ...updatedChild }));
+      await refresh();
+      setConfirmInactive(false);
+      setInactiveReason("");
+      setInactiveNotes("");
+      setMessage("Participant set to inactive. Attendance and care history have been preserved.");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
   const initials = child?.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
   const monthly = child?.monthly;
+  const childStatusHistory = [
+    ...(child?.months || [])
+      .filter((entry) => entry.status === "WARNING")
+      .map((entry) => ({
+        key: `month-warning-${entry.key}`,
+        date: `${entry.key}-01`,
+        status: "Warning",
+        administrator: "System",
+        reason: `${entry.absent} absence${entry.absent === 1 ? "" : "s"} recorded for the month.`,
+      })),
+    ...(child?.history || []).map((entry) => ({
+      key: `action-${entry.type}-${entry.id}`,
+      date: entry.createdAt,
+      status: ({
+        grounds_for_departure: "Grounds for Departure",
+        second_chance: "Warning (Second Chance)",
+        removed: "Inactive",
+        set_inactive: "Inactive",
+      })[entry.type] || entry.currentStatus,
+      administrator: entry.administrator || "System",
+      reason: entry.reason,
+      notes: entry.notes,
+    })),
+  ].sort((first, second) => new Date(second.date).getTime() - new Date(first.date).getTime());
 
   return (
     <>
@@ -5673,6 +5742,7 @@ function SponsoredCare({ user, onViewHistory }) {
           ["Attendance warnings", children.filter((entry) => entry.status === "WARNING").length],
           ["Grounds for departure", children.filter((entry) => entry.status === "GROUNDS_FOR_DEPARTURE").length],
           ["Second chance", children.filter((entry) => entry.status === "SECOND_CHANCE").length],
+          ["Inactive", children.filter((entry) => entry.status === "REMOVED_FROM_SPONSORSHIP").length],
         ].map(([label, count]) => (
           <article className="surface sponsorship-summary-card participation-summary-card" key={label}>
             <span>{label}</span><strong>{loading ? "—" : formatCount(count)}</strong>
@@ -5694,10 +5764,11 @@ function SponsoredCare({ user, onViewHistory }) {
                 <span>Participation</span>
                 <select className="form-select" aria-label="Filter by participation status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
                   <option value="all">All statuses</option>
-                  <option value="ACTIVE">Meeting requirements</option>
-                  <option value="WARNING">Attendance warning</option>
-                  <option value="GROUNDS_FOR_DEPARTURE">Follow-up needed</option>
-                  <option value="SECOND_CHANCE">Second chance</option>
+                  <option value="ACTIVE">Active</option>
+                  <option value="WARNING">Warning</option>
+                  <option value="GROUNDS_FOR_DEPARTURE">Ground for Departure</option>
+                  <option value="SECOND_CHANCE">Second Chance</option>
+                  <option value="REMOVED_FROM_SPONSORSHIP">Inactive</option>
                 </select>
               </label>
               <label>
@@ -5725,7 +5796,7 @@ function SponsoredCare({ user, onViewHistory }) {
       </div>
       {child && createPortal((
         <div className="participant-modal-backdrop child-profile-backdrop" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !confirmRemoval) closeChild();
+          if (event.target === event.currentTarget && !confirmRemoval && !confirmInactive) closeChild();
         }}>
           <section className="participant-modal child-profile-modal participation-profile-modal" role="dialog" aria-modal="true" aria-labelledby="participation-profile-title">
             <header className="participant-modal-header">
@@ -5800,9 +5871,31 @@ function SponsoredCare({ user, onViewHistory }) {
                     <button type="submit" className="btn btn-primary mt-3" disabled={saving}>{saving ? "Saving..." : "Give Second Chance"}</button>
                   </form>
                 )}
+                {canManage && child.status === "GROUNDS_FOR_DEPARTURE" && (
+                  <button
+                    type="button"
+                    className="btn btn-outline-danger mt-3 ms-2"
+                    disabled={saving}
+                    onClick={() => {
+                      setInactiveReason("");
+                      setInactiveNotes("");
+                      setConfirmInactive(true);
+                    }}
+                  >
+                    Set to Inactive
+                  </button>
+                )}
               </section>
             )}
               </>
+            )}
+            {profileTab === "followup" && child.status === "REMOVED_FROM_SPONSORSHIP" && (
+              <section className="participation-action-panel">
+                <h3>Inactive participant</h3>
+                <p>Reason: <strong>{child.inactiveReason || "Not recorded"}</strong></p>
+                {child.inactiveNotes && <p>Notes: {child.inactiveNotes}</p>}
+                {child.inactiveAt && <p>Changed {formatParticipantHistoryDate(child.inactiveAt)} by {child.inactiveAdministrator || "Church Administrator"}.</p>}
+              </section>
             )}
             {profileTab === "followup" && child.secondChance && (
               <>
@@ -5819,6 +5912,24 @@ function SponsoredCare({ user, onViewHistory }) {
               </section>
             )}
               </>
+            )}
+            {profileTab === "followup" && (
+              <section className="surface participation-history-section">
+                <div className="participant-history-section-heading"><h3>Status History</h3></div>
+                {childStatusHistory.length ? (
+                  <ul className="participant-history-timeline">
+                    {childStatusHistory.map((entry) => (
+                      <li key={entry.key}>
+                        <time>{formatParticipantHistoryDate(entry.date)}</time>
+                        <strong>{entry.status}</strong>
+                        <span>Changed by: {entry.administrator}</span>
+                        {entry.reason && <span>Reason: {entry.reason}</span>}
+                        {entry.notes && <span>Notes: {entry.notes}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                ) : <p className="text-secondary mb-0">No status history is available yet.</p>}
+              </section>
             )}
             {profileTab === "care" && (
             <section className="surface participation-history-section growth-activity-section">
@@ -5991,6 +6102,57 @@ function SponsoredCare({ user, onViewHistory }) {
             <div className="participation-removal-actions">
               <button type="button" className="btn btn-outline-secondary" disabled={saving} onClick={() => setConfirmRemoval(false)}>Cancel</button>
               <button type="button" className="btn btn-danger" disabled={saving} onClick={removeChild}>{saving ? "Removing..." : "Remove from program"}</button>
+            </div>
+          </section>
+        </div>
+      ), document.body)}
+      {confirmInactive && child && createPortal((
+        <div className="participant-modal-backdrop" role="presentation">
+          <section className="participant-modal participation-removal-modal" role="alertdialog" aria-modal="true" aria-labelledby="set-inactive-title">
+            <h2 id="set-inactive-title">Confirm setting participant to Inactive</h2>
+            <p className="alert alert-warning">
+              This is a final administrative status change. The participant record and attendance, growth, education, and sponsorship history will be preserved.
+            </p>
+            <dl className="participation-removal-details">
+              <div><dt>Participant</dt><dd>{child.name}</dd></div>
+              <div><dt>Participant ID</dt><dd>{child.id}</dd></div>
+              <div><dt>Current status</dt><dd>Grounds for Departure</dd></div>
+              <div><dt>Total absences</dt><dd>{child.lifetime.absent}</dd></div>
+              <div><dt>Attendance rate</dt><dd>{child.lifetime.required ? `${child.lifetime.attendanceRate}%` : "N/A"}</dd></div>
+            </dl>
+            <label className="form-label" htmlFor="inactive-reason">Inactive reason <span aria-hidden="true">*</span></label>
+            <select
+              id="inactive-reason"
+              className="form-select"
+              required
+              value={inactiveReason}
+              onChange={(event) => setInactiveReason(event.target.value)}
+            >
+              <option value="">Select a reason</option>
+              {[
+                "Graduated / Completed Program",
+                "Voluntarily Left",
+                "Removed from Sponsorship",
+                "Grounds for Departure",
+                "No Longer Eligible",
+                "Other",
+              ].map((reason) => <option key={reason} value={reason}>{reason}</option>)}
+            </select>
+            <label className="form-label mt-3" htmlFor="inactive-notes">Optional notes</label>
+            <textarea
+              id="inactive-notes"
+              className="form-control"
+              rows="3"
+              maxLength="2000"
+              value={inactiveNotes}
+              onChange={(event) => setInactiveNotes(event.target.value)}
+            />
+            {error && <div className="alert alert-danger mt-3" role="alert">{error}</div>}
+            <div className="participation-removal-actions">
+              <button type="button" className="btn btn-outline-secondary" disabled={saving} onClick={() => setConfirmInactive(false)}>Cancel</button>
+              <button type="button" className="btn btn-danger" disabled={saving || !inactiveReason} onClick={setChildInactive}>
+                {saving ? "Saving..." : "Confirm Inactive"}
+              </button>
             </div>
           </section>
         </div>
@@ -6391,7 +6553,7 @@ function StaffAccounts({ user }) {
       <Title
         e="STAFF ADMINISTRATION"
         t="Manage accounts."
-        d="Create and manage Church Administrator and Goer accounts, permissions, account status, and education-group assignments."
+        d="Create and manage Church Staff and Goer accounts, permissions, account status, and education-group assignments."
       />
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
       {message && <div className="alert alert-success" role="status">{message}</div>}
@@ -6400,7 +6562,7 @@ function StaffAccounts({ user }) {
           <article><span>Total accounts</span><strong>{staff.length + goers.length}</strong></article>
           <article><span>Active accounts</span><strong>{staff.filter((account) => account.status === "active").length + goers.filter((account) => account.status === "active").length}</strong></article>
           <article><span>Goer accounts</span><strong>{goers.length}</strong></article>
-          <article><span>Church Administrators</span><strong>{staff.length}</strong></article>
+          <article><span>Church Staff</span><strong>{staff.length}</strong></article>
         </section>
       )}
       <section className="surface staff-account-filters" aria-label="Filter accounts">
@@ -6418,8 +6580,8 @@ function StaffAccounts({ user }) {
           <span>Account type</span>
           <select className="form-select" value={accountTypeFilter} onChange={(event) => setAccountTypeFilter(event.target.value)}>
             <option value="all">All</option>
-            <option value="goer">Goer</option>
-            <option value="staff">Church Administrator</option>
+            <option value="goer">Church Goer</option>
+            <option value="staff">Church Staff</option>
           </select>
         </label>
         <label>
@@ -6435,7 +6597,7 @@ function StaffAccounts({ user }) {
         <div className="panel-title"><h2>Register account</h2></div>
         <p className="text-secondary">Choose the account type to open its registration form.</p>
         <div className="d-flex flex-wrap gap-2">
-          <button className="btn btn-dark" type="button" onClick={() => openRegistrationModal("staff")}>Register Church Administrator</button>
+          <button className="btn btn-dark" type="button" onClick={() => openRegistrationModal("staff")}>Register Church Staff</button>
           <button className="btn btn-outline-primary" type="button" onClick={() => openRegistrationModal("goer")}>Register Goer</button>
         </div>
       </section>
@@ -6444,13 +6606,13 @@ function StaffAccounts({ user }) {
         <p className="alert alert-info" role="status">No accounts match your search.</p>
       )}
       <section className="surface table-surface staff-list-panel">
-        <div className="panel-title"><h2>Goer accounts</h2><span>{filteredGoers.length} accounts</span></div>
+        <div className="panel-title"><h2>Church Goer accounts</h2><span>{filteredGoers.length} accounts</span></div>
         {!loading && filteredGoers.length ? (
           <div className="staff-account-list">
             {filteredGoers.map((account) => (
               <article className="staff-account-card" key={account.id}>
                 <div className="staff-account-heading">
-                  <div><h3>{account.fullName}</h3><p>{account.email} · Goer</p></div>
+                  <div><h3>{account.fullName}</h3><p>{account.email} · Church Goer</p></div>
                   <span className={`staff-account-status ${account.status}`}>● {account.status === "active" ? "Active" : "Inactive"}</span>
                 </div>
                 <div className="row g-2 align-items-end">
@@ -6494,7 +6656,7 @@ function StaffAccounts({ user }) {
         )}
       </section>
       <section className="surface table-surface staff-list-panel">
-        <div className="panel-title"><h2>Church Administrator accounts</h2><span>{filteredStaff.length} accounts</span></div>
+        <div className="panel-title"><h2>Church Staff accounts</h2><span>{filteredStaff.length} accounts</span></div>
         {!loading && filteredStaff.length ? (
           <div className="staff-account-list">
             {filteredStaff.map((account) => (
