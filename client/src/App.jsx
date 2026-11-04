@@ -4881,16 +4881,6 @@ function Analytics({ user }) {
           <div className="analytics-stat-card analytics-stat-alert">
             <span className="analytics-stat-label">At-risk sponsored children</span>
             <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? formatCount(overview.atRiskChildren) : "0")}</strong>
-            <div className="analytics-stat-sub analytics-risk-breakdown">
-              <span>Warning (Second Chance): {formatCount(overview?.atRiskBreakdown?.warning)}</span>
-              <span>Grounds for Departure: {formatCount(overview?.atRiskBreakdown?.groundsForDeparture)}</span>
-              <span>Medium Predictive Risk: {formatCount(overview?.atRiskBreakdown?.mediumPredictiveRisk)}</span>
-              <span>High Predictive Risk: {formatCount(overview?.atRiskBreakdown?.highPredictiveRisk)}</span>
-              {!overviewLoading && !overview?.atRiskBreakdown?.predictiveDataAvailable && (
-                <strong className="insufficient-badge">Predictive Data Unavailable</strong>
-              )}
-              <span>Unique participants; inactive participants excluded</span>
-            </div>
           </div>
         </div>
       </section>
