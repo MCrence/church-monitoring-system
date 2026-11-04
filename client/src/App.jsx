@@ -6151,12 +6151,10 @@ function SponsoredCare({ user, onViewHistory }) {
             >
               <option value="">Select a reason</option>
               {[
-                "Graduated / Completed Program",
-                "Voluntarily Left",
-                "Removed from Sponsorship",
-                "Grounds for Departure",
-                "No Longer Eligible",
-                "Other",
+                "Graduated",
+                "Left",
+                "Removed",
+                "Deceased",
               ].map((reason) => <option key={reason} value={reason}>{reason}</option>)}
             </select>
             <label className="form-label mt-3" htmlFor="inactive-notes">Optional notes</label>
