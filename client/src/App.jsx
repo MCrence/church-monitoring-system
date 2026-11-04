@@ -5599,7 +5599,9 @@ function SponsoredCare({ user, onViewHistory }) {
         educationLevel: history.participant?.educationLevel ?? entry.educationLevel,
         gradeLevel: history.participant?.gradeLevel ?? entry.gradeLevel,
         monthly: entry.monthly,
-        months: history.monthly ?? entry.months,
+        months: Array.isArray(history.months)
+          ? history.months
+          : Array.isArray(entry.months) ? entry.months : [],
         lifetime: entry.lifetime,
       });
       setGrowthUpdates(updates);
