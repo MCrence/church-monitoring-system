@@ -5878,22 +5878,23 @@ function SponsoredCare({ user, onViewHistory }) {
                   <form onSubmit={grantSecondChance}>
                     <label className="form-label" htmlFor="second-chance-reason">Reason or notes (optional)</label>
                     <textarea id="second-chance-reason" className="form-control" rows="2" maxLength="1000" value={secondChanceReason} onChange={(event) => setSecondChanceReason(event.target.value)} />
-                    <button type="submit" className="btn btn-primary mt-3" disabled={saving}>{saving ? "Saving..." : "Give Second Chance"}</button>
+                    <div className="grounds-action-buttons">
+                      <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? "Saving..." : "Give Second Chance"}</button>
+                      <button
+                        type="button"
+                        className="btn btn-outline-danger"
+                        disabled={saving}
+                        onClick={() => {
+                          setError("");
+                          setInactiveReason("");
+                          setInactiveNotes("");
+                          setConfirmInactive(true);
+                        }}
+                      >
+                        Set to Inactive
+                      </button>
+                    </div>
                   </form>
-                )}
-                {canManage && child.status === "GROUNDS_FOR_DEPARTURE" && (
-                  <button
-                    type="button"
-                    className="btn btn-outline-danger mt-3 ms-2"
-                    disabled={saving}
-                    onClick={() => {
-                      setInactiveReason("");
-                      setInactiveNotes("");
-                      setConfirmInactive(true);
-                    }}
-                  >
-                    Set to Inactive
-                  </button>
                 )}
               </section>
             )}
@@ -6117,11 +6118,21 @@ function SponsoredCare({ user, onViewHistory }) {
         </div>
       ), document.body)}
       {confirmInactive && child && createPortal((
-        <div className="participant-modal-backdrop" role="presentation">
-          <section className="participant-modal participation-removal-modal" role="alertdialog" aria-modal="true" aria-labelledby="set-inactive-title">
-            <h2 id="set-inactive-title">Confirm setting participant to Inactive</h2>
+        <div
+          className="participant-modal-backdrop inactive-confirm-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !saving) setConfirmInactive(false);
+          }}
+        >
+          <section className="participant-modal participation-removal-modal inactive-confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="set-inactive-title" aria-describedby="set-inactive-description">
+            <header className="inactive-confirm-header">
+              <span>FINAL STATUS CHANGE</span>
+              <h2 id="set-inactive-title">Set participant to Inactive?</h2>
+              <p id="set-inactive-description">Review the details and choose a reason before confirming. This action will not delete the participant’s records.</p>
+            </header>
             <p className="alert alert-warning">
-              This is a final administrative status change. The participant record and attendance, growth, education, and sponsorship history will be preserved.
+              Attendance, growth, education, and sponsorship history will be preserved.
             </p>
             <dl className="participation-removal-details">
               <div><dt>Participant</dt><dd>{child.name}</dd></div>

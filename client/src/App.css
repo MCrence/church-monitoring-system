@@ -688,6 +688,8 @@
 .participation-action-panel .form-control{background:#fff}
 .grounds-action-panel{border-color:#e6b754;background:#fff8e8}
 .grounds-action-panel h3{color:#8b5200}
+.grounds-action-buttons{display:flex;flex-wrap:wrap;gap:10px;margin-top:13px}
+.grounds-action-buttons .btn{min-height:40px}
 .second-chance-action-panel{border-color:#aac4ed;background:#f2f6ff}
 .second-chance-action-panel h3{color:#284f94}
 .participation-event-history{display:grid;gap:0;margin:12px 0 0;padding:0;list-style:none}
@@ -705,6 +707,16 @@
 .participation-removal-details dt{color:#61758a;font-size:12px}
 .participation-removal-details dd{margin:0;color:#17395e;font-size:12px;font-weight:700;text-align:right}
 .participation-removal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:17px}
+.inactive-confirm-backdrop{z-index:1700;overflow-y:auto}
+.inactive-confirm-modal{width:min(100%,520px);max-height:calc(100vh - 40px);overflow-y:auto;padding:25px;background:#fff}
+.inactive-confirm-header{margin-bottom:16px}
+.inactive-confirm-header>span{color:#a12d31;font-size:10px;font-weight:800;letter-spacing:1.2px}
+.inactive-confirm-header h2{margin:5px 0 7px;color:#17395e;font:600 22px 'Space Grotesk'}
+.inactive-confirm-header p{margin:0;color:#61758a;font-size:13px;line-height:1.5}
+.inactive-confirm-modal>.alert{margin-bottom:14px;font-size:12px;line-height:1.5}
+.inactive-confirm-modal .form-label{margin-bottom:6px;color:#385570;font-size:12px;font-weight:700}
+.inactive-confirm-modal .form-select,.inactive-confirm-modal .form-control{border-color:#dce6ef;border-radius:9px}
+.inactive-confirm-modal .participation-removal-actions{position:sticky;bottom:-25px;margin:17px -25px -25px;padding:14px 25px 20px;border-top:1px solid #e8eef4;background:rgba(255,255,255,.97)}
 .growth-activity-section .participant-history-section-heading{align-items:flex-start}
 .growth-activity-section .participant-history-section-heading p{margin:5px 0 0;color:#61758a;font-size:12px}
 .growth-activity-count{margin:12px 0;color:#61758a;font-size:11px;font-weight:700}
@@ -730,7 +742,7 @@
 .participation-education-current{display:grid;gap:5px;margin-top:15px;padding:13px;border-radius:10px;background:#f0f6fb;color:#17395e;font-size:12px}
 .participation-education-current span{color:#61758a}
 @media(max-width:850px){.participation-summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:640px){.participant-gender-summary{gap:8px}.participant-gender-summary>.surface{padding:10px}.participant-gender-summary strong{font-size:21px}.participation-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.participation-workspace .sponsorship-child-row{align-items:flex-start}.participation-workspace .participation-status-badge{max-width:112px;white-space:normal}.participation-number-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.participation-detail-status{align-items:flex-start;flex-direction:column}.participation-removal-modal,.growth-update-modal{padding:18px}.participation-removal-actions,.growth-update-actions{flex-wrap:wrap}.growth-measurement-fields{grid-template-columns:1fr}.participation-list-controls{grid-template-columns:1fr}}
+@media(max-width:640px){.participant-gender-summary{gap:8px}.participant-gender-summary>.surface{padding:10px}.participant-gender-summary strong{font-size:21px}.participation-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.participation-workspace .sponsorship-child-row{align-items:flex-start}.participation-workspace .participation-status-badge{max-width:112px;white-space:normal}.participation-number-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.participation-detail-status{align-items:flex-start;flex-direction:column}.participation-removal-modal,.growth-update-modal{padding:18px}.inactive-confirm-modal{max-height:calc(100vh - 24px);max-height:calc(100dvh - 24px);padding:19px}.inactive-confirm-modal .participation-removal-actions{bottom:-19px;margin:17px -19px -19px;padding:12px 19px 16px}.participation-removal-actions,.growth-update-actions{flex-wrap:wrap}.growth-measurement-fields{grid-template-columns:1fr}.participation-list-controls{grid-template-columns:1fr}}
 .participant-passcode-value strong{color:#0c416c;font:700 24px 'Space Grotesk';letter-spacing:4px}
 @media(max-width:640px){.participant-register-action{margin:-10px 0 18px}.participant-modal-backdrop{align-items:center;padding:16px}.participant-modal{max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);padding:20px 17px;border-radius:16px}.participant-modal-header h2{font-size:22px}}
 
