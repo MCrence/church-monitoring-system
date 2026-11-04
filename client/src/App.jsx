@@ -5537,12 +5537,20 @@ function SponsoredCare({ user, onViewHistory }) {
 
   const refresh = async () => {
     const rows = await apiCall("/sponsorship/children");
+    if (!Array.isArray(rows)) {
+      throw new Error("The sponsored-care response was not a participant list. Please reload the page or contact an administrator.");
+    }
     setChildren(rows);
   };
   useEffect(() => {
     let mounted = true;
     apiCall("/sponsorship/children")
-      .then((rows) => { if (mounted) setChildren(rows); })
+      .then((rows) => {
+        if (!Array.isArray(rows)) {
+          throw new Error("The sponsored-care response was not a participant list. Please reload the page or contact an administrator.");
+        }
+        if (mounted) setChildren(rows);
+      })
       .catch((requestError) => { if (mounted) setError(requestError.message); })
       .finally(() => { if (mounted) setLoading(false); });
     return () => { mounted = false; };
@@ -5697,7 +5705,7 @@ function SponsoredCare({ user, onViewHistory }) {
   const initials = child?.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
   const monthly = child?.monthly;
   const childStatusHistory = [
-    ...(child?.months || [])
+    ...(Array.isArray(child?.months) ? child.months : [])
       .filter((entry) => entry.status === "WARNING")
       .map((entry) => ({
         key: `month-warning-${entry.key}`,
@@ -5706,7 +5714,7 @@ function SponsoredCare({ user, onViewHistory }) {
         administrator: "System",
         reason: `${entry.absent} absence${entry.absent === 1 ? "" : "s"} recorded for the month.`,
       })),
-    ...(child?.history || []).map((entry) => ({
+    ...(Array.isArray(child?.history) ? child.history : []).map((entry) => ({
       key: `action-${entry.type}-${entry.id}`,
       date: entry.createdAt,
       status: ({
