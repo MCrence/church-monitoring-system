@@ -4007,12 +4007,10 @@ app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkPermi
 });
 
 const INACTIVE_REASONS = new Set([
-  'Graduated / Completed Program',
-  'Voluntarily Left',
-  'Removed from Sponsorship',
-  'Grounds for Departure',
-  'No Longer Eligible',
-  'Other',
+  "Graduated",
+  "Left",
+  "Removed",
+  "Deceased",
 ]);
 
 app.post('/api/sponsorship/children/:id/set-inactive', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
