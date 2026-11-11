@@ -3819,6 +3819,7 @@ function Scanner({ portal = false, user = null }) {
   const isGoer = String(user?.role || "").toLowerCase() === GOER_ROLE;
   const [payload, setPayload] = useState("");
   const [toast, setToast] = useState(null);
+  const [attendanceResult, setAttendanceResult] = useState(null);
   const [pass, setPass] = useState("");
   const [requiresPasscode, setRequiresPasscode] = useState(false);
   const [profile, setProfile] = useState(null);
@@ -3830,6 +3831,7 @@ function Scanner({ portal = false, user = null }) {
   const [groupRosterError, setGroupRosterError] = useState("");
   const portalBusy = useRef(false);
   const checkinBusy = useRef(false);
+  const attendanceResultOpen = useRef(false);
   useEffect(() => {
     if (!portal) apiCall("/checkin/events").then(setEvents).catch(() => {});
   }, [portal]);
@@ -3862,6 +3864,15 @@ function Scanner({ portal = false, user = null }) {
     setTimeout(() => setToast(null), ms);
   };
 
+  const showAttendanceResult = (text, type) => {
+    attendanceResultOpen.current = true;
+    setAttendanceResult({ text, type });
+  };
+  const closeAttendanceResult = () => {
+    attendanceResultOpen.current = false;
+    setAttendanceResult(null);
+  };
+
   const openPortal = async (value, passcode = "") => {
     const portalData = await apiCall("/portal/profile", {
       method: "POST",
@@ -3887,9 +3898,9 @@ function Scanner({ portal = false, user = null }) {
       error.status = resp.status;
       throw error;
     }
-    if (result.status === "checked_out") showToast("Check-out recorded.", "success");
-    else if (result.status === "duplicate") showToast("Already checked in today for this event.", "warning");
-    else showToast("Check-in recorded.", "success");
+    if (result.status === "checked_out") showAttendanceResult("Check-out recorded.", "success");
+    else if (result.status === "duplicate") showAttendanceResult("Already checked in today for this event.", "warning");
+    else showAttendanceResult("Check-in recorded.", "success");
     if (isGoer) {
       fetchGoerRoster()
         .then((roster) => {
@@ -3928,6 +3939,7 @@ function Scanner({ portal = false, user = null }) {
     }
   };
   const scan = async (v) => {
+    if (!portal && attendanceResultOpen.current) return;
     // Always update payload input so it can be pasted/seen
     setPayload(v);
 
@@ -4180,6 +4192,25 @@ function Scanner({ portal = false, user = null }) {
       {toast && (
         <div style={{position: 'fixed', right: 20, bottom: 20, zIndex: 2000, padding: '10px 14px', borderRadius: 8, color: '#fff', backgroundColor: toast.type === 'success' ? '#28a745' : toast.type === 'warning' ? '#ff9f1c' : toast.type === 'danger' ? '#dc3545' : '#0d6efd', boxShadow: '0 4px 12px rgba(0,0,0,0.15)'}}>
           {toast.text}
+        </div>
+      )}
+      {!portal && attendanceResult && (
+        <div className="participant-modal-backdrop checkin-result-backdrop">
+          <section className="participant-modal checkin-result-modal" role="dialog" aria-modal="true" aria-labelledby="checkin-result-title">
+            <header className="participant-modal-header">
+              <div>
+                <span className={`checkin-result-indicator ${attendanceResult.type}`} aria-hidden="true">
+                  {attendanceResult.type === "success" ? "✓" : "!"}
+                </span>
+                <h2 id="checkin-result-title">{attendanceResult.type === "success" ? "Attendance updated" : "Attendance notice"}</h2>
+                <p>{attendanceResult.text}</p>
+              </div>
+              <button type="button" className="btn-close" aria-label="Close attendance result" onClick={closeAttendanceResult} />
+            </header>
+            <div className="checkin-result-actions">
+              <button type="button" className="btn btn-dark" onClick={closeAttendanceResult}>Continue scanning</button>
+            </div>
+          </section>
         </div>
       )}
     </>

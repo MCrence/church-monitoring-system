@@ -507,6 +507,16 @@
 @media(max-width:767px){.checkin-hero{min-height:0;padding:25px 21px}.checkin-hero h1{font-size:32px}.checkin-hero-side{width:140px;height:135px;flex-basis:140px;transform:scale(.82)}.scanner-workspace>.col-12{display:block}.checkin-scan-card,.checkin-settings-card{padding:18px}.checkin-scan-card .qr-reader{min-height:220px}.checkin-roster{padding:16px 14px 8px}}
 @media(max-width:520px){.checkin-hero{margin:0 0 15px;padding:23px 19px;border-radius:16px}.checkin-hero-copy{max-width:100%}.checkin-hero h1{max-width:270px;font-size:28px;letter-spacing:-.8px}.checkin-hero p{max-width:330px;font-size:11px}.checkin-hero-side{position:absolute;right:-50px;bottom:-45px;width:145px;height:125px;opacity:.56;transform:scale(.77)}.checkin-card-heading{gap:8px}.checkin-card-heading h2{font-size:17px}.checkin-live-indicator{font-size:7px}.checkin-settings-card{gap:12px}}
 @media(prefers-reduced-motion:reduce){.checkin-submit-button{scroll-behavior:auto}}
+.checkin-result-backdrop{z-index:1700}
+.participant-modal.checkin-result-modal{width:min(100%,440px);padding:24px;background:#fff}
+.checkin-result-modal .participant-modal-header{align-items:flex-start;margin-bottom:18px}
+.checkin-result-modal .participant-modal-header>div{display:grid;grid-template-columns:38px 1fr;column-gap:12px;align-items:center}
+.checkin-result-modal .participant-modal-header h2{margin:0;color:#17395e;font-size:21px}
+.checkin-result-modal .participant-modal-header p{grid-column:2;margin-top:4px;line-height:1.5}
+.checkin-result-indicator{display:grid;width:38px;height:38px;grid-row:span 2;place-items:center;border-radius:50%;font-size:21px;font-weight:700}
+.checkin-result-indicator.success{background:#e8f5e1;color:#43812f}
+.checkin-result-indicator.warning{background:#fff2d6;color:#9b6900}
+.checkin-result-actions{display:flex;justify-content:flex-end}
 .sponsorship-page-hero{position:relative;display:flex;min-height:230px;align-items:center;justify-content:space-between;gap:28px;overflow:hidden;margin:-7px 0 24px;padding:34px clamp(24px,4vw,48px);border:1px solid rgba(255,255,255,.16);border-radius:22px;background:radial-gradient(ellipse at 85% 28%,rgba(137,198,255,.23),transparent 32%),linear-gradient(118deg,#07265a 0%,#0b4b81 56%,#0879c9 100%);box-shadow:0 20px 48px rgba(6,40,92,.15);color:#fff}
 .sponsorship-page-hero::after{position:absolute;inset:0;content:"";pointer-events:none;background:linear-gradient(90deg,transparent 55%,rgba(255,255,255,.045) 55.1%,transparent 55.3%),linear-gradient(0deg,transparent 60%,rgba(255,255,255,.04) 60.1%,transparent 60.3%);background-size:42px 42px;mask-image:linear-gradient(90deg,transparent,black)}
 .sponsorship-page-hero-copy{position:relative;z-index:1;max-width:690px}
