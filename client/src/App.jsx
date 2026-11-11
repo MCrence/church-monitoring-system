@@ -4475,10 +4475,10 @@ function Events({ canManage, canImport = false }) {
       document.body,
     )}
     {selected && createPortal(
-      <div className="event-modal-backdrop" onMouseDown={(event) => {
+      <div className="event-modal-backdrop event-attendance-backdrop" onMouseDown={(event) => {
         if (event.target === event.currentTarget) setSelected(null);
       }}>
-        <section className="event-modal" role="dialog" aria-modal="true" aria-labelledby="event-attendance-title">
+        <section className="event-modal event-attendance-modal" role="dialog" aria-modal="true" aria-labelledby="event-attendance-title">
           <header className="event-modal-header">
             <div>
               <span className="eyebrow">EVENT DETAILS</span>
