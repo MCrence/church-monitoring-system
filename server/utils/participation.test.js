@@ -192,35 +192,58 @@ test("ignores attendance before the participant registration date", () => {
   assert.equal(result.lifetime.absent, 1);
 });
 
-test("treats 3 to 4 recent absences as a warning before grounds is triggered", () => {
-  assert.equal(getParticipationStatus({
-    totalAbsences: 4,
-    monthsMonitored: 4,
-    recentThreeMonthAbsences: 4,
-    monthlyCompliant: true,
-  }), "WARNING");
-  assert.equal(getParticipationStatus({
-    totalAbsences: 5,
-    monthsMonitored: 2,
-    recentThreeMonthAbsences: 5,
-  }), "ACTIVE");
-  assert.equal(getParticipationStatus({
-    totalAbsences: 7,
-    monthsMonitored: 3,
-    recentThreeMonthAbsences: 2,
-    monthlyCompliant: false,
-  }), "ACTIVE");
-  assert.equal(getParticipationStatus({
-    totalAbsences: 7,
-    recentThreeMonthAbsences: 2,
-    monthlyCompliant: false,
-  }), "ACTIVE");
+test("calculates yearly attendance and absence rates from actual scheduled activities", () => {
+  const result = summarizeParticipation({
+    registrationDate: "2025-01-01",
+    asOf: "2026-10-24",
+    events: [
+      event("Service", "2025-01-05"),
+      event("Service", "2025-01-12"),
+      event("Service", "2025-01-19"),
+      event("Service", "2025-01-26"),
+    ],
+    checkIns: [
+      checkIn("Service", "2025-01-05 09:00:00"),
+      checkIn("Service", "2025-01-12 09:00:00"),
+      checkIn("Service", "2025-01-19 09:00:00"),
+    ],
+  });
+
+  assert.deepEqual(result.years.find((year) => year.year === 2025), {
+    year: 2025,
+    required: 4,
+    attended: 3,
+    absent: 1,
+    attendanceRate: 75,
+    absenceRate: 25,
+  });
+  assert.equal(result.currentYear.year, 2026);
+  assert.equal(result.currentYear.required, 0);
 });
 
-test("keeps second chance and removal distinct from the absence threshold", () => {
-  assert.equal(getParticipationStatus({ totalAbsences: 6, monthsMonitored: 4, recentThreeMonthAbsences: 3 }), "WARNING");
-  assert.equal(getParticipationStatus({ totalAbsences: 6, monthsMonitored: 4 }), "ACTIVE");
-  assert.equal(getParticipationStatus({ totalAbsences: 7, monthsMonitored: 4, monthlyCompliant: false }), "GROUNDS_FOR_DEPARTURE");
-  assert.equal(getParticipationStatus({ totalAbsences: 7, monthsMonitored: 4, monthlyCompliant: true, secondChanceGranted: true }), "SECOND_CHANCE");
-  assert.equal(getParticipationStatus({ totalAbsences: 8, secondChanceGranted: true, removed: true }), "REMOVED_FROM_SPONSORSHIP");
+test("evaluates warning and grounds thresholds using current-year absences", () => {
+  assert.equal(getParticipationStatus({
+    currentYearAbsences: 4,
+    monthsMonitored: 4,
+  }), "WARNING");
+  assert.equal(getParticipationStatus({
+    currentYearAbsences: 5,
+    monthsMonitored: 2,
+  }), "ACTIVE");
+  assert.equal(getParticipationStatus({
+    currentYearAbsences: 7,
+    monthsMonitored: 3,
+  }), "ACTIVE");
+  assert.equal(getParticipationStatus({
+    currentYearAbsences: 7,
+    monthsMonitored: 4,
+  }), "GROUNDS_FOR_DEPARTURE");
+});
+
+test("keeps second chance and removal distinct from the annual thresholds", () => {
+  assert.equal(getParticipationStatus({ currentYearAbsences: 3, monthsMonitored: 4 }), "WARNING");
+  assert.equal(getParticipationStatus({ currentYearAbsences: 6, monthsMonitored: 4 }), "ACTIVE");
+  assert.equal(getParticipationStatus({ currentYearAbsences: 7, monthsMonitored: 4, secondChanceGranted: true }), "SECOND_CHANCE");
+  assert.equal(getParticipationStatus({ currentYearAbsences: 0, secondChanceGranted: true }), "SECOND_CHANCE");
+  assert.equal(getParticipationStatus({ currentYearAbsences: 8, secondChanceGranted: true, removed: true }), "REMOVED_FROM_SPONSORSHIP");
 });

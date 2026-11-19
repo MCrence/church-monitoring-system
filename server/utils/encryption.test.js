@@ -9,7 +9,6 @@ process.env.AES_KEY_ID = 'rotated';
 process.env.AES_KEYRING = JSON.stringify({ rotated: rotatedKey });
 
 const { decrypt, decryptBytes, encrypt, encryptBytes } = require('./encryption');
-const { decryptLetter, encryptLetter } = require('./letter-encryption');
 
 function legacyEncrypt(value) {
   const iv = crypto.randomBytes(12);
@@ -51,9 +50,3 @@ test('rejects encrypted values when their key ID is unavailable', () => {
   assert.throws(() => decrypt(parts.join('.')), /key "retired" is unavailable/);
 });
 
-test('encrypts new letter bodies and continues returning legacy plaintext letters', () => {
-  const encrypted = encryptLetter('Private guardian message');
-  assert.match(encrypted, /^FMCLETTER1:v1\.rotated\./);
-  assert.equal(decryptLetter(encrypted), 'Private guardian message');
-  assert.equal(decryptLetter('Existing plaintext message'), 'Existing plaintext message');
-});

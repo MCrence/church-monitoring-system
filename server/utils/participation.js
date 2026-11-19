@@ -21,9 +21,16 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
     return {
       months: [],
       years: [],
-      lifetime: { required: 0, attended: 0, absent: 0, attendanceRate: 0 },
-      currentMonth: { required: 0, attended: 0, absent: 0, attendanceRate: 0, status: "ACTIVE" },
-      currentYear: { required: 0, attended: 0, absent: 0, attendanceRate: 0 },
+      lifetime: { required: 0, attended: 0, absent: 0, attendanceRate: 0, absenceRate: 0 },
+      currentMonth: { required: 0, attended: 0, absent: 0, attendanceRate: 0, absenceRate: 0, status: "ACTIVE" },
+      currentYear: {
+        year: Number(finalMonth.slice(0, 4)) || new Date(asOf).getFullYear(),
+        required: 0,
+        attended: 0,
+        absent: 0,
+        attendanceRate: 0,
+        absenceRate: 0,
+      },
       monthsMonitored: 0,
       recentThreeMonthAbsences: 0,
       recentThreeMonthSummary: { required: 0, attended: 0, absent: 0, attendanceRate: 0, status: "ACTIVE" },
@@ -86,6 +93,7 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
       attended,
       absent,
       attendanceRate: required ? Math.round((attended / required) * 10000) / 100 : 0,
+      absenceRate: required ? Math.round((absent / required) * 10000) / 100 : 0,
       status: attended === required ? "ACTIVE" : "WARNING",
       events: occurrences.map((activity) => ({
         ...activity,
@@ -111,6 +119,7 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
     status: "WARNING",
   };
   const currentYear = yearTotals.get(Number(finalMonth.slice(0, 4))) || {
+    year: Number(finalMonth.slice(0, 4)),
     required: 0,
     attended: 0,
     absent: 0,
@@ -121,6 +130,9 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
       ...year,
       attendanceRate: year.required
         ? Math.round((year.attended / year.required) * 10000) / 100
+        : 0,
+      absenceRate: year.required
+        ? Math.round((year.absent / year.required) * 10000) / 100
         : 0,
     }));
   const recentMonths = months.slice(-3);
@@ -148,12 +160,18 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
       attendanceRate: lifetimeRequired
         ? Math.round((lifetimeAttended / lifetimeRequired) * 10000) / 100
         : 0,
+      absenceRate: lifetimeRequired
+        ? Math.round((lifetimeAbsent / lifetimeRequired) * 10000) / 100
+        : 0,
     },
     currentMonth,
     currentYear: {
       ...currentYear,
       attendanceRate: currentYear.required
         ? Math.round((currentYear.attended / currentYear.required) * 10000) / 100
+        : 0,
+      absenceRate: currentYear.required
+        ? Math.round((currentYear.absent / currentYear.required) * 10000) / 100
         : 0,
     },
     monthsMonitored: months.length,
@@ -163,19 +181,17 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
 }
 
 function getParticipationStatus({
-  totalAbsences = 0,
-  monthlyCompliant = false,
+  currentYearAbsences = 0,
   secondChanceGranted = false,
   removed = false,
   monthsMonitored,
-  recentThreeMonthAbsences = 0,
 } = {}) {
   if (removed) return "REMOVED_FROM_SPONSORSHIP";
   if (secondChanceGranted) return "SECOND_CHANCE";
   const monitoredMonths = Number.isFinite(Number(monthsMonitored)) ? Number(monthsMonitored) : 0;
-  const recentAbsences = Number(recentThreeMonthAbsences) || 0;
-  if (monitoredMonths >= 4 && totalAbsences > GROUNDS_FOR_DEPARTURE_ABSENCES) return "GROUNDS_FOR_DEPARTURE";
-  if (recentAbsences >= 3 && recentAbsences <= 4) return "WARNING";
+  const absences = Number(currentYearAbsences) || 0;
+  if (monitoredMonths >= 4 && absences > GROUNDS_FOR_DEPARTURE_ABSENCES) return "GROUNDS_FOR_DEPARTURE";
+  if (absences >= 3 && absences <= 4) return "WARNING";
   return "ACTIVE";
 }
 
