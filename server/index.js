@@ -4447,10 +4447,10 @@ app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkRole(
 });
 
 const INACTIVE_REASONS = new Set([
-    "Graduated",
-    "Left",
-    "Removed",
-    "Deceased",
+  "Graduated",
+  "Left",
+  "Removed",
+  "Deceased",
 ]);
 
 app.post('/api/sponsorship/children/:id/set-inactive', authenticate, checkRole(['Church Administrator']), checkPermission('sponsorship:manage'), async (req, res, next) => {

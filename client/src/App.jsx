@@ -5392,7 +5392,6 @@ function Analytics({ user }) {
           <div className="analytics-stat-card">
             <span className="analytics-stat-label">Recorded check-ins</span>
             <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? formatCount(overview.totalCheckIns) : "0")}</strong>
-            <span className="analytics-stat-sub">Valid sponsored-child check-ins in range</span>
           </div>
           <div className="analytics-stat-card analytics-stat-alert">
             <span className="analytics-stat-label">At-risk sponsored children</span>
