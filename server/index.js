@@ -32,9 +32,24 @@ const {
 const { sendSemaphoreSms } = require('./utils/semaphore-sms');
 const { buildAttendanceAnalytics, educationGroup } = require('./utils/attendance-analytics');
 const { summarizeAtRiskParticipants } = require('./utils/at-risk-summary');
-const { inspectImportFile, safeImportFileName } = require('./utils/import-file');
+const { buildAttendanceHistory } = require('./utils/attendance-history');
+const {
+  MAX_IMPORT_ROWS,
+  inspectImportFile,
+  safeImportFileName,
+} = require('./utils/import-file');
+const {
+  normalizeEducationStatus,
+  normalizeEventStatus,
+  normalizeImportTime,
+  normalizeSponsorshipStatus,
+  parseSchoolYear,
+  validateImportHeaders,
+} = require('./utils/participant-import');
 const { validateSponsor } = require('./utils/sponsor-utils');
 const { parsePositiveAmountCents } = require('./utils/amount-utils');
+const { parsePage } = require('./utils/pagination');
+const { csvRecord } = require('./utils/report-csv');
 const {
   getParticipationStatus,
   GROUNDS_FOR_DEPARTURE_ABSENCES,
@@ -55,11 +70,10 @@ const {
   validateEducationRecord,
 } = require('./utils/education-history');
 const {
-  MODEL_VERSION,
-  getCurrentAttendanceFeatures,
-  predictInactivityProbability,
-  validateAttendanceModel,
-} = require('./utils/attendance-prediction');
+  DEFAULT_ATTENDANCE_RISK_SETTINGS,
+  buildAttendanceRiskAssessment,
+  normalizeAttendanceRiskSettings,
+} = require('./utils/attendance-risk');
 
 const required = ['JWT_SECRET', 'AES_KEY'];
 for (const name of required) {
@@ -133,6 +147,28 @@ const eventsTableReady = (async () => {
      WHERE description LIKE 'Synthetic %' AND is_sample = FALSE`,
   );
 })();
+const attendanceImportColumnsReady = eventsTableReady.then(async () => {
+  const [columns] = await pool.execute(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'check_in_logs'`,
+  );
+  const existing = new Set(columns.map((column) => column.COLUMN_NAME));
+  const additions = [
+    ['event_id', 'INT UNSIGNED DEFAULT NULL'],
+    ['attendance_status', 'VARCHAR(16) DEFAULT NULL'],
+    ['recorded_by_encrypted', 'TEXT DEFAULT NULL'],
+    ['remarks_encrypted', 'TEXT DEFAULT NULL'],
+  ];
+  for (const [column, definition] of additions) {
+    if (!existing.has(column)) {
+      try {
+        await pool.query(`ALTER TABLE check_in_logs ADD COLUMN ${column} ${definition}`);
+      } catch (error) {
+        if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+      }
+    }
+  }
+});
 const educationHistoryReady = eventsTableReady.then(() => pool.query(`
   CREATE TABLE IF NOT EXISTS participant_education_history (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -170,6 +206,7 @@ const participantImportHistoryReady = pool.query(`
     events_imported INT UNSIGNED NOT NULL DEFAULT 0,
     skipped INT UNSIGNED NOT NULL DEFAULT 0,
     failed INT UNSIGNED NOT NULL DEFAULT 0,
+    details_json JSON DEFAULT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     INDEX idx_participant_import_history_created (created_at, id)
@@ -192,6 +229,15 @@ const participantImportHistoryReady = pool.query(`
     try {
       await pool.query(
         'ALTER TABLE participant_import_history ADD COLUMN events_imported INT UNSIGNED NOT NULL DEFAULT 0 AFTER education_imported',
+      );
+    } catch (error) {
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+    }
+  }
+  if (!columns.some((column) => column.COLUMN_NAME === 'details_json')) {
+    try {
+      await pool.query(
+        'ALTER TABLE participant_import_history ADD COLUMN details_json JSON DEFAULT NULL AFTER failed',
       );
     } catch (error) {
       if (error.code !== 'ER_DUP_FIELDNAME') throw error;
@@ -381,17 +427,30 @@ const participationTrackingReady = participantProfileColumnsReady.then(async () 
     }
   }
 });
-const attendanceModelValidationReady = pool.query(`
-  CREATE TABLE IF NOT EXISTS attendance_model_validation_runs (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    evaluated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    status VARCHAR(32) NOT NULL,
-    model_version VARCHAR(50) NOT NULL,
-    details_json LONGTEXT NOT NULL,
-    PRIMARY KEY (id),
-    INDEX idx_attendance_model_validation_evaluated (evaluated_at)
+const attendanceRiskSettingsReady = pool.query(`
+  CREATE TABLE IF NOT EXISTS attendance_risk_settings (
+    setting_id TINYINT UNSIGNED NOT NULL,
+    frequency_weight DECIMAL(5,2) NOT NULL DEFAULT 40,
+    regularity_weight DECIMAL(5,2) NOT NULL DEFAULT 35,
+    recency_weight DECIMAL(5,2) NOT NULL DEFAULT 25,
+    medium_threshold TINYINT UNSIGNED NOT NULL DEFAULT 30,
+    high_threshold TINYINT UNSIGNED NOT NULL DEFAULT 60,
+    updated_by INT UNSIGNED DEFAULT NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (setting_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-`);
+`).then(() => pool.execute(
+  `INSERT IGNORE INTO attendance_risk_settings
+   (setting_id, frequency_weight, regularity_weight, recency_weight, medium_threshold, high_threshold)
+   VALUES (1, ?, ?, ?, ?, ?)`,
+  [
+    DEFAULT_ATTENDANCE_RISK_SETTINGS.frequencyWeight,
+    DEFAULT_ATTENDANCE_RISK_SETTINGS.regularityWeight,
+    DEFAULT_ATTENDANCE_RISK_SETTINGS.recencyWeight,
+    DEFAULT_ATTENDANCE_RISK_SETTINGS.mediumThreshold,
+    DEFAULT_ATTENDANCE_RISK_SETTINGS.highThreshold,
+  ],
+));
 const staffPermissionsReady = (async () => {
   const [columns] = await pool.execute(
     `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -484,7 +543,7 @@ app.use((req, res, next) => {
   const hasEventPhotoUpload = req.method === 'POST' &&
     (/^\/api\/events$/.test(req.path) || /^\/api\/events\/\d+\/photos$/.test(req.path));
   const hasParticipantImport = req.method === 'POST' && /^\/api\/participants\/import\//.test(req.path);
-  const limit = hasParticipantImport ? '8mb'
+  const limit = hasParticipantImport ? '16mb'
     : hasEventPhotoUpload ? '22mb'
       : hasReceiptUpload ? '6mb' : '1mb';
   express.json({ limit })(req, res, next);
@@ -635,6 +694,33 @@ function checkPermission(permission) {
   };
 }
 
+function checkImportPermission(req, res, next) {
+  const importType = req.body?.importType;
+  if (importType === 'participants') {
+    return checkRole(['System Administrator', 'Church Administrator'])(req, res, next);
+  }
+  if (importType === 'events') return checkPermission('events:manage')(req, res, next);
+  if (['education', 'attendance', 'attendanceSummary'].includes(importType)) {
+    return checkPermission('sponsorship:manage')(req, res, next);
+  }
+  return res.status(400).json({ error: 'Choose a supported import type' });
+}
+
+function hasReportCategoryPermission(user, permission) {
+  const role = String(user?.role || '').toLowerCase();
+  return role === 'church administrator' || role === 'system administrator'
+    || hasPermission(user, permission);
+}
+
+function checkReportCategoryPermission(permission) {
+  return (req, res, next) => {
+    if (!req.user || !hasReportCategoryPermission(req.user, permission)) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    next();
+  };
+}
+
 function canViewParticipant(user, participant) {
   return !isGoerRole(user?.role) || canGoerAccessParticipant(user, participant);
 }
@@ -662,6 +748,16 @@ function checkSponsorshipView(req, res, next) {
     : hasPermission(req.user, 'sponsorship:view');
   if (!allowed) return res.status(403).json({ error: 'Insufficient permissions' });
   next();
+}
+
+function checkSponsorshipChildrenView(req, res, next) {
+  if (
+    String(req.user?.role || '').toLowerCase() === 'church administrator'
+    && hasPermission(req.user, 'reports:view')
+  ) {
+    return next();
+  }
+  return checkSponsorshipView(req, res, next);
 }
 
 function checkSponsorshipRecord(req, res, next) {
@@ -980,11 +1076,15 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
       return res.status(403).json({ error: 'A Goer account with an assigned education group is required' });
     }
 
-    await Promise.all([eventsTableReady, participantProfileColumnsReady, participationTrackingReady]);
-    const todayEventsPromise = pool.execute(
+    await Promise.all([
+      eventsTableReady, participantProfileColumnsReady, attendanceImportColumnsReady, participationTrackingReady,
+    ]);
+    const yearEventsPromise = pool.execute(
       `SELECT id, name, starts_at, location, status
-       FROM events WHERE is_sample = FALSE AND status <> 'cancelled' AND DATE(starts_at) = CURDATE()
-       ORDER BY starts_at ASC LIMIT 8`,
+       FROM events
+       WHERE YEAR(starts_at) = YEAR(CURDATE())
+       ORDER BY (starts_at >= NOW()) DESC, starts_at ASC, id ASC
+       LIMIT 8`,
     );
     const [todayEventCountRows] = await pool.execute(
       `SELECT COUNT(*) AS count FROM events
@@ -992,7 +1092,7 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
     );
     const upcomingEventsPromise = pool.execute(
       `SELECT id, name, starts_at, location, status
-       FROM events WHERE is_sample = FALSE AND status = 'scheduled' AND starts_at >= NOW()
+       FROM events WHERE status = 'scheduled' AND starts_at >= NOW()
        ORDER BY starts_at ASC LIMIT 5`,
     );
     const participantFilter = isGoer
@@ -1017,12 +1117,15 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
               ), 0) AS inactive,
               COALESCE(SUM(LOWER(gender) IN ('male', 'm')), 0) AS male,
               COALESCE(SUM(LOWER(gender) IN ('female', 'f')), 0) AS female,
-              COALESCE(SUM(created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')), 0) AS newThisMonth
+              COALESCE(SUM(
+                DATE(COALESCE(sponsorship_registered_at, sponsorship_start_date, created_at))
+                  BETWEEN DATE_FORMAT(CURDATE(), '%Y-01-01') AND CURDATE()
+              ), 0) AS newThisYear
        FROM participants WHERE ${participantFilter}`,
       participantParams,
     );
-    const [todayEvents, upcomingEvents] = await Promise.all([
-      todayEventsPromise,
+    const [[yearEvents], [upcomingEvents]] = await Promise.all([
+      yearEventsPromise,
       upcomingEventsPromise,
     ]);
 
@@ -1037,14 +1140,20 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
     const [attendanceRows] = await pool.execute(
       `SELECT MIN(e.name) AS name, DATE_FORMAT(MIN(e.starts_at), '%Y-%m-%d') AS event_date,
               COUNT(DISTINCT p.id) AS required,
-              COUNT(DISTINCT CASE WHEN c.status = 'checked_in' THEN p.id END) AS attended
+              COUNT(DISTINCT CASE WHEN c.status = 'checked_in' OR c.attendance_status = 'present' THEN p.id END) AS attended
        FROM events e
-       JOIN participants p ON p.created_at <= e.starts_at ${groupClause}
+       JOIN participants p
+         ON COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) <= e.starts_at
+         ${groupClause}
        LEFT JOIN check_in_logs c
-         ON c.participant_id = p.id AND c.status = 'checked_in'
-        AND LOWER(c.event_name) = LOWER(e.name)
-        AND DATE(c.checked_in_at) = DATE(e.starts_at)
-       WHERE e.is_sample = FALSE AND e.status = 'completed' AND e.starts_at >= ? AND e.starts_at < NOW()
+         ON c.participant_id = p.id
+        AND (
+          (c.status = 'checked_in' AND LOWER(c.event_name) = LOWER(e.name)
+           AND DATE(c.checked_in_at) = DATE(e.starts_at))
+          OR (c.attendance_status = 'present' AND c.event_id = e.id)
+        )
+       WHERE (e.is_sample = FALSE OR e.description = 'Synthetic monthly attendance record.')
+         AND e.status = 'completed' AND e.starts_at >= ? AND e.starts_at < NOW()
        GROUP BY LOWER(e.name), DATE(e.starts_at)
        ORDER BY event_date`,
       attendanceParams,
@@ -1112,7 +1221,7 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
         : { active: Number(participantCounts.active) || 0 },
       attendance: Object.fromEntries(Object.entries(attendance).map(([key, period]) => [key, withRate(period)])),
       monthlyAttendance: monthlyAttendance.map(withRate),
-      todayEvents,
+      yearEvents,
       upcomingEvents,
       events: {
         today: Number(todayEventCountRows[0].count) || 0,
@@ -1139,7 +1248,7 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
       );
       const children = await getSponsoredParticipationSummaries();
       const followups = children.filter((child) =>
-        ['WARNING', 'GROUNDS_FOR_DEPARTURE', 'SECOND_CHANCE'].includes(child.status),
+        ['WARNING', 'GROUNDS_FOR_DEPARTURE'].includes(child.status),
       );
       await auditTableReady;
       const [recentActivity] = await pool.execute(
@@ -1151,7 +1260,6 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
         active: children.filter((child) => child.status === 'ACTIVE').length,
         warning: children.filter((child) => child.status === 'WARNING').length,
         groundsForDeparture: children.filter((child) => child.status === 'GROUNDS_FOR_DEPARTURE').length,
-        secondChance: children.filter((child) => child.status === 'SECOND_CHANCE').length,
         removed: children.filter((child) => child.status === 'REMOVED_FROM_SPONSORSHIP').length,
       };
       dashboard.followups = followups.slice(0, 8).map((child) => ({
@@ -1168,7 +1276,7 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
       const groupChildren = await getSponsoredParticipationSummaries();
       const groupFollowups = groupChildren
         .filter((child) => child.educationLevel === req.user.goerEducationLevel
-          && ['WARNING', 'GROUNDS_FOR_DEPARTURE', 'SECOND_CHANCE'].includes(child.status));
+          && ['WARNING', 'GROUNDS_FOR_DEPARTURE'].includes(child.status));
       dashboard.followups = groupFollowups
         .slice(0, 8)
         .map((child) => ({
@@ -1193,7 +1301,7 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
     } else if (hasPermission(req.user, 'sponsorship:view')) {
       const children = await getSponsoredParticipationSummaries();
       const staffFollowups = children
-        .filter((child) => ['WARNING', 'GROUNDS_FOR_DEPARTURE', 'SECOND_CHANCE'].includes(child.status));
+        .filter((child) => ['WARNING', 'GROUNDS_FOR_DEPARTURE'].includes(child.status));
       dashboard.followups = staffFollowups
         .slice(0, 8)
         .map((child) => ({
@@ -1287,7 +1395,7 @@ app.get('/api/events', authenticate, checkPermission('events:view'), async (req,
 
 app.get('/api/checkin/events', authenticate, checkPermission('checkin:record'), async (req, res, next) => {
   try {
-    await eventsTableReady;
+    await Promise.all([eventsTableReady, attendanceImportColumnsReady]);
     const [rows] = await pool.query(
       'SELECT id, name, starts_at, location FROM events WHERE is_sample = FALSE ORDER BY starts_at DESC',
     );
@@ -1451,20 +1559,22 @@ app.post('/api/events/:id/photos', authenticate, checkPermission('events:manage'
 
 app.get('/api/events/:id/attendance', authenticate, checkPermission('events:view'), async (req, res, next) => {
   try {
-    await eventsTableReady;
+    await Promise.all([eventsTableReady, attendanceImportColumnsReady]);
     const [[event]] = await pool.execute('SELECT id, name, description, starts_at, ends_at, location, status, is_sample FROM events WHERE id = ?', [req.params.id]);
     if (!event) return res.status(404).json({ error: 'Event not found' });
     const [attendance] = await pool.execute(
       `SELECT c.id, c.participant_id, p.participant_code, p.participant_type,
               p.full_name_encrypted, p.first_name_encrypted, p.middle_name_encrypted, p.last_name_encrypted,
-              c.event_name, c.location, c.checked_in_at, c.checked_out_at, c.status
+              c.event_name, c.location, c.checked_in_at, c.checked_out_at, c.status,
+              c.attendance_status
        FROM check_in_logs c JOIN participants p ON p.id = c.participant_id
-       WHERE c.event_name = ?
-         AND c.checked_in_at >= DATE(?)
-         AND c.checked_in_at < DATE_ADD(DATE(?), INTERVAL 1 DAY)
-         AND c.status = 'checked_in'
-       ORDER BY c.checked_in_at ASC`,
-      [event.name, event.starts_at, event.starts_at],
+       WHERE (c.event_id = ? AND c.attendance_status = 'present')
+          OR (c.event_name = ?
+            AND c.checked_in_at >= DATE(?)
+            AND c.checked_in_at < DATE_ADD(DATE(?), INTERVAL 1 DAY)
+            AND c.status = 'checked_in')
+       ORDER BY c.checked_in_at IS NULL, c.checked_in_at ASC, c.id`,
+      [event.id, event.name, event.starts_at, event.starts_at],
     );
     res.json({
       event,
@@ -1608,29 +1718,53 @@ function validImportDate(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
 }
 
+function importDateOnly(value) {
+  if (value instanceof Date) {
+    return new Date(value.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  }
+  return String(value || '').slice(0, 10);
+}
+
+function normalizeImportDate(value) {
+  if (value instanceof Date) return importDateOnly(value);
+  const input = String(value || '').trim();
+  const iso = input.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$/);
+  if (iso) return `${iso[1]}-${String(iso[2]).padStart(2, '0')}-${String(iso[3]).padStart(2, '0')}`;
+  const us = input.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:[T ].*)?$/);
+  if (us) return `${us[3]}-${String(us[1]).padStart(2, '0')}-${String(us[2]).padStart(2, '0')}`;
+  return input;
+}
+
 function normalizeImportDateTime(value) {
-  const match = String(value || '').trim().match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (!match || !validImportDate(match[1])) return null;
-  const hour = Number(match[2]);
-  const minute = Number(match[3]);
-  const second = Number(match[4] || 0);
-  if (hour > 23 || minute > 59 || second > 59) return null;
-  return `${match[1]} ${match[2]}:${match[3]}:${match[4] || '00'}`;
+  const input = String(value || '').trim();
+  let date;
+  let time;
+  const iso = input.match(/^(\d{4}-\d{2}-\d{2})[T ](.+)$/);
+  const us = input.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})[ T]+(.+)$/);
+  if (iso) {
+    date = iso[1];
+    time = normalizeImportTime(iso[2]);
+  } else if (us) {
+    date = `${us[3]}-${String(us[1]).padStart(2, '0')}-${String(us[2]).padStart(2, '0')}`;
+    time = normalizeImportTime(us[4]);
+  }
+  if (!date || !time || !validImportDate(date)) return null;
+  return `${date} ${time}`;
 }
 
 function importAttendanceStatus(value) {
   const normalized = String(value || '').trim().toLowerCase();
-  const aliases = {
-    present: 'Present',
-    attended: 'Present',
-    absent: 'Absent',
-    excused: 'Excused',
-    late: 'Late',
-  };
-  return aliases[normalized] || null;
+  return normalized === 'present' ? 'Present'
+    : normalized === 'absent' ? 'Absent' : null;
 }
 
-app.post('/api/participants/import/inspect', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+function importParticipantId(value) {
+  const input = String(value || '').trim();
+  return /^[1-9]\d*$/.test(input) && Number.isSafeInteger(Number(input))
+    ? Number(input) : null;
+}
+
+app.post('/api/participants/import/inspect', authenticate, checkImportPermission, async (req, res, next) => {
   try {
     res.json(inspectImportFile(req.body.fileName, req.body.fileData));
   } catch (error) {
@@ -1641,75 +1775,119 @@ app.post('/api/participants/import/inspect', authenticate, checkRole(['System Ad
   }
 });
 
-async function validateParticipantImport(type, rows) {
+async function validateParticipantImport(type, rows, headers, mapping) {
   const errors = [];
   const normalized = [];
-  if (!['participants', 'education', 'attendance', 'attendanceSummary', 'events'].includes(type)) {
-    return { errors: ['Choose a supported import type'], normalized: [] };
-  }
-  if (!Array.isArray(rows) || !rows.length || rows.length > 5000) {
-    return { errors: ['The import must contain between 1 and 5,000 data rows'], normalized: [] };
+  errors.push(...validateImportHeaders(type, headers, mapping));
+  if (errors.length) return { errors, normalized: [] };
+  if (!Array.isArray(rows) || !rows.length || rows.length > MAX_IMPORT_ROWS) {
+    return { errors: [`The import must contain between 1 and ${MAX_IMPORT_ROWS.toLocaleString('en-US')} data rows`], normalized: [] };
   }
   const [participants] = await pool.execute(
     `SELECT id, participant_code, participant_type, full_name_encrypted,
             first_name_encrypted, middle_name_encrypted, last_name_encrypted,
-            date_of_birth_encrypted, gender
-     FROM participants WHERE COALESCE(status, '') <> 'deleted'`,
+            date_of_birth_encrypted, gender, sponsorship_registered_at,
+            sponsorship_start_date, created_at, participation_status, sponsorship_status
+     FROM participants
+     WHERE COALESCE(status, '') <> 'deleted'`,
   );
-  const byIdentifier = new Map();
-  const existingParticipantViews = participants.map((participant) => participantView(participant));
+  const byId = new Map();
+  const byCode = new Map();
+  const existingParticipantViews = participants
+    .filter((participant) => participant.participant_type === 'sponsored_child')
+    .map((participant) => participantView(participant));
   for (const participant of participants) {
-    if (participant.participant_code) byIdentifier.set(String(participant.participant_code).toLowerCase(), participant);
-    byIdentifier.set(String(participant.id), participant);
+    byId.set(Number(participant.id), participant);
+    if (participant.participant_code) byCode.set(String(participant.participant_code).toLowerCase(), participant);
   }
+
+  const resolveParticipant = (source, row) => {
+    const rawId = String(source.participantId || '').trim();
+    const code = String(source.participantCode || '').trim();
+    let bySuppliedId = null;
+    if (rawId) {
+      const id = importParticipantId(rawId);
+      if (!id) row.errors.push('Sponsored Child ID must be a positive numeric ID');
+      else if (id > 4294967295) row.errors.push('Sponsored Child ID exceeds the database limit');
+      else {
+        row.participantId = id;
+        bySuppliedId = byId.get(id) || null;
+      }
+    }
+    const bySuppliedCode = code ? byCode.get(code.toLowerCase()) || null : null;
+    if (bySuppliedId && bySuppliedCode && Number(bySuppliedId.id) !== Number(bySuppliedCode.id)) {
+      row.errors.push('Sponsored Child ID and Sponsored Child Code refer to different children');
+    }
+    const match = bySuppliedId || bySuppliedCode;
+    if (match && match.participant_type !== 'sponsored_child') {
+      row.errors.push('The supplied identifier belongs to a non-sponsored participant');
+      return null;
+    }
+    return match;
+  };
+
+  const resolvedParticipants = rows.map((source) => {
+    const row = { errors: [] };
+    const participant = resolveParticipant(source || {}, row);
+    return participant ? Number(participant.id) : null;
+  }).filter(Boolean);
+  const participantIds = [...new Set(resolvedParticipants)];
   const existingEducationKeys = new Set();
+  const existingEducationIds = new Map();
   if (type === 'education') {
-    const participantIds = [...new Set(rows
-      .map((source) => {
-        const identifier = String(source?.participantIdentifier || '').trim();
-        return byIdentifier.get(identifier.toLowerCase()) || byIdentifier.get(identifier);
-      })
-      .filter(Boolean)
-      .map((participant) => Number(participant.id)))];
     if (participantIds.length) {
-      const placeholders = participantIds.map(() => '?').join(', ');
-      const [existingEducation] = await pool.execute(
-        `SELECT participant_id, record_fingerprint FROM participant_education_history
-         WHERE participant_id IN (${placeholders})`,
-        participantIds,
-      );
-      for (const record of existingEducation) {
-        existingEducationKeys.add(`${record.participant_id}|${record.record_fingerprint}`);
+      for (let offset = 0; offset < participantIds.length; offset += 500) {
+        const batch = participantIds.slice(offset, offset + 500);
+        const placeholders = batch.map(() => '?').join(', ');
+        const [existingEducation] = await pool.execute(
+          `SELECT id, participant_id, record_fingerprint FROM participant_education_history
+           WHERE participant_id IN (${placeholders})`,
+          batch,
+        );
+        for (const record of existingEducation) {
+          existingEducationKeys.add(`${record.participant_id}|${record.record_fingerprint}`);
+          existingEducationIds.set(Number(record.id), Number(record.participant_id));
+        }
       }
     }
   }
   const existingAttendanceKeys = new Set();
-  const scheduledAttendanceKeys = new Set();
   const eventsById = new Map();
+  const eventsByOccurrence = new Map();
   const existingEventKeys = new Set();
+  const existingEventIds = new Set();
+  const existingSummaryKeys = new Set();
+  const eventRows = [];
   if (type === 'events') {
     const [events] = await pool.execute(
-      `SELECT LOWER(name) AS name,
-              DATE_FORMAT(starts_at, '%Y-%m-%d %H:%i:%s') AS starts_at
+      `SELECT id, name, DATE_FORMAT(starts_at, '%Y-%m-%d %H:%i:%s') AS starts_at
        FROM events WHERE is_sample = FALSE`,
     );
     for (const event of events) {
-      existingEventKeys.add(`${event.name}|${event.starts_at}`);
+      existingEventKeys.add(`${String(event.name).trim().toLowerCase()}|${event.starts_at}`);
+      existingEventIds.add(Number(event.id));
+    }
+  }
+  if (type === 'attendanceSummary' && participantIds.length) {
+    for (let offset = 0; offset < participantIds.length; offset += 500) {
+      const batch = participantIds.slice(offset, offset + 500);
+      const placeholders = batch.map(() => '?').join(', ');
+      const [summaries] = await pool.execute(
+        `SELECT participant_id, attendance_year FROM participant_attendance_summaries
+         WHERE participant_id IN (${placeholders})`,
+        batch,
+      );
+      for (const record of summaries) {
+        existingSummaryKeys.add(`${record.participant_id}|${record.attendance_year}`);
+      }
     }
   }
   if (type === 'attendance') {
-    const participantIds = [...new Set(rows
-      .map((source) => {
-        const identifier = String(source?.participantIdentifier || '').trim();
-        return byIdentifier.get(identifier.toLowerCase()) || byIdentifier.get(identifier);
-      })
-      .filter(Boolean)
-      .map((participant) => Number(participant.id)))];
     const eventIds = [...new Set(rows
       .map((source) => Number(source?.eventId))
       .filter((id) => Number.isSafeInteger(id) && id > 0))];
     const eventDates = [...new Set(rows
-      .map((source) => String(source?.eventDate || '').slice(0, 10))
+      .map((source) => normalizeImportDate(source?.eventDate))
       .filter((date) => validImportDate(date)))].sort();
     const dateRange = eventDates.length
       ? [eventDates[0], eventDates[eventDates.length - 1]]
@@ -1717,51 +1895,91 @@ async function validateParticipantImport(type, rows) {
 
     if (dateRange) {
       const [scheduledEvents] = await pool.execute(
-        `SELECT id, name, DATE_FORMAT(starts_at, '%Y-%m-%d') AS event_date
-         FROM events WHERE is_sample = FALSE AND starts_at >= ? AND starts_at < DATE_ADD(?, INTERVAL 1 DAY)`,
+        `SELECT id, name, starts_at, ends_at, location, status,
+                DATE_FORMAT(starts_at, '%Y-%m-%d') AS event_date
+         FROM events WHERE is_sample = FALSE
+           AND starts_at >= ? AND starts_at < DATE_ADD(?, INTERVAL 1 DAY)`,
         dateRange,
       );
-      for (const event of scheduledEvents) {
-        eventsById.set(Number(event.id), event);
-        scheduledAttendanceKeys.add(
-          `${String(event.name).toLocaleLowerCase()}|${event.event_date}`,
-        );
-      }
-      if (participantIds.length) {
-        for (let offset = 0; offset < participantIds.length; offset += 500) {
-          const batch = participantIds.slice(offset, offset + 500);
-          const placeholders = batch.map(() => '?').join(', ');
-          const [existingAttendance] = await pool.execute(
-            `SELECT participant_id, LOWER(event_name) AS event_name,
-                    DATE_FORMAT(checked_in_at, '%Y-%m-%d') AS event_date
-             FROM check_in_logs
-             WHERE participant_id IN (${placeholders})
-               AND checked_in_at >= ? AND checked_in_at < DATE_ADD(?, INTERVAL 1 DAY)`,
-            [...batch, ...dateRange],
-          );
-          for (const attendance of existingAttendance) {
-            existingAttendanceKeys.add(
-              `${attendance.participant_id}|${attendance.event_name}|${attendance.event_date}`,
-            );
-          }
-        }
-      }
+      eventRows.push(...scheduledEvents);
     }
     for (let offset = 0; offset < eventIds.length; offset += 500) {
       const batch = eventIds.slice(offset, offset + 500);
       const placeholders = batch.map(() => '?').join(', ');
-      const [events] = await pool.execute(
-        `SELECT id, name, DATE_FORMAT(starts_at, '%Y-%m-%d') AS event_date
+      const [byIds] = await pool.execute(
+        `SELECT id, name, starts_at, ends_at, location, status,
+                DATE_FORMAT(starts_at, '%Y-%m-%d') AS event_date
          FROM events WHERE is_sample = FALSE AND id IN (${placeholders})`,
         batch,
       );
-      for (const event of events) eventsById.set(Number(event.id), event);
+      eventRows.push(...byIds);
+    }
+    for (const event of eventRows) {
+      const id = Number(event.id);
+      eventsById.set(id, event);
+      const key = `${String(event.name).trim().toLowerCase()}|${event.event_date}`;
+      const matches = eventsByOccurrence.get(key) || [];
+      if (!matches.some((match) => Number(match.id) === id)) matches.push(event);
+      eventsByOccurrence.set(key, matches);
+    }
+    if (participantIds.length && eventRows.length) {
+      const ids = [...new Set(eventRows.map((event) => Number(event.id)))];
+      const eventDateRange = [...new Set(eventRows.map((event) => String(event.event_date).slice(0, 10)))]
+        .filter((date) => validImportDate(date))
+        .sort();
+      const range = eventDateRange.length
+        ? [eventDateRange[0], eventDateRange[eventDateRange.length - 1]]
+        : null;
+      for (let participantOffset = 0; participantOffset < participantIds.length; participantOffset += 250) {
+        const people = participantIds.slice(participantOffset, participantOffset + 250);
+        const peopleMarks = people.map(() => '?').join(', ');
+        for (let eventOffset = 0; eventOffset < ids.length; eventOffset += 250) {
+          const eventBatch = ids.slice(eventOffset, eventOffset + 250);
+          const eventMarks = eventBatch.map(() => '?').join(', ');
+          const [existingAttendance] = await pool.execute(
+            `SELECT id, participant_id, event_id, LOWER(TRIM(event_name)) AS event_name,
+                    DATE_FORMAT(checked_in_at, '%Y-%m-%d') AS event_date,
+                    attendance_status, status
+             FROM check_in_logs
+             WHERE participant_id IN (${peopleMarks})
+               AND (event_id IN (${eventMarks}) ${range
+                 ? 'OR (checked_in_at >= ? AND checked_in_at < DATE_ADD(?, INTERVAL 1 DAY))'
+                 : ''})`,
+            [...people, ...eventBatch, ...(range || [])],
+          );
+          for (const record of existingAttendance) {
+            if (record.status === 'checked_in' || ['present', 'absent'].includes(String(record.attendance_status || '').toLowerCase())) {
+              if (record.event_id) {
+              existingAttendanceKeys.add(`${record.participant_id}|event:${record.event_id}`);
+              } else if (record.event_date) {
+                existingAttendanceKeys.add(`${record.participant_id}|${record.event_name}|${record.event_date}`);
+              }
+            }
+          }
+        }
+      }
+    }
+    const attendanceRecordIds = [...new Set(rows
+      .map((source) => Number(source?.attendanceRecordId))
+      .filter((id) => Number.isSafeInteger(id) && id > 0))];
+    for (let offset = 0; offset < attendanceRecordIds.length; offset += 500) {
+      const batch = attendanceRecordIds.slice(offset, offset + 500);
+      const placeholders = batch.map(() => '?').join(', ');
+      const [existingIds] = await pool.execute(
+        `SELECT id FROM check_in_logs WHERE id IN (${placeholders})`,
+        batch,
+      );
+      for (const record of existingIds) existingAttendanceKeys.add(`record:${record.id}`);
     }
   }
   const seenParticipantIdentifiers = new Set();
+  const seenParticipantIds = new Set();
   const seenParticipantNames = new Set();
   const seenEducation = new Set();
+  const seenEducationIds = new Set();
   const seenAttendance = new Set();
+  const seenAttendanceRecordIds = new Set();
+  const seenEventIds = new Set();
   const seenAttendanceSummaries = new Set();
 
   for (let index = 0; index < rows.length; index += 1) {
@@ -1770,58 +1988,61 @@ async function validateParticipantImport(type, rows) {
       : {};
     const row = { ...source, rowNumber: index + 2, errors: [], warnings: [] };
     if (type === 'participants') {
+      const matchingIdentifier = resolveParticipant(source, row);
       row.firstName = String(source.firstName || '').trim();
       row.middleName = String(source.middleName || '').trim();
       row.lastName = String(source.lastName || '').trim();
-      const importedName = String(source.fullName || '').trim().replace(/\s+/g, ' ');
-      if ((!row.firstName || !row.lastName) && importedName) {
-        const parts = importedName.split(' ');
-        row.firstName = parts[0];
-        row.lastName = parts.length > 1 ? parts[parts.length - 1] : '';
-        row.middleName = parts.length > 2 ? parts.slice(1, -1).join(' ') : row.middleName;
-      }
-      row.dateOfBirth = String(source.dateOfBirth || '').slice(0, 10);
+      row.participantCode = String(source.participantCode || '').trim();
+      row.suffix = String(source.suffix || '').trim();
+      row.dateOfBirth = normalizeImportDate(source.dateOfBirth);
       const rawGender = String(source.gender || '').trim().toLowerCase();
       row.gender = ['m', 'male'].includes(rawGender) ? 'Male'
         : ['f', 'female'].includes(rawGender) ? 'Female' : String(source.gender || '').trim();
-      row.participantIdentifier = String(source.participantIdentifier || '').trim();
       if (!row.firstName || !row.lastName) row.errors.push('First and last name are required');
       if (!validImportDate(row.dateOfBirth)) row.errors.push('Invalid or missing date of birth');
-      if (!genderOptions.has(row.gender)) row.errors.push('Sex must be Male or Female');
+      if (!genderOptions.has(row.gender)) row.errors.push('Gender must be Male or Female');
       if (row.dateOfBirth && row.dateOfBirth > new Date().toISOString().slice(0, 10)) row.errors.push('Date of birth cannot be in the future');
       if (row.firstName.length > 100 || row.middleName.length > 100 || row.lastName.length > 100) {
         row.errors.push('Names must be 100 characters or fewer');
       }
-      if (source.phone && !normalizePhilippineMobile(source.phone)) row.errors.push('Invalid phone number');
-      if (source.registrationDate && !validImportDate(source.registrationDate)) {
-        row.errors.push('Invalid sponsored child registration date');
+      row.registrationDate = normalizeImportDate(source.registrationDate);
+      if (!validImportDate(row.registrationDate)) row.errors.push('Registration Date is required and must be a valid date');
+      if (validImportDate(row.registrationDate) && validImportDate(row.dateOfBirth) && row.registrationDate < row.dateOfBirth) {
+        row.errors.push('Registration Date cannot be earlier than Date of Birth');
       }
-      if (source.sponsorshipRegistrationDate && !validImportDate(source.sponsorshipRegistrationDate)) {
-        row.errors.push('Invalid sponsorship registration date');
+      row.currentStatus = normalizeSponsorshipStatus(source.currentStatus);
+      if (!row.currentStatus) row.errors.push('Current Sponsorship Status must be Active, Warning, Grounds for Departure, or Inactive');
+      const suppliedAge = String(source.age || '').trim();
+      if (suppliedAge && /^\d+$/.test(suppliedAge) && validImportDate(row.dateOfBirth)) {
+        const calculatedAge = calculateAge(row.dateOfBirth);
+        if (Number(suppliedAge) !== calculatedAge) {
+          row.warnings.push(`Uploaded age (${suppliedAge}) differs from the calculated age (${calculatedAge}); the calculated age is used`);
+        }
+      } else if (suppliedAge) {
+        row.warnings.push('Uploaded age is ignored; age is calculated from Date of Birth');
       }
-      if (
-        row.participantIdentifier &&
-        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$/.test(row.participantIdentifier)
-      ) row.errors.push('Invalid sponsored child ID format');
-      const registrationErrors = participantRegistrationErrors({
-        participantType: 'sponsored_child',
-        firstName: row.firstName,
-        middleName: row.middleName,
-        lastName: row.lastName,
-        dateOfBirth: row.dateOfBirth,
-        gender: row.gender,
-        emergencyContactName: source.guardianName,
-        emergencyContactPhone: source.guardianContact,
-        educationLevel: source.educationLevel,
-        gradeLevel: source.gradeLevel,
-        schoolName: source.currentSchool,
-        schoolAddress: source.schoolAddress,
-        programCourse: source.collegeCourse,
-      }, educationLevels, gradeLevelsByEducation);
-      for (const message of Object.values(registrationErrors)) row.errors.push(message);
-      const identifierKey = row.participantIdentifier.toLowerCase();
-      const duplicateRow = identifierKey && seenParticipantIdentifiers.has(identifierKey);
-      if (identifierKey) seenParticipantIdentifiers.add(identifierKey);
+      row.guardianName = String(source.guardianName || '').trim();
+      row.guardianContact = String(source.guardianContact || '').trim();
+      row.phone = String(source.phone || '').trim();
+      row.address = String(source.address || '').trim();
+      if (row.suffix) row.warnings.push('Suffix is not stored because the current database has no suffix field');
+      if (String(source.guardianRelationship || '').trim()) row.warnings.push('Guardian Relationship is not stored because the current database has no relationship field');
+      if (String(source.guardianEmail || '').trim()) row.warnings.push('Guardian Email is not stored because the current database has no guardian email field');
+      if (row.participantCode && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$/.test(row.participantCode)) {
+        row.errors.push('Sponsored Child Code contains unsupported characters or is too long');
+      }
+      if (row.participantCode) {
+        const codeKey = row.participantCode.toLowerCase();
+        if (seenParticipantIdentifiers.has(codeKey)) row.errors.push('Duplicate Sponsored Child Code in this file');
+        seenParticipantIdentifiers.add(codeKey);
+      }
+      if (String(source.participantId || '').trim()) {
+        const id = importParticipantId(source.participantId);
+        if (id) {
+          if (seenParticipantIds.has(id)) row.errors.push('Duplicate Sponsored Child ID in this file');
+          seenParticipantIds.add(id);
+        }
+      }
       const participantNameKey = `${normalizeParticipantName([row.firstName, row.middleName, row.lastName].filter(Boolean).join(' '))}|${row.dateOfBirth}`;
       const duplicateNameRow = row.dateOfBirth && seenParticipantNames.has(participantNameKey);
       if (row.dateOfBirth) seenParticipantNames.add(participantNameKey);
@@ -1832,167 +2053,301 @@ async function validateParticipantImport(type, rows) {
         lastName: row.lastName,
         dateOfBirth: row.dateOfBirth,
       }, existingParticipantViews)[0];
-      const matching = (identifierKey && byIdentifier.get(identifierKey))
+      const matching = matchingIdentifier
         || participants.find((participant) => Number(participant.id) === Number(possibleDuplicate?.id));
+      if (matching && row.participantCode && String(matching.participant_code || '').toLowerCase() !== row.participantCode.toLowerCase()) {
+        row.errors.push('Sponsored Child Code does not match the existing Sponsored Child ID');
+      }
       row.matchingParticipantId = matching?.id || null;
       row.operation = matching ? 'review' : 'create';
-      if (duplicateRow) row.errors.push('Duplicate sponsored child identifier in this file');
       if (duplicateNameRow) row.errors.push('Duplicate sponsored child name and date of birth in this file');
       if (matching) row.warnings.push(`Possible existing sponsored child match: ${matching.participant_code || `#${matching.id}`}`);
     } else if (type === 'education') {
-      row.participantIdentifier = String(source.participantIdentifier || '').trim();
-      row.educationLevel = String(source.educationLevel || '').trim();
+      const participant = resolveParticipant(source, row);
+      if (!String(source.participantId || '').trim() && !String(source.participantCode || '').trim()) {
+        row.errors.push('Sponsored Child ID or Sponsored Child Code is required');
+      }
+      if (!participant) row.errors.push('Sponsored Child does not match an existing sponsored child');
+      else row.participantId = Number(participant.id);
+      row.educationHistoryId = source.educationHistoryId ? importParticipantId(source.educationHistoryId) : null;
+      if (source.educationHistoryId && !row.educationHistoryId) row.errors.push('Education History ID must be a positive numeric ID');
+      if (row.educationHistoryId && seenEducationIds.has(row.educationHistoryId)) {
+        row.errors.push('Duplicate Education History ID in this file');
+      }
+      if (row.educationHistoryId) seenEducationIds.add(row.educationHistoryId);
       row.schoolName = String(source.schoolName || '').trim();
       row.schoolAddress = String(source.schoolAddress || '').trim();
-      row.startYear = source.startYear;
-      row.endYear = source.endYear === '' ? null : source.endYear;
-      row.status = String(source.status || '').trim();
-      row.courseStrand = String(source.courseStrand || '').trim();
-      row.notes = String(source.notes || '').trim();
-      if (!row.participantIdentifier) row.errors.push('Sponsored Child ID is required');
-      const matches = byIdentifier.get(row.participantIdentifier.toLowerCase())
-        || byIdentifier.get(row.participantIdentifier);
-      if (!matches) row.errors.push('Sponsored Child ID does not match an existing sponsored child');
-      else row.participantId = matches.id;
+      row.educationLevel = String(source.educationLevel || '').trim();
+      row.startDate = normalizeImportDate(source.startDate);
+      row.endDate = normalizeImportDate(source.endDate);
+      const schoolYear = parseSchoolYear(source.schoolYear);
+      if (!schoolYear) row.errors.push('School Year is required and must contain a valid year or year range');
+      if (!validImportDate(row.startDate)) row.errors.push('Start Date is required and must be a valid date');
+      if (row.endDate && !validImportDate(row.endDate)) row.errors.push('End Date must be a valid date');
+      if (validImportDate(row.startDate) && validImportDate(row.endDate) && row.endDate < row.startDate) {
+        row.errors.push('End Date cannot be earlier than Start Date');
+      }
+      row.status = normalizeEducationStatus(source.status);
+      row.startYear = validImportDate(row.startDate) ? Number(row.startDate.slice(0, 4)) : schoolYear?.startYear;
+      row.endYear = row.endDate ? Number(row.endDate.slice(0, 4))
+        : ['Graduated', 'Completed'].includes(row.status) ? schoolYear?.endYear ?? null : null;
+      row.completionInformation = String(source.completionInformation || '').trim();
+      row.courseStrand = '';
+      row.notes = row.completionInformation;
+      if (String(source.gradeLevel || '').trim()) row.warnings.push('Grade or Year Level is not stored because the current database has no grade history field');
+      if (schoolYear && row.startYear && schoolYear.startYear !== row.startYear) {
+        row.warnings.push('School Year does not begin in the same year as Start Date');
+      }
       row.errors.push(...validateEducationRecord(row));
-      const duplicateKey = `${row.participantId || row.participantIdentifier}|${educationFingerprint(row)}`;
+      const duplicateKey = `${row.participantId || ''}|${educationFingerprint(row)}`;
       if (seenEducation.has(duplicateKey)) row.errors.push('Duplicate education record in this file');
       seenEducation.add(duplicateKey);
+      if (row.educationHistoryId && existingEducationIds.has(row.educationHistoryId)) {
+        if (existingEducationIds.get(row.educationHistoryId) !== row.participantId) {
+          row.errors.push('Education History ID already belongs to a different child');
+        } else {
+          row.warnings.push('Education History ID already exists');
+          row.duplicate = true;
+        }
+      }
       if (row.participantId && existingEducationKeys.has(duplicateKey)) {
         row.warnings.push('Education record already exists');
-        row.operation = 'review';
+        row.duplicate = true;
       }
-      if (!row.operation) row.operation = row.errors.length ? 'error' : 'create';
+      row.operation = row.errors.length ? 'error' : row.duplicate ? 'review' : 'create';
     } else if (type === 'attendanceSummary') {
-      row.participantIdentifier = String(source.participantIdentifier || '').trim();
+      const participant = resolveParticipant(source, row);
+      if (!String(source.participantId || '').trim()) row.errors.push('Sponsored Child ID is required');
+      if (!participant) row.errors.push('Sponsored Child ID does not match an existing sponsored child');
+      else row.participantId = Number(participant.id);
       row.year = Number(source.year);
       row.required = Number(source.required);
       row.attended = Number(source.attended);
-      row.absent = source.absent === '' || source.absent === undefined
-        ? row.required - row.attended
-        : Number(source.absent);
-      const participant = byIdentifier.get(row.participantIdentifier.toLowerCase())
-        || byIdentifier.get(row.participantIdentifier);
-      if (!row.participantIdentifier) row.errors.push('Record ID is required');
-      if (!participant) row.errors.push('Record ID does not match an existing record');
-      else row.participantId = participant.id;
-      if (source.year === undefined || String(source.year).trim() === '') row.errors.push('Year is required');
-      if (source.required === undefined || String(source.required).trim() === '') row.errors.push('Required attendance is required');
-      if (source.attended === undefined || String(source.attended).trim() === '') row.errors.push('Attended attendance is required');
+      row.absent = Number(source.absent);
+      if (source.year === undefined || String(source.year).trim() === '') row.errors.push('Attendance Year is required');
+      if (source.required === undefined || String(source.required).trim() === '') row.errors.push('Required Count is required');
+      if (source.attended === undefined || String(source.attended).trim() === '') row.errors.push('Attended Count is required');
+      if (source.absent === undefined || String(source.absent).trim() === '') row.errors.push('Absent Count is required');
       if (!Number.isInteger(row.year) || row.year < 1900 || row.year > new Date().getFullYear()) {
-        row.errors.push('Year must be a valid historical year');
+        row.errors.push('Attendance Year must be a valid calendar year');
       }
       if (!Number.isInteger(row.required) || row.required < 0 || row.required > 1000) {
-        row.errors.push('Required attendance must be a whole number from 0 to 1,000');
+        row.errors.push('Required Count must be a whole number from 0 to 1,000');
       }
       if (!Number.isInteger(row.attended) || row.attended < 0 || row.attended > row.required) {
-        row.errors.push('Attended must be a whole number no greater than Required');
+        row.errors.push('Attended Count must be a whole number no greater than Required Count');
       }
       if (!Number.isInteger(row.absent) || row.absent < 0 || row.absent > row.required) {
-        row.errors.push('Absent must be a whole number no greater than Required');
+        row.errors.push('Absent Count must be a whole number no greater than Required Count');
       }
       if (row.attended + row.absent !== row.required) {
-        row.errors.push('Attended and Absent must total Required');
+        row.errors.push('Attended Count and Absent Count must total Required Count');
       }
-      const summaryKey = `${row.participantId || row.participantIdentifier}|${row.year}`;
-      if (seenAttendanceSummaries.has(summaryKey)) row.errors.push('Duplicate yearly attendance summary in this file');
-      seenAttendanceSummaries.add(summaryKey);
-      if (row.participantId && Number.isInteger(row.year)) {
-        const [[existingSummary]] = await pool.execute(
-          `SELECT id FROM participant_attendance_summaries
-           WHERE participant_id = ? AND attendance_year = ? LIMIT 1`,
-          [row.participantId, row.year],
-        );
-        if (existingSummary) {
-          row.warnings.push('Historical attendance summary already exists');
-          row.operation = 'review';
+      row.attendanceRate = row.required ? (row.attended / row.required) * 100 : 0;
+      row.absenceRate = row.required ? (row.absent / row.required) * 100 : 0;
+      for (const [field, calculated] of [['attendanceRate', row.attendanceRate], ['absenceRate', row.absenceRate]]) {
+        const supplied = String(source[field] || '').trim();
+        const suppliedValue = supplied.endsWith('%') ? Number(supplied.slice(0, -1)) : Number(supplied);
+        if (supplied && (!Number.isFinite(suppliedValue) || Math.abs(suppliedValue - calculated) > 0.1)) {
+          row.warnings.push(`${field === 'attendanceRate' ? 'Attendance' : 'Absence'} Rate was recalculated from the counts`);
         }
       }
-      if (!row.operation) row.operation = row.errors.length ? 'error' : 'create';
+      const summaryKey = `${row.participantId || ''}|${row.year}`;
+      if (seenAttendanceSummaries.has(summaryKey)) row.errors.push('Duplicate yearly attendance summary in this file');
+      seenAttendanceSummaries.add(summaryKey);
+      if (row.participantId && Number.isInteger(row.year) && existingSummaryKeys.has(summaryKey)) {
+        row.warnings.push('Historical attendance summary already exists');
+        row.duplicate = true;
+      }
+      row.operation = row.errors.length ? 'error' : row.duplicate ? 'review' : 'create';
     } else if (type === 'events') {
+      row.eventId = source.eventId ? importParticipantId(source.eventId) : null;
+      if (source.eventId && (!row.eventId || row.eventId > 4294967295)) row.errors.push('Activity/Event ID must be a positive numeric ID within the database limit');
+      if (row.eventId && seenEventIds.has(row.eventId)) row.errors.push('Duplicate Activity/Event ID in this file');
+      if (row.eventId) seenEventIds.add(row.eventId);
       row.eventName = String(source.eventName || '').trim();
       row.eventDescription = String(source.eventDescription || '').trim();
-      row.eventStart = normalizeImportDateTime(source.eventStart);
-      row.eventEnd = source.eventEnd ? normalizeImportDateTime(source.eventEnd) : null;
+      row.eventDate = normalizeImportDate(source.eventDate);
+      row.startTime = normalizeImportTime(source.startTime);
+      row.endTime = normalizeImportTime(source.endTime);
+      row.eventStatus = normalizeEventStatus(source.eventStatus);
+      row.eventStart = validImportDate(row.eventDate)
+        ? `${row.eventDate} ${row.startTime || '00:00:00'}` : null;
+      row.eventEnd = row.endTime && validImportDate(row.eventDate)
+        ? `${row.eventDate} ${row.endTime}` : null;
+      row.createdDate = normalizeImportDate(source.createdDate);
       row.eventLocation = String(source.eventLocation || '').trim();
       if (!row.eventName) row.errors.push('Event name is required');
       if (row.eventName.length > 100) row.errors.push('Event name must be 100 characters or fewer');
-      if (!row.eventStart) row.errors.push('A valid event start date and time is required');
-      if (source.eventEnd && !row.eventEnd) row.errors.push('Invalid event end date and time');
+      if (!validImportDate(row.eventDate)) row.errors.push('Event Date is required and must be a valid date');
+      if (source.startTime && !row.startTime) row.errors.push('Start Time has an invalid time format');
+      if (source.endTime && !row.endTime) row.errors.push('End Time has an invalid time format');
+      if (!row.startTime && validImportDate(row.eventDate)) row.warnings.push('Start Time is blank; the existing database stores date-only events at 00:00');
+      if (!row.eventStatus) row.errors.push('Event Status must be Scheduled, Completed, or Cancelled');
+      if (source.createdDate && !validImportDate(row.createdDate)) row.errors.push('Created Date must be a valid date');
       if (row.eventEnd && row.eventStart && row.eventEnd < row.eventStart) {
         row.errors.push('Event end time must be after the start time');
       }
       if (row.eventDescription.length > 500) row.errors.push('Event description must be 500 characters or fewer');
       if (row.eventLocation.length > 100) row.errors.push('Event location must be 100 characters or fewer');
+      row.eventType = String(source.eventType || '').trim();
+      row.educationGroup = String(source.educationGroup || '').trim();
+      if (row.eventType) row.warnings.push('Activity Type is not stored because the current database has no activity type field');
+      if (row.educationGroup) row.warnings.push('Education Group is not stored because the current database has no event group field');
       const eventKey = `${row.eventName.toLocaleLowerCase()}|${row.eventStart || ''}`;
       if (seenAttendance.has(eventKey)) row.errors.push('Duplicate event in this file');
       seenAttendance.add(eventKey);
-      if (row.eventName && row.eventStart && existingEventKeys.has(eventKey)) {
+      if (row.eventId && existingEventIds.has(row.eventId)) {
+        row.warnings.push('Activity/Event ID already exists');
+        row.duplicate = true;
+      } else if (row.eventName && row.eventStart && existingEventKeys.has(eventKey)) {
         row.warnings.push('An event with the same name and start time already exists');
-        row.operation = 'review';
-      } else {
-        row.operation = 'create';
+        row.duplicate = true;
       }
+      row.operation = row.errors.length ? 'error' : row.duplicate ? 'review' : 'create';
     } else {
-      row.participantIdentifier = String(source.participantIdentifier || '').trim();
-      row.eventId = source.eventId ? Number(source.eventId) : null;
+      const participant = resolveParticipant(source, row);
+      if (!String(source.participantId || '').trim()) row.errors.push('Sponsored Child ID is required');
+      if (!participant) row.errors.push('Sponsored Child ID does not match an existing sponsored child');
+      else row.participantId = Number(participant.id);
+      row.attendanceRecordId = source.attendanceRecordId ? importParticipantId(source.attendanceRecordId) : null;
+      if (source.attendanceRecordId && (!row.attendanceRecordId || row.attendanceRecordId > 4294967295)) row.errors.push('Attendance Record ID must be a positive numeric ID within the database limit');
+      if (row.attendanceRecordId && seenAttendanceRecordIds.has(row.attendanceRecordId)) {
+        row.errors.push('Duplicate Attendance Record ID in this file');
+      }
+      if (row.attendanceRecordId) seenAttendanceRecordIds.add(row.attendanceRecordId);
       row.eventName = String(source.eventName || '').trim();
-      row.eventDate = String(source.eventDate || '').slice(0, 10);
+      row.eventDate = normalizeImportDate(source.eventDate);
       row.attendanceStatus = importAttendanceStatus(source.attendanceStatus);
-      if (!row.participantIdentifier) row.errors.push('Record ID is required');
-      const participant = byIdentifier.get(row.participantIdentifier.toLowerCase())
-        || byIdentifier.get(row.participantIdentifier);
-      if (!participant) row.errors.push('Record ID does not match an existing record');
-      else row.participantId = participant.id;
-      if (!validImportDate(row.eventDate)) row.errors.push('Invalid or missing event date');
-      if (row.eventDate && row.eventDate > new Date().toISOString().slice(0, 10)) row.errors.push('Event date cannot be in the future');
-      if (!row.attendanceStatus) row.errors.push('Attendance status must be Present, Attended, Absent, Excused, or Late');
-      if (!row.eventId && !row.eventName) row.errors.push('Event name or Event ID is required');
-      if (row.eventId && (!Number.isSafeInteger(row.eventId) || row.eventId < 1)) row.errors.push('Invalid event ID');
-      const duplicateKey = `${row.participantId || row.participantIdentifier}|${row.eventId || row.eventName.toLowerCase()}|${row.eventDate}`;
-      if (seenAttendance.has(duplicateKey)) row.errors.push('Duplicate attendance record in this file');
-      seenAttendance.add(duplicateKey);
-      if (row.eventId && !row.errors.length) {
-        const event = eventsById.get(row.eventId);
-        if (!event) row.errors.push('Event ID does not match an existing event');
-        else {
-          row.eventName = event.name;
-          if (event.event_date !== row.eventDate) {
-            row.errors.push('Event date does not match the selected event');
+      if (!row.attendanceStatus) row.errors.push('Attendance Status must be Present or Absent');
+      row.eventId = source.eventId ? importParticipantId(source.eventId) : null;
+      if (source.eventId && (!row.eventId || row.eventId > 4294967295)) row.errors.push('Activity/Event ID must be a positive numeric ID within the database limit');
+      row.checkedInAt = source.checkedInAt ? normalizeImportDateTime(source.checkedInAt) : null;
+      row.checkedOutAt = source.checkedOutAt ? normalizeImportDateTime(source.checkedOutAt) : null;
+      if (source.checkedInAt && !row.checkedInAt) row.errors.push('Check-in Date and Time has an invalid date or time format');
+      if (source.checkedOutAt && !row.checkedOutAt) row.errors.push('Check-out Date and Time has an invalid date or time format');
+      row.recordedBy = String(source.recordedBy || '').trim();
+      row.attendanceRemarks = String(source.attendanceRemarks || '').trim();
+      if (row.recordedBy.length > 150) row.errors.push('Recorded By must be 150 characters or fewer');
+      const event = row.eventId
+        ? eventsById.get(row.eventId)
+        : (validImportDate(row.eventDate) && row.eventName
+          ? eventsByOccurrence.get(`${row.eventName.toLowerCase()}|${row.eventDate}`)?.[0]
+          : null);
+      if (row.eventId && !event) row.errors.push('Activity/Event ID cannot be matched to an existing activity');
+      if (!row.eventId) {
+        if (!row.eventName || !validImportDate(row.eventDate)) {
+          row.errors.push('Provide Activity/Event ID, or both Activity Name and a valid Event Date');
+        } else {
+          const matches = eventsByOccurrence.get(`${row.eventName.toLowerCase()}|${row.eventDate}`) || [];
+          if (matches.length !== 1) row.errors.push(matches.length ? 'Activity Name and Event Date match more than one activity' : 'Activity/Event ID cannot be matched to an existing activity');
+          else row.event = matches[0];
+        }
+      }
+      row.event = row.event || event;
+      if (row.event) {
+        const suppliedEventName = String(source.eventName || '').trim();
+        if (row.eventId && suppliedEventName
+          && suppliedEventName.toLowerCase() !== String(row.event.name).trim().toLowerCase()) {
+          row.warnings.push('Activity Name differs from the event matched by Activity/Event ID; the existing event name is used');
+        }
+        row.eventId = Number(row.event.id);
+        row.eventName = row.event.name;
+        const eventDate = String(row.event.event_date || '').slice(0, 10);
+        if (row.eventDate && row.eventDate !== eventDate) row.errors.push('Event Date does not match the selected activity');
+        row.eventDate = eventDate;
+        row.eventLocation = row.event.location || null;
+        if (String(row.event.status).toLowerCase() === 'cancelled') row.errors.push('Attendance cannot be imported for a cancelled activity');
+        const eventStartsAt = row.event.starts_at instanceof Date
+          ? row.event.starts_at
+          : new Date(String(row.event.starts_at || '').replace(' ', 'T'));
+        if (eventDate > new Date().toISOString().slice(0, 10)
+          || (!Number.isNaN(eventStartsAt.getTime()) && eventStartsAt > new Date())) {
+          row.errors.push('Attendance cannot be imported for a future activity');
+        }
+        if (row.attendanceStatus === 'Absent' && String(row.event.status).toLowerCase() !== 'completed') {
+          row.errors.push('Absent status can only be recorded for a completed activity');
+        }
+      }
+      if (participant && row.event) {
+        const participantDetails = participantView(participant);
+        const suppliedParticipantName = String(source.participantName || '').trim();
+        const rawSuppliedGender = String(source.gender || '').trim().toLowerCase();
+        const suppliedGender = ['m', 'male'].includes(rawSuppliedGender) ? 'male'
+          : ['f', 'female'].includes(rawSuppliedGender) ? 'female' : rawSuppliedGender;
+        const suppliedEducationLevel = String(source.educationLevel || '').trim();
+        if (suppliedParticipantName
+          && normalizeParticipantName(suppliedParticipantName) !== normalizeParticipantName(participantDetails.fullName || '')) {
+          row.warnings.push('Sponsored Child Full Name differs from the existing record; Sponsored Child ID is used');
+        }
+        if (suppliedGender && suppliedGender !== String(participant.gender || '').toLowerCase()) {
+          row.warnings.push('Gender differs from the existing record and is not changed by attendance import');
+        }
+        if (suppliedEducationLevel
+          && suppliedEducationLevel.toLowerCase() !== String(participant.education_level || '').toLowerCase()) {
+          row.warnings.push('Education Level differs from the existing record and is not changed by attendance import');
+        }
+        const registrationDate = importDateOnly(
+          participant.sponsorship_registered_at || participant.sponsorship_start_date || participant.created_at,
+        );
+        if (validImportDate(registrationDate) && row.eventDate < registrationDate) {
+          row.errors.push('Event Date is earlier than the Sponsored Child registration date');
+        }
+        for (const [label, value] of [['Check-in', row.checkedInAt], ['Check-out', row.checkedOutAt]]) {
+          if (value) {
+            const valueDate = value.slice(0, 10);
+            if (validImportDate(registrationDate) && valueDate < registrationDate) {
+              row.errors.push(`${label} Date is earlier than the Sponsored Child registration date`);
+            }
+            if (valueDate !== row.eventDate) row.errors.push(`${label} Date must match the Event Date`);
+            if (value > new Date().toISOString().replace('T', ' ').slice(0, 19)) {
+              row.errors.push(`${label} Date and Time cannot be in the future`);
+            }
           }
         }
-      }
-      if (participant && row.eventName && validImportDate(row.eventDate)) {
-        const attendanceKey = `${participant.id}|${row.eventName.toLocaleLowerCase()}|${row.eventDate}`;
-        const occurrenceKey = `${row.eventName.toLocaleLowerCase()}|${row.eventDate}`;
-        if (
-          existingAttendanceKeys.has(attendanceKey) && ['Present', 'Late'].includes(row.attendanceStatus) ||
-          scheduledAttendanceKeys.has(occurrenceKey) && ['Absent', 'Excused'].includes(row.attendanceStatus)
-        ) {
-          row.warnings.push('Attendance record already exists');
-          row.operation = 'review';
-        } else {
-          row.operation = 'create';
+        if (row.checkedInAt && row.checkedOutAt && row.checkedOutAt < row.checkedInAt) {
+          row.errors.push('Check-out Date and Time cannot be earlier than Check-in Date and Time');
         }
-      } else {
-        row.operation = 'create';
+        if (row.attendanceStatus === 'Absent' && (row.checkedInAt || row.checkedOutAt)) {
+          row.errors.push('Absent records must not include check-in or check-out timestamps');
+        }
       }
+      const occurrenceKey = row.eventId ? `event:${row.eventId}` : `${row.eventName.toLowerCase()}|${row.eventDate}`;
+      const duplicateKey = `${row.participantId || ''}|${occurrenceKey}`;
+      if (seenAttendance.has(duplicateKey)) row.errors.push('Duplicate attendance record in this file');
+      seenAttendance.add(duplicateKey);
+      if (row.attendanceRecordId && existingAttendanceKeys.has(`record:${row.attendanceRecordId}`)) {
+        row.warnings.push('Attendance Record ID already exists');
+        row.duplicate = true;
+      }
+      if (row.event && participant && row.eventDate) {
+        const keyById = `${participant.id}|event:${row.eventId}`;
+        const keyByName = `${participant.id}|${row.eventName.toLowerCase()}|${row.eventDate}`;
+        if (existingAttendanceKeys.has(keyById) || existingAttendanceKeys.has(keyByName)) {
+          row.warnings.push('Attendance record already exists');
+          row.duplicate = true;
+        }
+      }
+      row.operation = row.errors.length ? 'error' : row.duplicate ? 'review' : 'create';
     }
     normalized.push(row);
   }
   return { errors, normalized };
 }
 
-app.post('/api/participants/import/preview', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+app.post('/api/participants/import/preview', authenticate, checkImportPermission, async (req, res, next) => {
   try {
     await Promise.all([
       participantProfileColumnsReady,
       educationHistoryReady,
       eventsTableReady,
+      attendanceImportColumnsReady,
       historicalAttendanceSummaryReady,
     ]);
     const fileName = safeImportFileName(req.body.fileName || 'import.csv');
-    const result = await validateParticipantImport(req.body.importType, req.body.rows);
+    const result = await validateParticipantImport(
+      req.body.importType, req.body.rows, req.body.headers, req.body.mapping,
+    );
     if (result.errors.length) return res.status(400).json({ error: result.errors[0] });
     const rows = result.normalized.map(({ errors, warnings, ...row }) => ({
       ...row,
@@ -2006,13 +2361,14 @@ app.post('/api/participants/import/preview', authenticate, checkRole(['System Ad
       totalRows: rows.length,
       validRows: rows.filter((row) => row.valid).length,
       warningCount: rows.filter((row) => row.warnings.length).length,
+      duplicateRows: rows.filter((row) => row.duplicate).length,
       errorCount: rows.filter((row) => !row.valid).length,
       rows,
     });
   } catch (error) { next(error); }
 });
 
-app.post('/api/participants/import/commit', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+app.post('/api/participants/import/commit', authenticate, checkImportPermission, async (req, res, next) => {
   let connection;
   let transactionActive = false;
   let duplicateLockName = null;
@@ -2022,38 +2378,41 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
       educationHistoryReady,
       participantImportHistoryReady,
       eventsTableReady,
+      attendanceImportColumnsReady,
       historicalAttendanceSummaryReady,
+      participationTrackingReady,
     ]);
     const fileName = safeImportFileName(req.body.fileName || 'import.csv');
     connection = await pool.getConnection();
     await connection.beginTransaction();
     transactionActive = true;
-    if (req.body.importType === 'participants') {
-      duplicateLockName = 'participant-registration-duplicates';
-      const [[lock]] = await connection.execute('SELECT GET_LOCK(?, 10) AS acquired', [duplicateLockName]);
-      if (Number(lock?.acquired) !== 1) {
-        duplicateLockName = null;
-        return res.status(503).json({ error: 'Sponsored child duplicate checks are temporarily unavailable. Please try again.' });
-      }
+    duplicateLockName = `participant-import-${req.body.importType}`;
+    const [[lock]] = await connection.execute('SELECT GET_LOCK(?, 10) AS acquired', [duplicateLockName]);
+    if (Number(lock?.acquired) !== 1) {
+      duplicateLockName = null;
+      return res.status(503).json({ error: 'Import duplicate checks are temporarily unavailable. Please try again.' });
     }
-    const validation = await validateParticipantImport(req.body.importType, req.body.rows);
+
+    const validation = await validateParticipantImport(
+      req.body.importType, req.body.rows, req.body.headers, req.body.mapping,
+    );
     if (validation.errors.length) return res.status(400).json({ error: validation.errors[0] });
     const decisions = req.body.decisions && typeof req.body.decisions === 'object' ? req.body.decisions : {};
     const validRows = validation.normalized.filter((row) => row.errors.length === 0);
+    const operationFor = (row) => String(
+      decisions[String(row.rowNumber)] || (row.operation === 'review' ? 'skip' : row.operation || 'create'),
+    );
     for (const row of validRows) {
-      const decision = decisions[String(row.rowNumber)]
-        || (row.operation === 'review' ? 'skip' : row.operation || 'create');
-      const allowed = req.body.importType === 'participants'
-        ? row.matchingParticipantId ? ['skip', 'update', 'create'] : ['skip', 'create']
-        : ['skip', 'create'];
-      if (!allowed.includes(String(decision))) {
+      const decision = operationFor(row);
+      const allowed = row.duplicate ? ['skip']
+        : req.body.importType === 'participants'
+          ? row.matchingParticipantId ? ['skip', 'update', 'create'] : ['skip', 'create']
+          : ['skip', 'create'];
+      if (!allowed.includes(decision)) {
         return res.status(400).json({ error: `Invalid import decision for row ${row.rowNumber}` });
       }
     }
     const invalidCount = validation.normalized.length - validRows.length;
-    const operationFor = (row) => String(
-      decisions[String(row.rowNumber)] || (row.operation === 'review' ? 'skip' : row.operation || 'create'),
-    );
     const participantCredentials = new Map();
     if (req.body.importType === 'participants') {
       const createRows = validRows.filter((row) => operationFor(row) === 'create');
@@ -2067,102 +2426,121 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
         }));
       }
     }
-    let participantsImported = 0;
-    let participantsUpdated = 0;
-    let attendanceImported = 0;
-    let attendanceSummariesImported = 0;
-    let educationImported = 0;
-    let eventsImported = 0;
-    let skipped = invalidCount;
-    const educationRecords = [];
-    const attendanceEvents = new Map();
-    const attendanceRecords = [];
 
+    const counts = {
+      participantsImported: 0,
+      participantsUpdated: 0,
+      attendanceImported: 0,
+      attendanceSummariesImported: 0,
+      educationImported: 0,
+      eventsImported: 0,
+      skipped: 0,
+      failed: invalidCount,
+    };
+    const rowResults = new Map();
+    const markSkipped = (row, reason) => {
+      counts.skipped += 1;
+      rowResults.set(row.rowNumber, {
+        rowNumber: row.rowNumber,
+        result: 'Skipped',
+        errors: row.errors,
+        warnings: [...row.warnings, ...(reason ? [reason] : [])],
+      });
+    };
+
+    for (const row of validation.normalized) {
+      if (row.errors.length) {
+        rowResults.set(row.rowNumber, {
+          rowNumber: row.rowNumber, result: 'Failed', errors: row.errors, warnings: row.warnings,
+        });
+      }
+    }
     for (const row of validRows) {
       const operation = operationFor(row);
       if (operation === 'skip') {
-        skipped += 1;
+        markSkipped(row);
         continue;
       }
+
       if (req.body.importType === 'participants') {
-        const existingId = row.matchingParticipantId;
-        if (existingId && operation === 'review') {
-          skipped += 1;
-          continue;
-        }
-        if (existingId && operation === 'update') {
+        if (row.matchingParticipantId && operation === 'update') {
+          const name = [row.firstName, row.middleName, row.lastName].filter(Boolean).join(' ');
+          const participationStatus = row.currentStatus === 'INACTIVE'
+            ? 'REMOVED_FROM_SPONSORSHIP' : row.currentStatus;
           const [[existingParticipant]] = await connection.execute(
-            `SELECT id, participant_type, education_level, school_name_encrypted,
-                    school_address_encrypted, program_course_encrypted, enrollment_date, created_at
+            `SELECT middle_name_encrypted, participation_status, sponsorship_status, status
              FROM participants WHERE id = ? LIMIT 1`,
-            [existingId],
+            [row.matchingParticipantId],
           );
-          if (existingParticipant) {
-            await preservePreviousCurrentSchool(connection, existingParticipant, row.currentSchool, req.user.id);
-          }
-          const fieldValues = {
-            firstName: ['first_name_encrypted', (value) => encrypt(value)],
-            middleName: ['middle_name_encrypted', (value) => encrypt(value)],
-            lastName: ['last_name_encrypted', (value) => encrypt(value)],
-            dateOfBirth: ['date_of_birth_encrypted', (value) => encrypt(value)],
-            gender: ['gender', (value) => value],
-            address: ['address_encrypted', (value) => encrypt(value)],
-            phone: ['phone_encrypted', (value) => encrypt(value)],
-            guardianName: ['emergency_contact_name_encrypted', (value) => encrypt(value)],
-            guardianContact: ['emergency_contact_phone_encrypted', (value) => encrypt(value)],
-            medicalConditions: ['medical_conditions_encrypted', (value) => encrypt(value)],
-            educationLevel: ['education_level', (value) => value],
-            gradeLevel: ['grade_level', (value) => value],
-            collegeCourse: ['program_course_encrypted', (value) => encrypt(value)],
-            currentSchool: ['school_name_encrypted', (value) => encrypt(value)],
-            schoolAddress: ['school_address_encrypted', (value) => encrypt(value)],
-            registrationDate: ['created_at', (value) => value],
-            sponsorshipRegistrationDate: ['sponsorship_registered_at', (value) => value],
+          const middleName = row.middleName || decrypt(existingParticipant?.middle_name_encrypted) || '';
+          const updatedName = [row.firstName, middleName, row.lastName].filter(Boolean).join(' ');
+          const fields = {
+            full_name_encrypted: encrypt(updatedName),
+            first_name_encrypted: encrypt(row.firstName),
+            last_name_encrypted: encrypt(row.lastName),
+            date_of_birth_encrypted: encrypt(row.dateOfBirth),
+            gender: row.gender,
+            sponsorship_registered_at: row.registrationDate,
+            status: row.currentStatus === 'INACTIVE' ? 'inactive' : 'active',
+            sponsorship_status: row.currentStatus === 'INACTIVE' ? 'inactive' : 'active',
+            participation_status: participationStatus,
           };
-          const fields = {};
-          for (const [sourceField, [column, transform]] of Object.entries(fieldValues)) {
-            if (row[sourceField] !== undefined && String(row[sourceField]).trim() !== '') {
-              fields[column] = transform(row[sourceField]);
-            }
-          }
-          const nameParts = ['firstName', 'middleName', 'lastName']
-            .map((field) => row[field])
-            .filter((value) => String(value || '').trim());
-          if (nameParts.length) fields.full_name_encrypted = encrypt(nameParts.join(' '));
+          if (row.middleName) fields.middle_name_encrypted = encrypt(row.middleName);
+          if (row.address) fields.address_encrypted = encrypt(row.address);
+          if (row.phone) fields.phone_encrypted = encrypt(row.phone);
+          if (row.guardianName) fields.emergency_contact_name_encrypted = encrypt(row.guardianName);
+          if (row.guardianContact) fields.emergency_contact_phone_encrypted = encrypt(row.guardianContact);
           await connection.execute(
             `UPDATE participants SET ${Object.keys(fields).map((field) => `${field} = ?`).join(', ')},
-             updated_at = NOW() WHERE id = ?`,
-            [...Object.values(fields), existingId],
+             updated_at = NOW() WHERE id = ? AND participant_type = 'sponsored_child'`,
+            [...Object.values(fields), row.matchingParticipantId],
           );
-          participantsUpdated += 1;
+          const previousStatus = String(existingParticipant?.status || '').toLowerCase() === 'inactive'
+            || String(existingParticipant?.sponsorship_status || '').toLowerCase() === 'inactive'
+            || String(existingParticipant?.participation_status || '').toUpperCase() === 'REMOVED_FROM_SPONSORSHIP'
+            ? 'INACTIVE'
+            : String(existingParticipant?.participation_status || 'ACTIVE').toUpperCase();
+          if (previousStatus !== row.currentStatus) {
+            await connection.execute(
+              `INSERT INTO sponsored_child_participation_history
+                 (participant_id, action_type, previous_status, current_status, reason, created_by)
+               VALUES (?, 'status_imported', ?, ?, ?, ?)`,
+              [
+                row.matchingParticipantId, previousStatus, row.currentStatus,
+                `Status updated by import of ${fileName}`, req.user.id,
+              ],
+            );
+          }
+          counts.participantsUpdated += 1;
+          rowResults.set(row.rowNumber, { rowNumber: row.rowNumber, result: 'Updated', errors: [], warnings: row.warnings });
           continue;
         }
+
         const name = [row.firstName, row.middleName, row.lastName].filter(Boolean).join(' ');
-        const proposedCode = row.participantIdentifier && !row.matchingParticipantId
-          ? row.participantIdentifier
-          : `FMC-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+        const generatedCode = row.participantCode
+          || `FMC-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
         const credentials = participantCredentials.get(row.rowNumber);
         if (!credentials) throw new Error(`Sponsored child import credentials were not prepared for row ${row.rowNumber}`);
+        const participationStatus = row.currentStatus === 'INACTIVE'
+          ? 'REMOVED_FROM_SPONSORSHIP' : row.currentStatus;
         const [result] = await connection.execute(
           `INSERT INTO participants
-             (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted,
+             (id, participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted,
               last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted,
-              passcode_hash, passcode_encrypted,
-              emergency_contact_name_encrypted, emergency_contact_phone_encrypted,
-              medical_conditions_encrypted, education_level, grade_level, program_course_encrypted,
-              school_name_encrypted, school_address_encrypted, sponsorship_registered_at,
-              status, participant_code, sponsorship_lifecycle, created_at, updated_at)
-           VALUES ('sponsored_child', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 'new', ?, ?)`,
+              passcode_hash, passcode_encrypted, emergency_contact_name_encrypted,
+              emergency_contact_phone_encrypted, sponsorship_registered_at, status,
+              sponsorship_status, participation_status, participant_code, sponsorship_lifecycle,
+              created_at, updated_at)
+           VALUES (?, 'sponsored_child', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
           [
-            encrypt(name), encrypt(row.firstName), encrypt(row.middleName || null), encrypt(row.lastName),
-            encrypt(row.dateOfBirth), row.gender, encrypt(row.phone || null), encrypt(row.address || null),
+            row.participantId || null, encrypt(name), encrypt(row.firstName), encrypt(row.middleName || null),
+            encrypt(row.lastName), encrypt(row.dateOfBirth), row.gender,
+            encrypt(row.phone || null), encrypt(row.address || null),
             credentials.passcodeHash, credentials.encryptedPasscode,
             encrypt(row.guardianName || null), encrypt(row.guardianContact || null),
-            encrypt(row.medicalConditions || null), row.educationLevel || null, row.gradeLevel || null,
-            encrypt(row.collegeCourse || null), encrypt(row.currentSchool || null),
-            encrypt(row.schoolAddress || null), row.sponsorshipRegistrationDate || null,
-            proposedCode, row.registrationDate || new Date().toISOString().slice(0, 10),
-            row.registrationDate || new Date().toISOString().slice(0, 10),
+            row.registrationDate, row.currentStatus === 'INACTIVE' ? 'inactive' : 'active',
+            row.currentStatus === 'INACTIVE' ? 'inactive' : 'active',
+            participationStatus, generatedCode, row.registrationDate, row.registrationDate,
           ],
         );
         const qrUid = encrypt(crypto.randomUUID());
@@ -2174,121 +2552,83 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
            VALUES (?, ?, ?, 'active', NOW(), ?, NOW())`,
           [result.insertId, qrUid, `uploads/qr_codes/${qrFile}`, req.user.id],
         );
-        participantsImported += 1;
+        counts.participantsImported += 1;
+        rowResults.set(row.rowNumber, { rowNumber: row.rowNumber, result: 'Imported', errors: [], warnings: row.warnings });
       } else if (req.body.importType === 'education') {
-        if (operation === 'review') {
-          skipped += 1;
-          continue;
-        }
-        educationRecords.push([
-          row.participantId, row.educationLevel, encrypt(row.schoolName),
-          encrypt(row.schoolAddress || null), Number(row.startYear),
-          row.endYear === null ? null : Number(row.endYear), row.status,
-          encrypt(row.courseStrand || null), encrypt(row.notes || null),
-          educationFingerprint(row), req.user.id,
-        ]);
+        await connection.execute(
+          `INSERT INTO participant_education_history
+             (id, participant_id, education_level, school_name_encrypted, school_address_encrypted,
+              start_year, end_year, status, course_strand_encrypted, notes_encrypted,
+              record_fingerprint, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            row.educationHistoryId || null, row.participantId, row.educationLevel,
+            encrypt(row.schoolName), encrypt(row.schoolAddress || null),
+            Number(row.startYear), row.endYear === null ? null : Number(row.endYear),
+            row.status, null, encrypt(row.notes || null), educationFingerprint(row), req.user.id,
+          ],
+        );
+        counts.educationImported += 1;
+        rowResults.set(row.rowNumber, { rowNumber: row.rowNumber, result: 'Imported', errors: [], warnings: row.warnings });
       } else if (req.body.importType === 'attendanceSummary') {
-        if (operation === 'review') {
-          skipped += 1;
-          continue;
-        }
         await connection.execute(
           `INSERT INTO participant_attendance_summaries
              (participant_id, attendance_year, required_count, attended_count, absent_count, created_by)
            VALUES (?, ?, ?, ?, ?, ?)`,
           [row.participantId, row.year, row.required, row.attended, row.absent, req.user.id],
         );
-        attendanceSummariesImported += 1;
+        counts.attendanceSummariesImported += 1;
+        rowResults.set(row.rowNumber, { rowNumber: row.rowNumber, result: 'Imported', errors: [], warnings: row.warnings });
       } else if (req.body.importType === 'events') {
         await connection.execute(
-          `INSERT INTO events (name, description, starts_at, ends_at, location, is_sample, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO events
+             (id, name, description, starts_at, ends_at, location, status, is_sample, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, FALSE, ?, ?)`,
           [
-            row.eventName,
-            row.eventDescription || null,
-            row.eventStart,
-            row.eventEnd,
-            row.eventLocation || null,
-            Boolean(row.eventDescription?.startsWith('Synthetic ')),
-            req.user.id,
+            row.eventId || null, row.eventName, row.eventDescription || null,
+            row.eventStart, row.eventEnd || null, row.eventLocation || null,
+            row.eventStatus, req.user.id, row.createdDate ? `${row.createdDate} 00:00:00` : new Date(),
           ],
         );
-        eventsImported += 1;
+        counts.eventsImported += 1;
+        rowResults.set(row.rowNumber, { rowNumber: row.rowNumber, result: 'Imported', errors: [], warnings: row.warnings });
       } else {
-        if (operation === 'review') {
-          skipped += 1;
-          continue;
-        }
-        if (!row.eventId) {
-          attendanceEvents.set(
-            `${row.eventName.toLocaleLowerCase()}|${row.eventDate}`,
-            [row.eventName, `${row.eventDate} 00:00:00`, req.user.id],
-          );
-        }
-        if (row.attendanceStatus === 'Present' || row.attendanceStatus === 'Late') {
-          attendanceRecords.push([
-            row.participantId, row.eventName, `${row.eventDate} 09:00:00`,
-          ]);
-        }
-        attendanceImported += 1;
+        await connection.execute(
+          `INSERT INTO check_in_logs
+             (id, participant_id, event_id, event_name, checked_in_at, checked_out_at,
+              location, status, attendance_status, recorded_by_encrypted, remarks_encrypted, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          [
+            row.attendanceRecordId || null, row.participantId, row.eventId, row.eventName,
+            row.checkedInAt || null, row.checkedOutAt || null, row.eventLocation || null,
+            row.attendanceStatus === 'Present' ? 'checked_in' : 'absent',
+            row.attendanceStatus.toLowerCase(), encrypt(row.recordedBy || null),
+            encrypt(row.attendanceRemarks || null),
+          ],
+        );
+        counts.attendanceImported += 1;
+        rowResults.set(row.rowNumber, { rowNumber: row.rowNumber, result: 'Imported', errors: [], warnings: row.warnings });
       }
     }
-    const eventRows = [...attendanceEvents.values()];
-    for (let offset = 0; offset < eventRows.length; offset += 250) {
-      const batch = eventRows.slice(offset, offset + 250);
-      const placeholders = batch.map(() => '(?, ?, \'scheduled\', ?)').join(', ');
-      await connection.execute(
-        `INSERT INTO events (name, starts_at, status, created_by)
-         VALUES ${placeholders}
-         ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
-        batch.flat(),
-      );
-    }
-    for (let offset = 0; offset < attendanceRecords.length; offset += 250) {
-      const batch = attendanceRecords.slice(offset, offset + 250);
-      const placeholders = batch.map(() => '(?, ?, ?, \'Data import\', \'checked_in\', NOW())').join(', ');
-      await connection.execute(
-        `INSERT INTO check_in_logs
-           (participant_id, event_name, checked_in_at, location, status, created_at)
-         VALUES ${placeholders}`,
-        batch.flat(),
-      );
-    }
-    for (let offset = 0; offset < educationRecords.length; offset += 250) {
-      const batch = educationRecords.slice(offset, offset + 250);
-      const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
-      await connection.execute(
-        `INSERT INTO participant_education_history
-           (participant_id, education_level, school_name_encrypted, school_address_encrypted,
-            start_year, end_year, status, course_strand_encrypted, notes_encrypted,
-            record_fingerprint, created_by)
-         VALUES ${placeholders}`,
-        batch.flat(),
-      );
-    }
-    educationImported = educationRecords.length;
-    const summary = {
-      fileName,
-      importType: req.body.importType,
-      participantsImported,
-      participantsUpdated,
-      attendanceImported,
-      attendanceSummariesImported,
-      educationImported,
-      eventsImported,
-      skipped,
-      failed: invalidCount,
+
+    const summary = { fileName, importType: req.body.importType, ...counts };
+    const details = {
+      summary,
+      rows: validation.normalized.map((row) => rowResults.get(row.rowNumber) || {
+        rowNumber: row.rowNumber, result: 'Skipped', errors: row.errors, warnings: row.warnings,
+      }),
     };
     await connection.execute(
       `INSERT INTO participant_import_history
          (file_name, import_type, imported_by, imported_by_name, participants_imported,
           participants_updated, attendance_imported, attendance_summaries_imported,
-          education_imported, events_imported, skipped, failed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          education_imported, events_imported, skipped, failed, details_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        fileName, req.body.importType, req.user.id,
-        req.user.username || req.user.role, participantsImported, participantsUpdated,
-        attendanceImported, attendanceSummariesImported, educationImported, eventsImported, skipped, invalidCount,
+        fileName, req.body.importType, req.user.id, req.user.username || req.user.role,
+        counts.participantsImported, counts.participantsUpdated, counts.attendanceImported,
+        counts.attendanceSummariesImported, counts.educationImported, counts.eventsImported,
+        counts.skipped, counts.failed, JSON.stringify(details),
       ],
     );
     await writeAuditLog(
@@ -2326,20 +2666,53 @@ app.post('/api/participants/import/commit', authenticate, checkRole(['System Adm
   }
 });
 
-app.get('/api/participants/import/history', authenticate, checkRole(['System Administrator']), async (req, res, next) => {
+app.get('/api/participants/import/history', authenticate, checkRole([...staffRoles, 'Church Staff']), async (req, res, next) => {
   try {
     await participantImportHistoryReady;
+    const canViewAll = ['system administrator', 'church administrator']
+      .includes(String(req.user.role || '').toLowerCase());
     const [rows] = await pool.execute(
       `SELECT id, file_name, import_type, imported_by_name, participants_imported,
               participants_updated, attendance_imported, education_imported,
               attendance_summaries_imported, events_imported, skipped, failed, created_at
-       FROM participant_import_history ORDER BY created_at DESC, id DESC LIMIT 50`,
+       FROM participant_import_history
+       WHERE (? = 1 OR imported_by = ?)
+       ORDER BY created_at DESC, id DESC LIMIT 50`,
+      [canViewAll ? 1 : 0, req.user.id],
     );
     res.json(rows);
   } catch (error) { next(error); }
 });
 
+app.get('/api/participants/import/history/:id', authenticate, checkRole([...staffRoles, 'Church Staff']), async (req, res, next) => {
+  try {
+    await participantImportHistoryReady;
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'Select a valid import history record' });
+    const canViewAll = ['system administrator', 'church administrator']
+      .includes(String(req.user.role || '').toLowerCase());
+    const [[record]] = await pool.execute(
+      `SELECT id, file_name, import_type, participants_imported, participants_updated,
+              attendance_imported, attendance_summaries_imported, education_imported,
+              events_imported, skipped, failed, details_json, created_at
+       FROM participant_import_history WHERE id = ? AND (? = 1 OR imported_by = ?) LIMIT 1`,
+      [id, canViewAll ? 1 : 0, req.user.id],
+    );
+    if (!record) return res.status(404).json({ error: 'Import history record not found' });
+    let details = record.details_json;
+    if (typeof details === 'string') {
+      try {
+        details = JSON.parse(details);
+      } catch (error) {
+        return next(error);
+      }
+    }
+    res.json({ ...record, details_json: undefined, ...(details || {}) });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/participants/:id/history', authenticate, checkPermission('participants:view'), async (req, res, next) => {
+  const participantId = Number(req.params.id);
   try {
     const includeCareHistory = canViewParticipantCare(req.user);
     await Promise.all([
@@ -2347,20 +2720,24 @@ app.get('/api/participants/:id/history', authenticate, checkPermission('particip
       educationHistoryReady,
       historicalAttendanceSummaryReady,
       participationTrackingReady,
+      sponsorshipTablesReady,
       eventsTableReady,
       ...(includeCareHistory ? [sponsoredChildUpdatesReady] : []),
     ]);
-    const participantId = Number(req.params.id);
     if (!Number.isSafeInteger(participantId) || participantId < 1) {
       return res.status(400).json({ error: 'Select a valid record' });
     }
     if (!await hasParticipantScope(req.user, participantId)) {
       return res.status(404).json({ error: 'Record not found or not assigned to your group.' });
     }
-    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
-    const historyPage = Math.max(1, Number.parseInt(req.query.historyPage, 10) || 1);
-    const pageSize = Math.min(50, Math.max(1, Number.parseInt(req.query.pageSize, 10) || 20));
-    const historyPageSize = Math.min(50, Math.max(1, Number.parseInt(req.query.historyPageSize, 10) || 20));
+    let attendancePagination;
+    let timelinePagination;
+    try {
+      attendancePagination = parsePage(req.query, 'page', 'pageSize');
+      timelinePagination = parsePage(req.query, 'historyPage', 'historyPageSize');
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
     const year = /^\d{4}$/.test(String(req.query.year || ''))
       ? Number(req.query.year)
       : null;
@@ -2375,10 +2752,10 @@ app.get('/api/participants/:id/history', authenticate, checkPermission('particip
       ? String(req.query.status).toLowerCase()
       : '';
     const history = await loadParticipantDetailHistory(participantId, {
-      page,
-      pageSize,
-      historyPage,
-      historyPageSize,
+      page: attendancePagination.page,
+      pageSize: attendancePagination.pageSize,
+      historyPage: timelinePagination.page,
+      historyPageSize: timelinePagination.pageSize,
       year: year && year >= 1900 && year <= 9999 ? year : null,
       trendYear: trendYear && trendYear >= 1900 && trendYear <= 9999 ? trendYear : null,
       month: month && month >= 1 && month <= 12 ? month : null,
@@ -2388,11 +2765,22 @@ app.get('/api/participants/:id/history', authenticate, checkPermission('particip
     });
     if (!history) return res.status(404).json({ error: 'Record not found' });
     if (history.participant.participantType === 'sponsored_child' && includeCareHistory) {
-      [history.participation] = await getSponsoredParticipationSummaries(participantId);
+      [history.participation] = await getSponsoredParticipationSummaries(participantId, {
+        includeAllCsvAttendance: true,
+      });
       history.participant.status = history.participation?.status || 'ACTIVE';
     }
     res.json(history);
-  } catch (error) { next(error); }
+  } catch (error) {
+    console.error('Participant history retrieval failed', {
+      participantId,
+      code: error.code || 'UNKNOWN',
+      message: error.message,
+      stack: error.stack,
+    });
+    if (res.headersSent) return next(error);
+    res.status(500).json({ error: 'Unable to retrieve this child history right now. Please try again.' });
+  }
 });
 
 app.get(
@@ -3247,9 +3635,12 @@ app.delete('/api/participants/:id', authenticate, checkPermission('participants:
     // Revoke any active QR codes for the participant
     await connection.execute("UPDATE qr_codes SET status = 'revoked', revoked_at = NOW() WHERE participant_id = ?", [req.params.id]);
     await connection.execute('DELETE FROM sponsorship_assignments WHERE participant_id = ?', [req.params.id]);
+    await writeAuditLog(req.user, 'participant.deleted', 'participant', req.params.id, {
+      deletionType: 'soft',
+      historyPreserved: true,
+    }, connection);
     await connection.commit();
     transactionActive = false;
-    await writeAuditLog(req.user, 'participant.deleted', 'participant', req.params.id);
     res.json({ deleted: true });
   } catch (error) {
     if (connection && transactionActive) await connection.rollback();
@@ -3785,7 +4176,9 @@ app.delete('/api/sponsorship/children/:id/sponsor-assignment', authenticate, che
 });
 
 async function getSponsoredParticipationSummaries(participantId = null, options = {}) {
-  await Promise.all([participantProfileColumnsReady, eventsTableReady, participationTrackingReady]);
+  await Promise.all([
+    participantProfileColumnsReady, eventsTableReady, attendanceImportColumnsReady, participationTrackingReady,
+  ]);
   const childFilter = participantId ? 'AND p.id = ?' : '';
   const educationFilter = options.educationLevel ? 'AND p.education_level = ?' : '';
   const activeFilter = options.activeOnly
@@ -3813,17 +4206,25 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
 
   const participantIds = participants.map((row) => row.id);
   const placeholders = participantIds.map(() => '?').join(', ');
+  const eventSampleFilter = options.includeAllCsvAttendance
+    ? `(is_sample = FALSE OR description = 'Synthetic monthly attendance record.')`
+    : `(is_sample = FALSE OR starts_at >= '2013-01-01')`;
   const [events] = await pool.query(
     `SELECT id, name, starts_at, location FROM events
-     WHERE is_sample = FALSE AND status = 'completed' AND starts_at < NOW()
+     WHERE ${eventSampleFilter}
+       AND status = 'completed' AND starts_at < NOW()
      ORDER BY starts_at ASC, id ASC`,
   );
   const [checkIns] = await pool.execute(
-    `SELECT participant_id, event_name, location, checked_in_at
-     FROM check_in_logs
-     WHERE participant_id IN (${placeholders})
-       AND status = 'checked_in' AND checked_in_at IS NOT NULL
-     ORDER BY checked_in_at ASC, id ASC`,
+    `SELECT c.participant_id, c.event_name, c.location, c.checked_in_at,
+            DATE_FORMAT(e.starts_at, '%Y-%m-%d') AS event_date,
+            c.attendance_status
+     FROM check_in_logs c
+     LEFT JOIN events e ON e.id = c.event_id
+     WHERE c.participant_id IN (${placeholders})
+       AND ((c.status = 'checked_in' AND c.checked_in_at IS NOT NULL)
+         OR (c.attendance_status = 'present' AND c.event_id IS NOT NULL))
+     ORDER BY COALESCE(c.checked_in_at, e.starts_at), c.id`,
     participantIds,
   );
   const [actions] = await pool.execute(
@@ -3850,6 +4251,8 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
       eventName: row.event_name,
       location: row.location,
       checkedInAt: row.checked_in_at,
+      eventDate: row.event_date,
+      attendanceStatus: row.attendance_status,
     });
     checkInsByChild.set(Number(row.participant_id), childRows);
   }
@@ -3879,8 +4282,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
     });
     const childActions = actionsByChild.get(Number(row.id)) || [];
     if (
-      tracking.monthsMonitored >= 4
-      && tracking.currentYear.absent > GROUNDS_FOR_DEPARTURE_ABSENCES
+      tracking.currentYear.absent >= GROUNDS_FOR_DEPARTURE_ABSENCES
       && !childActions.some((action) =>
         action.type === 'grounds_for_departure' &&
         action.evaluationYear === tracking.currentYear.year)
@@ -3890,7 +4292,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
         `INSERT IGNORE INTO sponsored_child_participation_history
          (participant_id, action_type, evaluation_year, previous_status, current_status, reason, absence_count)
          VALUES (?, 'grounds_for_departure', ?, 'WARNING', 'GROUNDS_FOR_DEPARTURE',
-                 'More than six absences in the current calendar year after four months of monitoring', ?)`,
+                 'Six or more absences in the current calendar year', ?)`,
         [row.id, tracking.currentYear.year, tracking.currentYear.absent],
       );
       if (result.affectedRows === 1) {
@@ -3900,7 +4302,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
           evaluationYear: tracking.currentYear.year,
           previousStatus: 'WARNING',
           currentStatus: 'GROUNDS_FOR_DEPARTURE',
-          reason: 'More than six absences in the current calendar year after four months of monitoring',
+          reason: 'Six or more absences in the current calendar year',
           absenceCount: tracking.currentYear.absent,
           administrator: 'System',
           createdAt: new Date(),
@@ -3913,14 +4315,10 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
     const inactiveAction = childActions.slice().reverse().find((action) => action.type === 'set_inactive') || null;
     const removed = String(row.participant_status || '').toLowerCase() === 'inactive'
       || String(row.sponsorship_status || '').toLowerCase() === 'inactive'
-      || row.participation_status === 'REMOVED_FROM_SPONSORSHIP'
-      || Boolean(inactiveAction)
-      || childActions.some((action) => action.type === 'removed');
+      || row.participation_status === 'REMOVED_FROM_SPONSORSHIP';
     const currentStatus = getParticipationStatus({
       currentYearAbsences: tracking.currentYear.absent,
-      secondChanceGranted: Boolean(secondChanceIsCurrentYear),
       removed,
-      monthsMonitored: tracking.monthsMonitored,
     });
     const postSecondChanceAbsences = secondChanceIsCurrentYear
       ? Math.max(0, tracking.currentYear.absent - secondChance.absenceCount)
@@ -3956,7 +4354,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
   }));
 }
 
-app.get('/api/sponsorship/children', authenticate, checkSponsorshipView, async (req, res, next) => {
+app.get('/api/sponsorship/children', authenticate, checkSponsorshipChildrenView, async (req, res, next) => {
   try {
     const isGoer = isGoerRole(req.user.role);
     const children = await getSponsoredParticipationSummaries(null, isGoer
@@ -3989,7 +4387,7 @@ app.get('/api/sponsorship/children/:id/history', authenticate, checkSponsorshipV
   } catch (error) { next(error); }
 });
 
-app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkRole(['Church Administrator']), checkPermission('sponsorship:manage'), async (req, res, next) => {
   let connection;
   try {
     const participantId = Number(req.params.id);
@@ -3999,7 +4397,7 @@ app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkPermi
     const [child] = await getSponsoredParticipationSummaries(participantId);
     if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
     if (child.status !== 'GROUNDS_FOR_DEPARTURE') {
-      return res.status(409).json({ error: 'A second chance is available only after more than six absences and at least four months of monitoring' });
+      return res.status(409).json({ error: 'A second chance is available only after six or more absences in the current calendar year' });
     }
     const reason = String(req.body.reason || '').trim().slice(0, 1000);
     connection = await pool.getConnection();
@@ -4018,26 +4416,28 @@ app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkPermi
       return res.status(409).json({ error: 'This child already has a second-chance or removal record' });
     }
     await connection.execute(
-      `UPDATE participants SET participation_status = 'SECOND_CHANCE'
+      `UPDATE participants SET participation_status = 'ACTIVE'
        WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'`,
       [participantId],
     );
     await connection.execute(
       `INSERT INTO sponsored_child_participation_history
        (participant_id, action_type, evaluation_year, previous_status, current_status, reason, absence_count, created_by)
-       VALUES (?, 'second_chance', ?, 'GROUNDS_FOR_DEPARTURE', 'SECOND_CHANCE', ?, ?, ?)`,
+       VALUES (?, 'second_chance', ?, 'GROUNDS_FOR_DEPARTURE', 'ACTIVE', ?, ?, ?)`,
       [participantId, child.currentYear.year, reason || null, child.currentYear.absent, req.user.id],
     );
     await connection.commit();
     await writeAuditLog(req.user, 'sponsorship.second_chance.granted', 'participant', participantId, {
       previousStatus: 'GROUNDS_FOR_DEPARTURE',
-      newStatus: 'SECOND_CHANCE',
+      newStatus: 'ACTIVE',
       evaluationYear: child.currentYear.year,
       absenceCount: child.currentYear.absent,
       reason: reason || null,
     });
-    const [updatedChild] = await getSponsoredParticipationSummaries(participantId);
-    res.json(updatedChild);
+    const [updatedChild] = await getSponsoredParticipationSummaries(participantId, {
+      recordThresholdHistory: false,
+    });
+    res.json({ ...updatedChild, status: 'ACTIVE' });
   } catch (error) {
     if (connection) await connection.rollback();
     next(error);
@@ -4100,7 +4500,7 @@ app.post('/api/sponsorship/children/:id/set-inactive', authenticate, checkRole([
       `INSERT IGNORE INTO sponsored_child_participation_history
        (participant_id, action_type, evaluation_year, previous_status, current_status, reason, absence_count)
        VALUES (?, 'grounds_for_departure', ?, 'WARNING', 'GROUNDS_FOR_DEPARTURE',
-               'More than six absences in the current calendar year after four months of monitoring', ?)`,
+               'Six or more absences in the current calendar year', ?)`,
       [participantId, child.currentYear.year, child.currentYear.absent],
     );
     const [existingInactiveAction] = await connection.execute(
@@ -4151,7 +4551,8 @@ app.post('/api/sponsorship/children/:id/set-inactive', authenticate, checkRole([
   }
 });
 
-app.post('/api/sponsorship/children/:id/remove', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
+app.post('/api/sponsorship/children/:id/remove', authenticate, checkRole(['Church Administrator']), checkPermission('sponsorship:manage'), async (req, res, next) => {
+  return res.status(410).json({ error: 'Use the authorized Inactive status action. Second Chance is not a separate status.' });
   let connection;
   try {
     const participantId = Number(req.params.id);
@@ -4533,6 +4934,257 @@ app.post('/api/participants/:id/profile', authenticate, checkPermission('portal:
   } catch (error) { next(error); }
 });
 
+const REPORT_EXPORT_PAGE_SIZE = 500;
+const REPORT_STATUS_LABELS = {
+  ACTIVE: 'Active',
+  WARNING: 'Warning',
+  GROUNDS_FOR_DEPARTURE: 'Grounds for Departure',
+  REMOVED_FROM_SPONSORSHIP: 'Inactive',
+};
+
+function exportStatusSql(alias = 'p') {
+  return `CASE
+    WHEN LOWER(COALESCE(${alias}.status, '')) = 'inactive'
+      OR LOWER(COALESCE(${alias}.sponsorship_status, '')) = 'inactive'
+      OR UPPER(COALESCE(${alias}.participation_status, '')) = 'REMOVED_FROM_SPONSORSHIP'
+      THEN 'REMOVED_FROM_SPONSORSHIP'
+    WHEN UPPER(COALESCE(${alias}.participation_status, '')) IN ('WARNING', 'GROUNDS_FOR_DEPARTURE')
+      THEN UPPER(${alias}.participation_status)
+    ELSE 'ACTIVE'
+  END`;
+}
+
+function parseExportYear(value) {
+  const raw = String(value || '').trim();
+  return !raw || /^\d{4}$/.test(raw) ? raw : null;
+}
+
+function parseExportMonth(value) {
+  const raw = String(value || '').trim();
+  return !raw || /^\d{4}-(0[1-9]|1[0-2])$/.test(raw) ? raw : null;
+}
+
+function parseExportStatus(value) {
+  const raw = String(value || '').trim().toUpperCase();
+  if (!raw || raw === 'ALL') return '';
+  return ['ACTIVE', 'WARNING', 'GROUNDS_FOR_DEPARTURE', 'INACTIVE', 'REMOVED_FROM_SPONSORSHIP'].includes(raw)
+    ? (raw === 'INACTIVE' ? 'REMOVED_FROM_SPONSORSHIP' : raw)
+    : null;
+}
+
+function participantExportFilters(req, alias = 'p') {
+  const filters = {
+    educationLevel: String(req.query.educationLevel || '').trim(),
+    gender: String(req.query.gender || '').trim(),
+    status: parseExportStatus(req.query.status),
+    registrationYear: parseExportYear(req.query.registrationYear),
+  };
+  if (filters.status === null) return { error: 'Select a supported sponsored child status' };
+  if (filters.registrationYear === null) return { error: 'Registration year must use YYYY format' };
+  if (filters.educationLevel.length > 50 || filters.gender.length > 20) {
+    return { error: 'One or more report filters are too long' };
+  }
+  const clauses = [];
+  const params = [];
+  if (filters.educationLevel) {
+    clauses.push(`${alias}.education_level = ?`);
+    params.push(filters.educationLevel);
+  }
+  if (filters.gender) {
+    clauses.push(`${alias}.gender = ?`);
+    params.push(filters.gender);
+  }
+  if (filters.registrationYear) {
+    clauses.push(`YEAR(COALESCE(${alias}.sponsorship_registered_at, ${alias}.sponsorship_start_date, ${alias}.created_at)) = ?`);
+    params.push(Number(filters.registrationYear));
+  }
+  return { filters, clauses, params };
+}
+
+async function reportParticipationStatuses() {
+  const children = await getSponsoredParticipationSummaries(null, { recordThresholdHistory: false });
+  return new Map(children.map((child) => [Number(child.id), child.status]));
+}
+
+function csvDate(value) {
+  if (!value) return '';
+  if (!(value instanceof Date)) return String(value);
+  const pad = (part) => String(part).padStart(2, '0');
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
+}
+
+async function streamReportCsv(req, res, {
+  filename,
+  headers,
+  sql,
+  params,
+  mapRow = (row) => row,
+  filterRow = () => true,
+  reportType,
+  filters,
+}) {
+  await writeAuditLog(req.user, 'report.downloaded', 'report', reportType, {
+    reportType,
+    filters,
+  });
+  try {
+    res.status(200);
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.attachment(filename);
+    res.write(`\uFEFF${csvRecord(headers)}\r\n`);
+    let offset = 0;
+    while (!res.destroyed) {
+      const [rows] = await pool.execute(`${sql} LIMIT ? OFFSET ?`, [
+        ...params,
+        REPORT_EXPORT_PAGE_SIZE,
+        offset,
+      ]);
+      if (!rows.length) break;
+      const body = rows
+        .filter(filterRow)
+        .map((row) => mapRow(row))
+        .filter((row) => row !== null)
+        .map(csvRecord)
+        .join('\r\n');
+      offset += rows.length;
+      if (body && !res.write(`${body}\r\n`)) {
+        await new Promise((resolve, reject) => {
+          const onDrain = () => {
+            res.removeListener('close', onClose);
+            resolve();
+          };
+          const onClose = () => {
+            res.removeListener('drain', onDrain);
+            reject(new Error('Report export connection closed'));
+          };
+          res.once('drain', onDrain);
+          res.once('close', onClose);
+        });
+      }
+      if (rows.length < REPORT_EXPORT_PAGE_SIZE) break;
+    }
+    if (!res.destroyed) res.end();
+  } catch (error) {
+    if (!res.headersSent) throw error;
+    console.error('Report CSV streaming failed', error);
+    res.destroy(error);
+  }
+}
+
+const ATTENDANCE_EXPORT_CTE = `
+  WITH event_occurrences AS (
+    SELECT MIN(e.id) AS id, LOWER(TRIM(e.name)) AS event_key,
+           DATE(e.starts_at) AS event_date, MIN(e.name) AS name,
+           MIN(e.starts_at) AS starts_at, MAX(e.ends_at) AS ends_at,
+           MIN(e.location) AS location
+    FROM events e
+    WHERE (e.is_sample = FALSE OR e.starts_at >= '2013-01-01')
+      AND LOWER(e.status) = 'completed' AND e.starts_at < NOW()
+    GROUP BY LOWER(TRIM(e.name)), DATE(e.starts_at)
+  ), checkin_occurrences AS (
+    SELECT c.participant_id, LOWER(TRIM(COALESCE(linked_event.name, c.event_name))) AS event_key,
+           COALESCE(DATE(c.checked_in_at), DATE(linked_event.starts_at)) AS event_date,
+           MIN(c.event_id) AS event_id,
+           MIN(c.id) AS id,
+           MIN(c.checked_in_at) AS checked_in_at,
+           MAX(c.checked_out_at) AS checked_out_at,
+           MIN(COALESCE(linked_event.name, c.event_name)) AS event_name,
+           CASE
+             WHEN MAX(c.attendance_status = 'present') = 1 OR MAX(c.status = 'checked_in') = 1 THEN 'Present'
+             WHEN MAX(c.attendance_status = 'absent') = 1 THEN 'Absent'
+             ELSE 'Absent'
+           END AS attendance_status,
+           MAX(c.recorded_by_encrypted) AS recorded_by_encrypted,
+           MAX(c.remarks_encrypted) AS remarks_encrypted
+    FROM check_in_logs c
+    LEFT JOIN events linked_event ON linked_event.id = c.event_id
+    WHERE (c.status = 'checked_in' AND c.checked_in_at IS NOT NULL AND c.checked_in_at < NOW())
+       OR (c.attendance_status IN ('present', 'absent')
+           AND COALESCE(DATE(c.checked_in_at), DATE(linked_event.starts_at)) <= CURDATE())
+    GROUP BY c.participant_id, LOWER(TRIM(COALESCE(linked_event.name, c.event_name))),
+             COALESCE(DATE(c.checked_in_at), DATE(linked_event.starts_at))
+  ), attendance_export AS (
+    SELECT c.id AS attendance_record_id, p.id AS participant_id,
+           p.full_name_encrypted, p.first_name_encrypted, p.middle_name_encrypted,
+           p.last_name_encrypted, p.date_of_birth_encrypted, p.gender,
+           p.education_level, ${exportStatusSql('p')} AS current_status,
+           e.id AS activity_id, e.name AS activity_name, e.starts_at AS event_date,
+           IF(c.id IS NULL, 'Absent', c.attendance_status) AS attendance_status,
+           c.checked_in_at, c.checked_out_at, c.recorded_by_encrypted, c.remarks_encrypted
+    FROM participants p
+    JOIN event_occurrences e
+      ON e.event_date >= DATE(COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at))
+     AND e.event_date <= CURDATE()
+    LEFT JOIN checkin_occurrences c
+      ON c.participant_id = p.id AND c.event_key = e.event_key AND c.event_date = e.event_date
+    WHERE p.participant_type = 'sponsored_child' AND p.status <> 'deleted'
+    UNION ALL
+    SELECT c.id, p.id, p.full_name_encrypted, p.first_name_encrypted,
+           p.middle_name_encrypted, p.last_name_encrypted, p.date_of_birth_encrypted,
+           p.gender, p.education_level, ${exportStatusSql('p')},
+           c.event_id, c.event_name, COALESCE(c.event_date, c.checked_in_at),
+           c.attendance_status, c.checked_in_at, c.checked_out_at,
+           c.recorded_by_encrypted, c.remarks_encrypted
+    FROM participants p
+    JOIN checkin_occurrences c ON c.participant_id = p.id
+    WHERE p.participant_type = 'sponsored_child' AND p.status <> 'deleted'
+      AND c.event_date >= DATE(COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at))
+      AND NOT EXISTS (
+        SELECT 1 FROM event_occurrences e
+        WHERE e.event_key = c.event_key AND e.event_date = c.event_date
+      )
+  )
+`;
+
+function buildAttendanceExportQuery(req) {
+  const childId = String(req.query.participantId || '').trim();
+  const educationLevel = String(req.query.educationLevel || '').trim();
+  const status = parseExportStatus(req.query.status);
+  const attendanceStatus = String(req.query.attendanceStatus || '').trim().toLowerCase();
+  const year = parseExportYear(req.query.year);
+  const month = parseExportMonth(req.query.month);
+  if (childId && (!/^[1-9]\d*$/.test(childId) || !Number.isSafeInteger(Number(childId)))) {
+    return { error: 'Select a valid sponsored child' };
+  }
+  if (educationLevel.length > 50) return { error: 'Education level filter is too long' };
+  if (status === null) return { error: 'Select a supported sponsored child status' };
+  if (attendanceStatus && !['present', 'absent'].includes(attendanceStatus)) {
+    return { error: 'Attendance status must be Present or Absent' };
+  }
+  if (year === null) return { error: 'Year must use YYYY format' };
+  if (month === null) return { error: 'Month must use YYYY-MM format' };
+  const clauses = [];
+  const params = [];
+  if (childId) {
+    clauses.push('participant_id = ?');
+    params.push(Number(childId));
+  }
+  if (educationLevel) {
+    clauses.push('education_level = ?');
+    params.push(educationLevel);
+  }
+  if (attendanceStatus) {
+    clauses.push('LOWER(attendance_status) = ?');
+    params.push(attendanceStatus);
+  }
+  if (year) {
+    clauses.push('YEAR(event_date) = ?');
+    params.push(Number(year));
+  }
+  if (month) {
+    clauses.push("DATE_FORMAT(event_date, '%Y-%m') = ?");
+    params.push(month);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  return {
+    filters: { participantId: childId || '', educationLevel, status, attendanceStatus, year, month },
+    params,
+    sql: `${ATTENDANCE_EXPORT_CTE}
+      SELECT * FROM attendance_export ${where}
+      ORDER BY event_date ASC, participant_id ASC, activity_name ASC`,
+  };
+}
+
 async function reportRows(range) {
   const dateFilter = range === 'monthly'
     ? `c.checked_in_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
@@ -4577,6 +5229,278 @@ app.get('/api/reports/attendance', authenticate, checkPermission('reports:view')
     res.json({ range, records: rows });
   } catch (error) { next(error); }
 });
+
+app.get('/api/reports/export-counts', authenticate, checkPermission('reports:view'), async (req, res, next) => {
+  try {
+    const counts = {
+      sponsoredChildren: null,
+      educationHistory: null,
+      churchActivities: null,
+      attendanceRecords: null,
+    };
+    const countTasks = [];
+    if (hasReportCategoryPermission(req.user, 'sponsorship:view')) {
+      await Promise.all([
+        participantProfileColumnsReady, educationHistoryReady, eventsTableReady, attendanceImportColumnsReady,
+      ]);
+      countTasks.push(
+        pool.execute(
+          `SELECT COUNT(*) AS count FROM participants
+           WHERE participant_type = 'sponsored_child' AND status <> 'deleted'`,
+        ).then(([[row]]) => { counts.sponsoredChildren = Number(row.count); }),
+        pool.execute(
+          `SELECT COUNT(*) AS count FROM participant_education_history h
+           JOIN participants p ON p.id = h.participant_id
+           WHERE p.participant_type = 'sponsored_child' AND p.status <> 'deleted'`,
+        ).then(([[row]]) => { counts.educationHistory = Number(row.count); }),
+        pool.query(`${ATTENDANCE_EXPORT_CTE} SELECT COUNT(*) AS count FROM attendance_export`)
+          .then(([[row]]) => { counts.attendanceRecords = Number(row.count); }),
+      );
+    }
+    if (hasReportCategoryPermission(req.user, 'events:view')) {
+      await eventsTableReady;
+      countTasks.push(
+        pool.execute('SELECT COUNT(*) AS count FROM events')
+          .then(([[row]]) => { counts.churchActivities = Number(row.count); }),
+      );
+    }
+    await Promise.all(countTasks);
+    res.json(counts);
+  } catch (error) { next(error); }
+});
+
+app.get(
+  '/api/reports/exports/sponsored-children',
+  authenticate,
+  checkPermission('reports:view'),
+  checkReportCategoryPermission('sponsorship:view'),
+  async (req, res, next) => {
+    try {
+      await participantProfileColumnsReady;
+      const filters = participantExportFilters(req);
+      if (filters.error) return res.status(400).json({ error: filters.error });
+      const currentStatuses = await reportParticipationStatuses();
+      const clauses = [
+        "p.participant_type = 'sponsored_child'",
+        "p.status <> 'deleted'",
+        ...filters.clauses,
+      ];
+      const sql = `SELECT p.*,
+          COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) AS registration_date
+        FROM participants p
+        WHERE ${clauses.join(' AND ')}
+        ORDER BY p.id ASC`;
+      const stamp = new Date().toISOString().slice(0, 10);
+      await streamReportCsv(req, res, {
+        filename: `FMC_Sponsored_Children_${stamp}.csv`,
+        headers: [
+          'Sponsored Child ID', 'Sponsored Child Code', 'First Name', 'Middle Name',
+          'Last Name', 'Suffix', 'Gender', 'Date of Birth', 'Age',
+          'Contact Information', 'Address or Location', 'Registration Date',
+          'Current Sponsorship Status', 'Guardian Name', 'Guardian Relationship',
+          'Guardian Contact Number', 'Guardian Email',
+        ],
+        sql,
+        params: filters.params,
+        reportType: 'sponsored_children',
+        filters: filters.filters,
+        filterRow: (row) => !filters.filters.status
+          || currentStatuses.get(Number(row.id)) === filters.filters.status,
+        mapRow: (row) => {
+          const child = participantView(row);
+          const currentStatus = currentStatuses.get(Number(row.id)) || 'ACTIVE';
+          return [
+            row.id,
+            row.participant_code,
+            child.firstName,
+            child.middleName,
+            child.lastName,
+            '',
+            row.gender,
+            child.dateOfBirth,
+            child.age,
+            child.phone,
+            child.address,
+            row.registration_date ? csvDate(row.registration_date).slice(0, 10) : '',
+            REPORT_STATUS_LABELS[currentStatus] || currentStatus,
+            child.guardianName,
+            '',
+            child.parentContact,
+            '',
+          ];
+        },
+      });
+    } catch (error) { next(error); }
+  },
+);
+
+app.get(
+  '/api/reports/exports/education-history',
+  authenticate,
+  checkPermission('reports:view'),
+  checkReportCategoryPermission('sponsorship:view'),
+  async (req, res, next) => {
+    try {
+      await Promise.all([participantProfileColumnsReady, educationHistoryReady]);
+      const filters = participantExportFilters(req);
+      if (filters.error) return res.status(400).json({ error: filters.error });
+      const currentStatuses = await reportParticipationStatuses();
+      const clauses = [
+        "p.participant_type = 'sponsored_child'",
+        "p.status <> 'deleted'",
+        ...filters.clauses,
+      ];
+      const sql = `SELECT h.*, p.id AS sponsored_child_id, p.participant_code,
+          p.full_name_encrypted, p.first_name_encrypted, p.middle_name_encrypted,
+          p.last_name_encrypted, p.date_of_birth_encrypted, p.gender,
+          p.education_level AS current_education_level
+        FROM participant_education_history h
+        JOIN participants p ON p.id = h.participant_id
+        WHERE ${clauses.join(' AND ')}
+        ORDER BY h.id ASC`;
+      const stamp = new Date().toISOString().slice(0, 10);
+      await streamReportCsv(req, res, {
+        filename: `FMC_Sponsored_Child_Education_History_${stamp}.csv`,
+        headers: [
+          'Education History ID', 'Sponsored Child ID', 'Sponsored Child Code',
+          'Sponsored Child Name', 'School Name', 'School Address', 'Grade or Year Level',
+          'Education Level', 'School Year', 'Start Date', 'End Date',
+          'Current Education Status', 'Graduation or Completion Information',
+        ],
+        sql,
+        params: filters.params,
+        reportType: 'sponsored_child_education_history',
+        filters: filters.filters,
+        filterRow: (row) => !filters.filters.status
+          || currentStatuses.get(Number(row.sponsored_child_id)) === filters.filters.status,
+        mapRow: (row) => {
+          const child = participantView(row);
+          return [
+            row.id,
+            row.sponsored_child_id,
+            row.participant_code,
+            child.fullName,
+            decrypt(row.school_name_encrypted) || '',
+            decrypt(row.school_address_encrypted) || '',
+            '',
+            row.education_level,
+            [row.start_year, row.end_year || ''].filter(Boolean).join('-'),
+            '',
+            '',
+            row.status,
+            decrypt(row.notes_encrypted) || '',
+          ];
+        },
+      });
+    } catch (error) { next(error); }
+  },
+);
+
+app.get(
+  '/api/reports/exports/church-activities',
+  authenticate,
+  checkPermission('reports:view'),
+  checkReportCategoryPermission('events:view'),
+  async (req, res, next) => {
+    try {
+      await eventsTableReady;
+      const status = String(req.query.status || '').trim();
+      const year = parseExportYear(req.query.year);
+      if (status.length > 30) return res.status(400).json({ error: 'Event status filter is too long' });
+      if (year === null) return res.status(400).json({ error: 'Year must use YYYY format' });
+      const clauses = [];
+      const params = [];
+      if (status) {
+        clauses.push('e.status = ?');
+        params.push(status);
+      }
+      if (year) {
+        clauses.push('YEAR(e.starts_at) = ?');
+        params.push(Number(year));
+      }
+      const filters = { status, year };
+      const sql = `SELECT e.id, e.name, e.description, e.starts_at, e.ends_at,
+          e.location, e.status, e.created_at
+        FROM events e
+        ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+        ORDER BY e.id ASC`;
+      const stamp = new Date().toISOString().slice(0, 10);
+      await streamReportCsv(req, res, {
+        filename: `FMC_Church_Activities_${stamp}.csv`,
+        headers: [
+          'Activity/Event ID', 'Activity Name', 'Activity Type', 'Description',
+          'Education Group', 'Event Date', 'Start Time', 'End Time', 'Venue or Location',
+          'Event Status', 'Created Date',
+        ],
+        sql,
+        params,
+        reportType: 'church_activities',
+        filters,
+        mapRow: (row) => [
+          row.id,
+          row.name,
+          '',
+          row.description,
+          '',
+          csvDate(row.starts_at).slice(0, 10),
+          csvDate(row.starts_at).slice(11, 19),
+          csvDate(row.ends_at).slice(11, 19),
+          row.location,
+          row.status,
+          csvDate(row.created_at),
+        ],
+      });
+    } catch (error) { next(error); }
+  },
+);
+
+app.get(
+  '/api/reports/exports/attendance',
+  authenticate,
+  checkPermission('reports:view'),
+  checkReportCategoryPermission('sponsorship:view'),
+  async (req, res, next) => {
+    try {
+      await Promise.all([participantProfileColumnsReady, eventsTableReady, attendanceImportColumnsReady]);
+      const report = buildAttendanceExportQuery(req);
+      if (report.error) return res.status(400).json({ error: report.error });
+      const currentStatuses = report.filters.status
+        ? await reportParticipationStatuses()
+        : null;
+      const stamp = new Date().toISOString().slice(0, 10);
+      await streamReportCsv(req, res, {
+        filename: `FMC_Sponsored_Child_Attendance_${stamp}.csv`,
+        headers: [
+          'Attendance Record ID', 'Sponsored Child ID', 'Sponsored Child Full Name',
+          'Gender', 'Education Level', 'Activity/Event ID', 'Activity Name',
+          'Event Date', 'Attendance Status', 'Check-in Date and Time',
+          'Check-out Date and Time', 'Recorded By', 'Attendance Remarks',
+        ],
+        sql: report.sql,
+        params: report.params,
+        reportType: 'sponsored_child_attendance',
+        filters: report.filters,
+        filterRow: (row) => !report.filters.status
+          || currentStatuses.get(Number(row.participant_id)) === report.filters.status,
+        mapRow: (row) => [
+          row.attendance_record_id,
+          row.participant_id,
+          participantView(row).fullName,
+          row.gender,
+          row.education_level,
+          row.activity_id,
+          row.activity_name,
+          csvDate(row.event_date),
+          row.attendance_status,
+          csvDate(row.checked_in_at),
+          csvDate(row.checked_out_at),
+          decrypt(row.recorded_by_encrypted) || '',
+          decrypt(row.remarks_encrypted) || '',
+        ],
+      });
+    } catch (error) { next(error); }
+  },
+);
 
 app.get(
   '/api/reports/sponsored-child-updates',
@@ -4627,37 +5551,57 @@ app.get(
   },
 );
 
-app.get('/api/risk-scores', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+async function loadAttendanceRiskSettings() {
+  await attendanceRiskSettingsReady;
+  const [[row]] = await pool.execute(
+    `SELECT frequency_weight, regularity_weight, recency_weight,
+            medium_threshold, high_threshold, updated_at
+     FROM attendance_risk_settings WHERE setting_id = 1`,
+  );
+  return {
+    ...normalizeAttendanceRiskSettings({
+      frequencyWeight: Number(row.frequency_weight),
+      regularityWeight: Number(row.regularity_weight),
+      recencyWeight: Number(row.recency_weight),
+      mediumThreshold: Number(row.medium_threshold),
+      highThreshold: Number(row.high_threshold),
+    }),
+    updatedAt: row.updated_at,
+  };
+}
+
+app.get('/api/analytics/risk-settings', authenticate, checkRole(['System Administrator', 'Church Administrator']), async (req, res, next) => {
   try {
-    const [rows] = await pool.query(
-      `SELECT r.*
-       FROM predictive_risk_scores r
-       JOIN participants p ON p.id = r.participant_id
-       WHERE p.participant_type = 'sponsored_child' AND p.status <> 'deleted'
-       ORDER BY r.computed_at DESC`,
-    );
-    res.json(rows);
+    res.json(await loadAttendanceRiskSettings());
   } catch (error) { next(error); }
 });
 
-app.get('/api/risk-scores/validation', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+app.put('/api/analytics/risk-settings', authenticate, checkRole(['System Administrator', 'Church Administrator']), async (req, res, next) => {
   try {
-    await attendanceModelValidationReady;
-    const [rows] = await pool.query(
-      `SELECT status, model_version, details_json
-       FROM attendance_model_validation_runs
-       ORDER BY id DESC
-       LIMIT 1`,
+    const config = normalizeAttendanceRiskSettings(req.body || {});
+    await attendanceRiskSettingsReady;
+    await pool.execute(
+      `UPDATE attendance_risk_settings
+       SET frequency_weight = ?, regularity_weight = ?, recency_weight = ?,
+           medium_threshold = ?, high_threshold = ?, updated_by = ?
+       WHERE setting_id = 1`,
+      [
+        config.frequencyWeight,
+        config.regularityWeight,
+        config.recencyWeight,
+        config.mediumThreshold,
+        config.highThreshold,
+        req.user.id,
+      ],
     );
-    if (!rows[0]) return res.json({ status: 'not_evaluated' });
-    res.json(JSON.parse(rows[0].details_json));
-  } catch (error) { next(error); }
-});
-
-app.post('/api/risk-scores/refresh', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
-  try {
-    res.json(await refreshRiskScores());
-  } catch (error) { next(error); }
+    await writeAuditLog(req.user, 'attendance.prediction.settings.updated', 'attendance_prediction', 1, config);
+    res.json(await loadAttendanceRiskSettings());
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Weights must be')) {
+      return res.status(400).json({ error: error.message });
+    }
+    next(error);
+  }
 });
 
 const ANALYTICS_INTERVALS = new Set(['day', 'week', 'month', 'year']);
@@ -4721,54 +5665,6 @@ function bucketLabel(key, interval) {
   return interval === 'week' ? `Week of ${label}` : label;
 }
 
-function buildRiskEvidence(dates, now) {
-  if (dates.length < 2) {
-    return {
-      checkIns180Days: dates.length,
-      checkInsPerWeek: 0,
-      regularity: 0,
-      recencyDays: dates.length ? Math.floor((now - dates[dates.length - 1].getTime()) / 86400000) : null,
-      trend: 'unknown',
-      insufficientData: true,
-      summary: dates.length
-        ? `Insufficient data: only ${dates.length} recorded check-in${dates.length === 1 ? '' : 's'} in the last 180 days.`
-        : 'Insufficient data: no recorded check-ins in the last 180 days.',
-    };
-  }
-  const last90 = dates.filter((date) => now - date.getTime() <= 90 * 86400000);
-  const last30 = last90.filter((date) => now - date.getTime() <= 30 * 86400000);
-  const prior30 = last90.filter((date) => {
-    const age = now - date.getTime();
-    return age > 30 * 86400000 && age <= 60 * 86400000;
-  });
-  const weeks = new Set(last90.map((date) => weekStart(date).getTime()));
-  const recencyDays = Math.floor((now - dates[dates.length - 1].getTime()) / 86400000);
-  const checkInsPerWeek = Math.round((last90.length / 13) * 10) / 10;
-  const regularity = Math.round(Math.min(weeks.size / 13, 1) * 100);
-  let trend = 'stable';
-  if (last30.length < prior30.length - 1) trend = 'declining';
-  else if (last30.length > prior30.length + 1) trend = 'improving';
-  const reasons = [];
-  if (trend === 'declining') reasons.push(`attendance declined (${last30.length} check-ins in the last 30 days vs ${prior30.length} in the prior 30 days)`);
-  if (trend === 'improving') reasons.push(`attendance improved (${last30.length} check-ins in the last 30 days vs ${prior30.length} in the prior 30 days)`);
-  if (recencyDays >= 30) reasons.push(`no check-in for ${recencyDays} days`);
-  else if (recencyDays >= 14) reasons.push(`last check-in ${recencyDays} days ago`);
-  if (regularity < 30) reasons.push(`attended only ${weeks.size} of the last 13 weeks`);
-  const summary = reasons.length
-    ? `${reasons.map((reason, index) => (index === 0 ? `${reason.charAt(0).toUpperCase()}${reason.slice(1)}` : reason)).join('; ')}.`
-    : 'Attendance is steady with no recent decline.';
-  return {
-    checkIns180Days: dates.length,
-    checkIns90Days: last90.length,
-    checkInsPerWeek,
-    regularity,
-    recencyDays,
-    trend,
-    insufficientData: false,
-    summary,
-  };
-}
-
 function normalizeAnalyticsEducation(value) {
   const raw = String(value || '').trim().toLowerCase();
   if (raw === 'all') return '';
@@ -4783,12 +5679,14 @@ function normalizeAnalyticsStatus(value) {
 
 function matchesAnalyticsStatus(participant, status) {
   if (!status || status === 'all') return true;
-  if (status === 'WARNING') return ['WARNING', 'SECOND_CHANCE'].includes(participant.participationStatus);
+  if (status === 'WARNING') return participant.participationStatus === 'WARNING';
   return participant.participationStatus === status;
 }
 
 async function loadSponsoredAttendanceData({ range, educationLevel = '', status = '', eventId = '', interval = 'month', participantId = null }) {
-  await Promise.all([participantProfileColumnsReady, eventsTableReady, participationTrackingReady]);
+  await Promise.all([
+    participantProfileColumnsReady, eventsTableReady, attendanceImportColumnsReady, participationTrackingReady,
+  ]);
   const education = normalizeAnalyticsEducation(educationLevel);
   const participantConditions = [
     "p.participant_type = 'sponsored_child'",
@@ -4812,7 +5710,8 @@ async function loadSponsoredAttendanceData({ range, educationLevel = '', status 
          SELECT selected.starts_at
          FROM events selected
          WHERE selected.id = ?
-           AND selected.is_sample = FALSE AND selected.status = 'completed'
+           AND (selected.is_sample = FALSE OR selected.starts_at >= '2013-01-01')
+           AND selected.status = 'completed'
            AND selected.starts_at < NOW()
            AND selected.starts_at >= ? AND selected.starts_at < ?
        )`,
@@ -4858,7 +5757,8 @@ async function loadSponsoredAttendanceData({ range, educationLevel = '', status 
   const eventOptions = await pool.execute(
     `SELECT id, name, starts_at
      FROM events
-     WHERE is_sample = FALSE AND status = 'completed' AND starts_at < NOW()
+     WHERE (is_sample = FALSE OR starts_at >= '2013-01-01')
+       AND status = 'completed' AND starts_at < NOW()
        AND starts_at >= ? AND starts_at < ?
      ORDER BY starts_at, id`,
     [range.start, range.endExclusive],
@@ -4881,14 +5781,18 @@ async function loadSponsoredAttendanceData({ range, educationLevel = '', status 
               SELECT 1
               FROM check_in_logs c
               WHERE c.participant_id = p.id
-                AND c.status = 'checked_in'
-                AND c.checked_in_at >= DATE(e.starts_at)
-                AND c.checked_in_at < DATE_ADD(DATE(e.starts_at), INTERVAL 1 DAY)
-                AND LOWER(TRIM(c.event_name)) = LOWER(TRIM(e.name))
+                AND (
+                  (c.status = 'checked_in'
+                   AND c.checked_in_at >= DATE(e.starts_at)
+                   AND c.checked_in_at < DATE_ADD(DATE(e.starts_at), INTERVAL 1 DAY)
+                   AND LOWER(TRIM(c.event_name)) = LOWER(TRIM(e.name)))
+                  OR (c.attendance_status = 'present' AND c.event_id = e.id)
+                )
             ) AS present
      FROM participants p
      JOIN events e
-       ON e.is_sample = FALSE AND e.status = 'completed'
+       ON (e.is_sample = FALSE OR e.starts_at >= '2013-01-01')
+      AND e.status = 'completed'
       AND e.starts_at < NOW()
       AND e.starts_at >= COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at)
       AND e.starts_at >= ? AND e.starts_at < ?${eventCondition}
@@ -4902,133 +5806,126 @@ async function loadSponsoredAttendanceData({ range, educationLevel = '', status 
   return { participants, occurrences, analytics, events: eventOptions };
 }
 
-async function getValidatedRiskScores() {
-  await attendanceModelValidationReady;
-  const [[validation]] = await pool.execute(
-    `SELECT status, model_version
-     FROM attendance_model_validation_runs
-     ORDER BY id DESC LIMIT 1`,
-  );
-  if (
-    String(validation?.status || '').toLowerCase() !== 'validated'
-    || validation.model_version !== MODEL_VERSION
-  ) return [];
-  return pool.execute(
-    `SELECT r.participant_id, r.risk_score, r.risk_level, r.model_version, r.computed_at
-     FROM predictive_risk_scores r
-     JOIN participants p ON p.id = r.participant_id
-     JOIN (
-       SELECT participant_id, MAX(id) AS latest_id
-       FROM predictive_risk_scores
-       WHERE model_version = ?
-       GROUP BY participant_id
-     ) latest ON latest.participant_id = r.participant_id AND latest.latest_id = r.id
-     WHERE r.model_version = ?
-       AND p.participant_type = 'sponsored_child'
-       AND p.status = 'active'
-       AND COALESCE(p.sponsorship_status, 'active') <> 'inactive'
-       AND p.participation_status <> 'REMOVED_FROM_SPONSORSHIP'
-     ORDER BY r.risk_score DESC, p.participant_code`,
-    [MODEL_VERSION, MODEL_VERSION],
-  ).then(([rows]) => rows);
-}
-
-async function loadRecentSponsoredAttendance(participantIds, { range, eventId = '' } = {}) {
-  if (!participantIds.length) return [];
-  const placeholders = participantIds.map(() => '?').join(', ');
-  const rangeStart = range ? new Date(Math.max(range.start.getTime(), Date.now() - 180 * 86400000)) : new Date(Date.now() - 180 * 86400000);
-  const rangeEnd = range?.endExclusive || new Date();
-  const eventCondition = eventId ? ' AND e.id = ?' : '';
-  const [rows] = await pool.execute(
-    `SELECT p.id AS participantId, e.id AS eventId, e.starts_at AS startsAt
+async function loadPredictionAttendanceData({ educationLevel = '', status = '', participantId = null } = {}) {
+  await Promise.all([
+    participantProfileColumnsReady,
+    eventsTableReady,
+    attendanceImportColumnsReady,
+    participationTrackingReady,
+  ]);
+  const conditions = [
+    "p.participant_type = 'sponsored_child'",
+    "p.status <> 'deleted'",
+  ];
+  const params = [];
+  const education = normalizeAnalyticsEducation(educationLevel);
+  if (education === 'High School') {
+    conditions.push("p.education_level IN ('Junior High School', 'Senior High School', 'High School')");
+  } else if (education) {
+    conditions.push('p.education_level = ?');
+    params.push(education);
+  }
+  if (participantId) {
+    conditions.push('p.id = ?');
+    params.push(Number(participantId));
+  }
+  const [[rows], summaries] = await Promise.all([
+    pool.execute(
+    `SELECT p.id, p.participant_code, p.full_name_encrypted, p.education_level,
+            COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) AS registration_date,
+            p.participation_status, p.sponsorship_status, p.status AS participant_status,
+            e.id AS event_id, e.name AS event_name, e.starts_at,
+            CASE
+              WHEN MAX(CASE WHEN c.status IN ('checked_in', 'checked_out')
+                              OR LOWER(COALESCE(c.attendance_status, '')) = 'present'
+                            THEN 1 ELSE 0 END) = 1 THEN 'present'
+              WHEN MAX(CASE WHEN c.status = 'absent'
+                              OR LOWER(COALESCE(c.attendance_status, '')) = 'absent'
+                            THEN 1 ELSE 0 END) = 1 THEN 'absent'
+              ELSE NULL
+            END AS attendance_status
      FROM participants p
-     JOIN events e
-       ON e.is_sample = FALSE AND e.status = 'completed'
-      AND e.starts_at >= ?
-      AND e.starts_at < ?
+     LEFT JOIN events e
+       ON e.is_sample = FALSE
+      AND e.status = 'completed'
       AND e.starts_at < NOW()
       AND e.starts_at >= COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at)
-     WHERE p.id IN (${placeholders})
-       AND EXISTS (
-         SELECT 1
-         FROM check_in_logs c
-         WHERE c.participant_id = p.id
-           AND c.status = 'checked_in'
-           AND c.checked_in_at >= DATE(e.starts_at)
-           AND c.checked_in_at < DATE_ADD(DATE(e.starts_at), INTERVAL 1 DAY)
-           AND LOWER(TRIM(c.event_name)) = LOWER(TRIM(e.name))
-       )${eventCondition}
-     ORDER BY e.starts_at, e.id, p.id`,
-    [rangeStart, rangeEnd, ...participantIds, ...(eventId ? [Number(eventId)] : [])],
-  );
-  return rows;
+     LEFT JOIN check_in_logs c
+       ON c.participant_id = p.id
+      AND (
+        c.event_id = e.id
+        OR (
+          c.event_id IS NULL
+          AND LOWER(TRIM(c.event_name)) = LOWER(TRIM(e.name))
+          AND c.checked_in_at >= DATE(e.starts_at)
+          AND c.checked_in_at < DATE_ADD(DATE(e.starts_at), INTERVAL 1 DAY)
+        )
+      )
+     WHERE ${conditions.join(' AND ')}
+     GROUP BY p.id, e.id
+     ORDER BY p.id, e.starts_at, e.id`,
+    params,
+    ),
+    getSponsoredParticipationSummaries(null, { recordThresholdHistory: false }),
+  ]);
+  const summariesById = new Map(summaries.map((summary) => [Number(summary.id), summary]));
+  const childrenById = new Map();
+  for (const row of rows) {
+    const participantKey = Number(row.id);
+    if (!childrenById.has(participantKey)) {
+      const summary = summariesById.get(participantKey);
+      const inactive = String(row.participant_status || '').toLowerCase() === 'inactive'
+        || String(row.sponsorship_status || '').toLowerCase() === 'inactive'
+        || row.participation_status === 'REMOVED_FROM_SPONSORSHIP';
+      childrenById.set(participantKey, {
+        participantId: participantKey,
+        participantCode: row.participant_code || '',
+        participantName: summary?.name || decrypt(row.full_name_encrypted) || 'Unnamed child',
+        educationLevel: row.education_level || '',
+        registrationDate: row.registration_date,
+        participationStatus: inactive
+          ? 'REMOVED_FROM_SPONSORSHIP'
+          : summary?.status || String(row.participation_status || 'ACTIVE').toUpperCase(),
+        events: [],
+      });
+    }
+    if (row.event_id !== null) {
+      childrenById.get(participantKey).events.push({
+        eventId: row.event_id,
+        eventName: row.event_name,
+        startsAt: row.starts_at,
+        attendanceStatus: row.attendance_status,
+      });
+    }
+  }
+  return [...childrenById.values()].filter((child) =>
+    matchesAnalyticsStatus({ participationStatus: child.participationStatus }, status));
 }
 
-function buildRiskRows(data, scores, recentOccurrences, riskFilter, referenceTime = Date.now()) {
-  const scoresById = new Map(scores.map((row) => [Number(row.participant_id), row]));
-  const attendanceById = new Map(data.analytics.participants.map((participant) => [participant.id, participant]));
-  const datesById = new Map();
-  for (const occurrence of recentOccurrences) {
-    const dates = datesById.get(Number(occurrence.participantId)) || [];
-    dates.push(occurrence.startsAt instanceof Date ? occurrence.startsAt : new Date(occurrence.startsAt));
-    datesById.set(Number(occurrence.participantId), dates);
-  }
-  return data.participants.map((participant) => {
-    const evidence = buildRiskEvidence((datesById.get(participant.id) || []).sort((a, b) => a - b), referenceTime);
-    const score = scoresById.get(participant.id);
-    const hasEnoughData = !evidence.insufficientData;
-    const currentAttendance = attendanceById.get(participant.id);
-    const riskLevel = score && hasEnoughData
-      ? String(score.risk_level || '').toLowerCase()
-      : 'insufficient_data';
+function buildRuleBasedRiskRows(children, settings, riskFilter = 'all', referenceTime = Date.now()) {
+  return children.map((child) => {
+    const { events, ...identity } = child;
+    const assessment = buildAttendanceRiskAssessment(events, settings, referenceTime);
+    const { history, ...summary } = assessment;
     return {
-      participantId: participant.id,
-      participantCode: participant.participantCode,
-      participantName: participant.name,
-      participantType: 'sponsored_child',
-      educationLevel: participant.educationLevel,
-      gradeLevel: participant.gradeLevel,
-      participationStatus: participant.participationStatus,
-      attendanceRate: currentAttendance?.attendanceRate ?? null,
-      recommendedAction: riskLevel === 'high'
-        ? 'Review attendance promptly and contact the family.'
-        : riskLevel === 'medium'
-          ? 'Monitor attendance and discuss any barriers with the family.'
-          : riskLevel === 'low'
-            ? 'Continue regular support and monitoring.'
-            : 'Insufficient validated history; continue routine attendance recording.',
-      riskScore: score && hasEnoughData ? Number(score.risk_score) : null,
-      riskLevel,
-      modelVersion: score && hasEnoughData ? score.model_version : null,
-      computedAt: score && hasEnoughData ? score.computed_at : null,
-      ...evidence,
+      ...identity,
+      ...summary,
+      recentAttendancePattern: assessment.pattern,
+      recommendedAction: assessment.recommendedActions.join(' '),
+      assessmentMethod: 'rule_based',
     };
   }).filter((row) => riskFilter === 'all' || row.riskLevel === riskFilter);
 }
 
 async function computeRiskRecords(riskFilter, filters = {}) {
-  const range = filters.range || analyticsDateRange({ query: {} });
-  const data = await loadSponsoredAttendanceData({
-    range,
-    educationLevel: filters.educationLevel,
-    status: filters.status,
-    eventId: filters.eventId,
-    interval: 'month',
-  });
-  const [riskRows, recentOccurrences] = await Promise.all([
-    getValidatedRiskScores(),
-    loadRecentSponsoredAttendance(data.participants.map((participant) => participant.id), {
-      range,
-      eventId: filters.eventId,
+  const [children, settings] = await Promise.all([
+    loadPredictionAttendanceData({
+      educationLevel: filters.educationLevel,
+      status: filters.status,
     }),
+    loadAttendanceRiskSettings(),
   ]);
-  return buildRiskRows(
-    data,
-    riskRows,
-    recentOccurrences,
-    riskFilter,
-    Math.min(Date.now(), range.endExclusive.getTime()),
-  );
+  return buildRuleBasedRiskRows(children, settings, riskFilter);
 }
 
 async function computeAttendanceTrends(range, interval, eventId, filters = {}) {
@@ -5060,17 +5957,21 @@ async function computeSponsoredChildren(filters) {
     eventId: filters.eventId,
     interval: 'month',
   });
-  const riskRows = await getValidatedRiskScores();
-  const riskById = new Map(riskRows.map((row) => [Number(row.participant_id), row]));
+  const riskRows = await computeRiskRecords('all', {
+    educationLevel: filters.educationLevel,
+    status: normalizeAnalyticsStatus(filters.participationStatus),
+  });
+  const riskById = new Map(riskRows.map((row) => [Number(row.participantId), row]));
   return data.analytics.participants
     .filter((participant) => (!filters.gradeLevel || participant.gradeLevel === filters.gradeLevel))
     .map((participant) => {
       const risk = riskById.get(participant.id);
       return {
         ...participant,
-        riskScore: risk ? Number(risk.risk_score) : null,
-        riskLevel: risk?.risk_level || 'insufficient_data',
-        computedAt: risk?.computed_at || null,
+        riskScore: risk?.riskScore ?? null,
+        riskLevel: risk?.riskLevel || 'insufficient_data',
+        riskMethod: risk?.assessmentMethod || 'rule_based',
+        computedAt: null,
       };
     })
     .filter((child) => filters.riskLevel === 'all' || child.riskLevel === filters.riskLevel);
@@ -5079,53 +5980,63 @@ async function computeSponsoredChildren(filters) {
 function participantOccurrenceSubquery() {
   return `
     (
-      SELECT occurrence.event_name, occurrence.event_date, occurrence.is_scheduled,
+      SELECT occurrence.event_id, occurrence.event_name, occurrence.event_date,
+             occurrence.is_scheduled, occurrence.is_csv_synthetic,
+             EXISTS (
+               SELECT 1
+               FROM check_in_logs c
+               LEFT JOIN events linked_event ON linked_event.id = c.event_id
+               WHERE c.participant_id = ?
+                 AND (
+                   (c.status = 'checked_in' AND c.checked_in_at IS NOT NULL
+                    AND (c.event_id = occurrence.event_id
+                      OR (LOWER(TRIM(COALESCE(linked_event.name, c.event_name))) = LOWER(TRIM(occurrence.event_name))
+                        AND COALESCE(DATE(linked_event.starts_at), DATE(c.checked_in_at)) = DATE(occurrence.event_date))))
+                   OR (c.attendance_status = 'present'
+                    AND (c.event_id = occurrence.event_id
+                      OR (LOWER(TRIM(COALESCE(linked_event.name, c.event_name))) = LOWER(TRIM(occurrence.event_name))
+                        AND COALESCE(DATE(linked_event.starts_at), DATE(c.checked_in_at)) = DATE(occurrence.event_date))))
+                 )
+             ) AS is_attended,
              COALESCE(
                (SELECT MIN(c.checked_in_at)
                 FROM check_in_logs c
+                LEFT JOIN events linked_event ON linked_event.id = c.event_id
                 WHERE c.participant_id = ? AND c.status = 'checked_in'
-                  AND LOWER(c.event_name) = LOWER(occurrence.event_name)
-                  AND DATE(c.checked_in_at) = DATE(occurrence.event_date)),
+                  AND c.checked_in_at IS NOT NULL
+                  AND (c.event_id = occurrence.event_id
+                    OR (LOWER(TRIM(COALESCE(linked_event.name, c.event_name))) = LOWER(TRIM(occurrence.event_name))
+                      AND COALESCE(DATE(linked_event.starts_at), DATE(c.checked_in_at)) = DATE(occurrence.event_date)))),
                NULL
              ) AS attended_at,
              COALESCE(
                (SELECT MIN(c.location)
                 FROM check_in_logs c
+                LEFT JOIN events linked_event ON linked_event.id = c.event_id
                 WHERE c.participant_id = ? AND c.status = 'checked_in'
-                  AND LOWER(c.event_name) = LOWER(occurrence.event_name)
-                  AND DATE(c.checked_in_at) = DATE(occurrence.event_date)),
+                  AND (c.event_id = occurrence.event_id
+                    OR (LOWER(TRIM(COALESCE(linked_event.name, c.event_name))) = LOWER(TRIM(occurrence.event_name))
+                      AND COALESCE(DATE(linked_event.starts_at), DATE(c.checked_in_at)) = DATE(occurrence.event_date)))),
                occurrence.event_location
              ) AS location
       FROM (
-               SELECT CONVERT(MIN(e.name) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_name,
+               SELECT MIN(e.id) AS event_id,
+                      CONVERT(MIN(TRIM(e.name)) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_name,
                       MIN(e.starts_at) AS event_date,
                       CONVERT(MIN(e.location) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_location,
+                      MAX(CASE WHEN e.description = 'Synthetic monthly attendance record.' THEN 1 ELSE 0 END) AS is_csv_synthetic,
                       1 AS is_scheduled
                FROM events e
                JOIN participants p ON p.id = ?
-               WHERE e.is_sample = FALSE AND e.status = 'completed'
-                 AND e.starts_at >= COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at)
+               WHERE (
+                   e.is_sample = FALSE
+                   OR (p.participant_type = 'sponsored_child'
+                     AND e.description = 'Synthetic monthly attendance record.')
+                 )
+                 AND e.status = 'completed'
+                 AND DATE(e.starts_at) >= DATE(COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at))
                  AND e.starts_at < NOW()
-               GROUP BY LOWER(e.name), DATE(e.starts_at)
-               UNION ALL
-               SELECT CONVERT(attended.event_name USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-                      attended.event_date,
-                      CONVERT(attended.event_location USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-                      0 AS is_scheduled
-               FROM (
-                 SELECT c.event_name, DATE(c.checked_in_at) AS event_date, MIN(c.location) AS event_location
-                 FROM check_in_logs c
-                 JOIN participants p ON p.id = c.participant_id
-                 WHERE c.participant_id = ? AND c.status = 'checked_in'
-                   AND c.checked_in_at >= COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at)
-                   AND c.checked_in_at < NOW()
-                 GROUP BY c.event_name, DATE(c.checked_in_at)
-               ) attended
-               WHERE NOT EXISTS (
-                 SELECT 1 FROM events e
-                 WHERE LOWER(e.name) = LOWER(attended.event_name)
-                   AND DATE(e.starts_at) = attended.event_date
-               )
+               GROUP BY LOWER(TRIM(e.name)), DATE(e.starts_at)
       ) occurrence
     )
   `;
@@ -5140,6 +6051,9 @@ async function loadParticipantDetailHistory(participantId, options) {
   );
   if (!participantRow) return null;
   const participant = participantView(participantRow);
+  const registrationDate = participant.participant_type === 'sponsored_child'
+    ? participant.sponsorship_registered_at || participant.sponsorship_start_date || participant.created_at
+    : participant.created_at;
   const [educationRows] = await pool.execute(
     `SELECT id, education_level, school_name_encrypted, school_address_encrypted,
             start_year, end_year, status, course_strand_encrypted, notes_encrypted
@@ -5162,81 +6076,34 @@ async function loadParticipantDetailHistory(participantId, options) {
     [participantId],
   );
   const occurrenceSubquery = participantOccurrenceSubquery();
+  await attendanceImportColumnsReady;
   const occurrenceParams = [participantId, participantId, participantId, participantId];
   const [attendanceGroups] = await pool.execute(
     `SELECT YEAR(event_date) AS year, MONTH(event_date) AS month,
             SUM(is_scheduled) AS total_events,
-            SUM(is_scheduled = 1 AND attended_at IS NOT NULL) AS total_attended
+            SUM(is_scheduled = 1 AND is_attended = 1) AS total_attended,
+            SUM(is_scheduled = 1 AND is_csv_synthetic = 1) AS csv_synthetic_events
      FROM ${occurrenceSubquery} event_rows
      GROUP BY YEAR(event_date), MONTH(event_date)
      ORDER BY year, month`,
     occurrenceParams,
   );
-  const attendanceByYearMap = new Map();
-  const attendanceByMonthMap = new Map();
-  let totalEvents = 0;
-  let totalAttended = 0;
-  for (const row of attendanceGroups) {
-    const year = Number(row.year);
-    const month = Number(row.month);
-    const events = Number(row.total_events) || 0;
-    const attended = Number(row.total_attended) || 0;
-    totalEvents += events;
-    totalAttended += attended;
-    const yearly = attendanceByYearMap.get(year) || { year, totalEvents: 0, totalAttended: 0 };
-    yearly.totalEvents += events;
-    yearly.totalAttended += attended;
-    attendanceByYearMap.set(year, yearly);
-    attendanceByMonthMap.set(`${year}-${month}`, {
-      year,
-      month,
-      totalEvents: events,
-      totalAttended: attended,
-      totalAbsent: Math.max(0, events - attended),
-    });
-  }
-  const selectedYear = options.trendYear || options.year || new Date().getFullYear();
-  const attendanceByMonth = Array.from({ length: 12 }, (_, index) => {
-    const month = index + 1;
-    const item = attendanceByMonthMap.get(`${selectedYear}-${month}`);
-    const events = item?.totalEvents || 0;
-    const attended = item?.totalAttended || 0;
-    return {
-      month,
-      totalEvents: events,
-      totalAttended: attended,
-      totalAbsent: Math.max(0, events - attended),
-      attendanceRate: events ? Math.round((attended / events) * 1000) / 10 : 0,
-      absenceRate: events ? Math.round(((events - attended) / events) * 1000) / 10 : 0,
-    };
+  const attendanceHistory = buildAttendanceHistory({
+    registrationDate,
+    asOf: new Date(),
+    groupedRows: attendanceGroups,
+    trendYear: options.trendYear || options.year,
   });
-  const attendanceByYear = [...attendanceByYearMap.values()]
-    .sort((first, second) => second.year - first.year)
-    .map((item) => ({
-      ...item,
-      totalAbsent: Math.max(0, item.totalEvents - item.totalAttended),
-      attendanceRate: item.totalEvents
-        ? Math.round((item.totalAttended / item.totalEvents) * 1000) / 10
-        : 0,
-      absenceRate: item.totalEvents
-        ? Math.round(((item.totalEvents - item.totalAttended) / item.totalEvents) * 1000) / 10
-        : 0,
-    }));
-  const now = new Date();
-  const [weeklyAttendanceRows] = await pool.execute(
-    `SELECT FLOOR((DAYOFMONTH(event_date) - 1) / 7) + 1 AS week_of_month,
-           SUM(is_scheduled) AS total_events,
-           SUM(is_scheduled = 1 AND attended_at IS NOT NULL) AS total_attended
-     FROM ${occurrenceSubquery} event_rows
-     WHERE YEAR(event_date) = ? AND MONTH(event_date) = ?
-     GROUP BY week_of_month ORDER BY week_of_month`,
-    [...occurrenceParams, now.getFullYear(), now.getMonth() + 1],
-  );
-  const currentMonthWeeklyAttendance = weeklyAttendanceRows.map((row) => ({
-    week: Number(row.week_of_month),
-    totalEvents: Number(row.total_events) || 0,
-    totalAttended: Number(row.total_attended) || 0,
-  }));
+  const {
+    attendanceByYear,
+    attendanceByMonth,
+    totalEvents,
+    totalAttended,
+    totalAbsences,
+    attendanceRate,
+    csvSyntheticEvents,
+    source: attendanceSource,
+  } = attendanceHistory;
   const attendanceWhere = [];
   const attendanceParams = [...occurrenceParams];
   if (options.year) {
@@ -5251,8 +6118,8 @@ async function loadParticipantDetailHistory(participantId, options) {
     attendanceWhere.push('event_name = ?');
     attendanceParams.push(options.event);
   }
-  if (options.status === 'attended') attendanceWhere.push('attended_at IS NOT NULL');
-  if (options.status === 'missed') attendanceWhere.push('attended_at IS NULL');
+  if (options.status === 'attended') attendanceWhere.push('is_attended = 1');
+  if (options.status === 'missed') attendanceWhere.push('is_attended = 0');
   const attendanceFilter = attendanceWhere.length ? `WHERE ${attendanceWhere.join(' AND ')}` : '';
   const [attendanceCountRows] = await pool.execute(
     `SELECT COUNT(*) AS total FROM ${occurrenceSubquery} event_rows ${attendanceFilter}`,
@@ -5260,7 +6127,7 @@ async function loadParticipantDetailHistory(participantId, options) {
   );
   const [attendanceRows] = await pool.execute(
     `SELECT event_name, DATE_FORMAT(event_date, '%Y-%m-%d') AS event_date,
-            attended_at, location
+            is_attended, attended_at, location, is_csv_synthetic
      FROM ${occurrenceSubquery} event_rows ${attendanceFilter}
      ORDER BY event_date DESC, event_name ASC
      LIMIT ? OFFSET ?`,
@@ -5272,17 +6139,50 @@ async function loadParticipantDetailHistory(participantId, options) {
      ORDER BY event_name`,
     occurrenceParams,
   );
+  const [recentAttendanceRows] = await pool.execute(
+    `SELECT event_name, DATE_FORMAT(event_date, '%Y-%m-%d') AS event_date,
+            is_attended, attended_at, location, is_csv_synthetic
+     FROM ${occurrenceSubquery} event_rows
+     ORDER BY event_date DESC, event_name ASC
+     LIMIT 5`,
+    occurrenceParams,
+  );
   const careTimelineRows = options.includeCareHistory
     ? `
       UNION ALL
       SELECT updates.recorded_on,
              CONVERT('care' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
              CONVERT(CONCAT('Sponsored Child update recorded: ', updates.update_type) USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CAST(NULL AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_unicode_ci
+             CONVERT(JSON_OBJECT(
+               'activity', updates.activity_encrypted,
+               'height', updates.height_encrypted,
+               'weight', updates.weight_encrypted,
+               'note', updates.note_encrypted
+             ) USING utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM sponsored_child_updates updates
       WHERE updates.participant_id = ?
+      UNION ALL
+      SELECT status_change.created_at,
+             CONVERT('status' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(CONCAT('Sponsorship status changed: ', status_change.current_status) USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(CONCAT(status_change.previous_status, ' → ', status_change.current_status,
+               CASE WHEN status_change.reason IS NULL OR status_change.reason = ''
+                 THEN '' ELSE CONCAT(' · ', status_change.reason) END) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+      FROM sponsored_child_participation_history status_change
+      WHERE status_change.participant_id = ?
     `
     : '';
+  const educationTimelineRows = `
+    UNION ALL
+    SELECT STR_TO_DATE(CONCAT(COALESCE(education.end_year, education.start_year), '-01-01'), '%Y-%m-%d'),
+           CONVERT('education' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+           CONVERT(CONCAT(
+             CASE WHEN education.status = 'Currently Attending' THEN 'Started' ELSE education.status END,
+             ' ', education.education_level) USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+           CONVERT(education.school_name_encrypted USING utf8mb4) COLLATE utf8mb4_unicode_ci
+    FROM participant_education_history education
+    WHERE education.participant_id = ?
+  `;
   const timelineSubquery = `(
       SELECT p.created_at AS event_at,
              CONVERT('registration' USING utf8mb4) COLLATE utf8mb4_unicode_ci AS event_type,
@@ -5297,14 +6197,20 @@ async function loadParticipantDetailHistory(participantId, options) {
       FROM participant_status_history changed
       WHERE changed.participant_id = ? AND changed.status_type = 'participant'
       ${careTimelineRows}
+      ${educationTimelineRows}
       UNION ALL
       SELECT event_rows.event_date,
              CONVERT('attendance' USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CONVERT(CASE WHEN event_rows.attended_at IS NULL
-               THEN CONCAT('Missed ', event_rows.event_name)
-               ELSE CONCAT('Attended ', event_rows.event_name) END USING utf8mb4) COLLATE utf8mb4_unicode_ci,
-             CONVERT(CASE WHEN event_rows.attended_at IS NULL
+             CONVERT(CASE WHEN event_rows.is_csv_synthetic = 1
+               THEN CONCAT('[CSV synthetic] ', CASE WHEN event_rows.is_attended = 0
+                 THEN CONCAT('Missed ', event_rows.event_name)
+                 ELSE CONCAT('Attended ', event_rows.event_name) END)
+               ELSE CASE WHEN event_rows.is_attended = 0
+                 THEN CONCAT('Missed ', event_rows.event_name)
+                 ELSE CONCAT('Attended ', event_rows.event_name) END END USING utf8mb4) COLLATE utf8mb4_unicode_ci,
+             CONVERT(CASE WHEN event_rows.is_attended = 0
                THEN 'No check-in record'
+               WHEN event_rows.attended_at IS NULL THEN 'Present; check-in time was not supplied'
                ELSE CONCAT('Checked in at ', DATE_FORMAT(event_rows.attended_at, '%h:%i %p')) END USING utf8mb4) COLLATE utf8mb4_unicode_ci
       FROM ${occurrenceSubquery} event_rows
     )`;
@@ -5312,6 +6218,8 @@ async function loadParticipantDetailHistory(participantId, options) {
     participantId,
     participantId,
     ...(options.includeCareHistory ? [participantId] : []),
+    ...(options.includeCareHistory ? [participantId] : []),
+    participantId,
     ...occurrenceParams,
   ];
   const [timelineCountRows] = await pool.execute(
@@ -5322,46 +6230,14 @@ async function loadParticipantDetailHistory(participantId, options) {
     `SELECT event_at, event_type, title, description
      FROM ${timelineSubquery} timeline_rows
      ORDER BY event_at DESC, title ASC
-     LIMIT ? OFFSET 0`,
-    [...timelineParams, (options.historyPage - 1) * options.historyPageSize + options.historyPageSize],
+     LIMIT ? OFFSET ?`,
+    [...timelineParams, options.historyPageSize, (options.historyPage - 1) * options.historyPageSize],
   );
-  const educationTimeline = educationHistory.map((record) => ({
-    event_at: `${record.endYear || record.startYear}-01-01`,
-    event_type: 'education',
-    title: `${record.status === 'Currently Attending' ? 'Started' : record.status} ${record.educationLevel}`,
-    description: record.schoolName,
-  }));
-  const currentEducationYear = Number(
-    String(participant.enrollmentDate || participant.created_at || '').slice(0, 4),
-  );
-  const hasCurrentEducationRecord = educationHistory.some((record) =>
-    record.status === 'Currently Attending' &&
-    record.educationLevel === participant.educationLevel &&
-    record.schoolName.toLocaleLowerCase() === String(participant.schoolName || '').toLocaleLowerCase(),
-  );
-  if (
-    participant.educationLevel &&
-    participant.schoolName &&
-    !hasCurrentEducationRecord &&
-    Number.isInteger(currentEducationYear)
-  ) {
-    educationTimeline.push({
-      event_at: `${currentEducationYear}-01-01`,
-      event_type: 'education',
-      title: `Started ${participant.educationLevel}`,
-      description: participant.schoolName,
-    });
-  }
-  const combinedTimeline = [...timelineRows, ...educationTimeline]
-    .sort((first, second) => new Date(second.event_at) - new Date(first.event_at)
-      || String(first.title).localeCompare(String(second.title)))
-    .slice((options.historyPage - 1) * options.historyPageSize, options.historyPage * options.historyPageSize);
   const initialStatus = statusRows[0]?.previous_status
     || (participant.participant_type === 'sponsored_child'
       ? participant.participation_status
       : participant.status)
     || 'unknown';
-  const attendanceRate = totalEvents ? Math.round((totalAttended / totalEvents) * 1000) / 10 : 0;
   return {
     participant: {
       id: participant.id,
@@ -5375,7 +6251,7 @@ async function loadParticipantDetailHistory(participantId, options) {
         : participant.status || 'unknown',
       age: Number.isFinite(participant.age) ? participant.age : null,
       dateOfBirth: participant.dateOfBirth || null,
-      registrationDate: participant.created_at || null,
+      registrationDate: registrationDate || null,
       initialStatus,
       gender: participant.gender || '',
       educationLevel: participant.educationLevel || '',
@@ -5383,7 +6259,7 @@ async function loadParticipantDetailHistory(participantId, options) {
       programCourse: participant.programCourse || '',
       schoolName: participant.schoolName || '',
       schoolAddress: participant.schoolAddress || '',
-      sponsorshipRegistrationDate: participant.sponsorship_registered_at || null,
+      sponsorshipRegistrationDate: participant.sponsorship_registered_at || participant.sponsorship_start_date || null,
       educationHistory,
       phone: participant.phone || '',
       address: participant.address || '',
@@ -5394,14 +6270,15 @@ async function loadParticipantDetailHistory(participantId, options) {
     summary: {
       totalEvents,
       totalAttended,
-      totalAbsences: Math.max(0, totalEvents - totalAttended),
+      totalAbsences,
       attendanceRate,
-      registrationDate: participant.created_at || null,
-      sponsorshipRegistrationDate: participant.sponsorship_registered_at || null,
+      csvSyntheticEvents,
+      attendanceSource,
+      registrationDate: registrationDate || null,
+      sponsorshipRegistrationDate: participant.sponsorship_registered_at || participant.sponsorship_start_date || null,
     },
     attendanceByYear,
     attendanceByMonth,
-    currentMonthWeeklyAttendance,
     historicalAttendanceSummary: historicalAttendanceRows.map((row) => ({
       year: Number(row.attendance_year),
       required: Number(row.required_count),
@@ -5415,13 +6292,22 @@ async function loadParticipantDetailHistory(participantId, options) {
         : 0,
     })),
     eventOptions: eventRows.map((row) => row.event_name),
+    recentAttendance: recentAttendanceRows.map((row) => ({
+      event: row.event_name,
+      eventDate: row.event_date,
+      checkedInAt: row.attended_at,
+      location: row.location || '',
+      status: row.is_attended ? 'attended' : 'missed',
+      source: row.is_csv_synthetic ? 'csv-synthetic' : 'recorded',
+    })),
     attendance: {
       records: attendanceRows.map((row) => ({
         event: row.event_name,
         eventDate: row.event_date,
         checkedInAt: row.attended_at,
         location: row.location || '',
-        status: row.attended_at ? 'attended' : 'missed',
+        status: row.is_attended ? 'attended' : 'missed',
+        source: row.is_csv_synthetic ? 'csv-synthetic' : 'recorded',
       })),
       page: options.page,
       pageSize: options.pageSize,
@@ -5434,15 +6320,27 @@ async function loadParticipantDetailHistory(participantId, options) {
       changedAt: row.changed_at,
     })),
     history: {
-      records: combinedTimeline.map((row) => ({
+      records: timelineRows.map((row) => ({
         eventAt: row.event_at,
         type: row.event_type,
         title: row.title,
-        description: row.description || '',
+        description: row.event_type === 'education'
+          ? decrypt(row.description) || ''
+          : row.event_type === 'care'
+            ? (() => {
+              const details = JSON.parse(row.description || '{}');
+              return [
+                decrypt(details.activity),
+                details.height ? `Height: ${decrypt(details.height)} cm` : '',
+                details.weight ? `Weight: ${decrypt(details.weight)} kg` : '',
+                decrypt(details.note),
+              ].filter(Boolean).join(' · ');
+            })()
+            : row.description || '',
       })),
       page: options.historyPage,
       pageSize: options.historyPageSize,
-      total: (Number(timelineCountRows[0]?.total) || 0) + educationTimeline.length,
+      total: Number(timelineCountRows[0]?.total) || 0,
     },
   };
 }
@@ -5605,9 +6503,7 @@ app.get('/api/analytics/overview', authenticate, checkPermission('analytics:view
     const atRiskRecords = await computeRiskRecords('all', { range, educationLevel, status, eventId });
     const atRiskBreakdown = summarizeAtRiskParticipants(data.participants, atRiskRecords);
     const statusCounts = data.participants.reduce((counts, participant) => {
-      const key = participant.participationStatus === 'SECOND_CHANCE'
-        ? 'WARNING'
-        : participant.participationStatus === 'REMOVED_FROM_SPONSORSHIP'
+      const key = participant.participationStatus === 'REMOVED_FROM_SPONSORSHIP'
           ? 'INACTIVE'
           : participant.participationStatus;
       counts[key] = (counts[key] || 0) + 1;
@@ -5651,30 +6547,23 @@ app.get('/api/analytics/data', authenticate, checkPermission('analytics:view'), 
       eventId,
       interval,
     });
-    const [riskScores, recentOccurrences] = await Promise.all([
-      getValidatedRiskScores(),
-      loadRecentSponsoredAttendance(data.participants.map((participant) => participant.id), {
-        range,
-        eventId,
-      }),
-    ]);
-    const allRiskRecords = buildRiskRows(
-      data,
-      riskScores,
-      recentOccurrences,
-      'all',
-      Math.min(Date.now(), range.endExclusive.getTime()),
-    );
+    const allRiskRecords = await computeRiskRecords('all', { educationLevel, status });
     const riskRecords = allRiskRecords.filter((row) => riskFilter === 'all' || row.riskLevel === riskFilter);
     const atRiskBreakdown = summarizeAtRiskParticipants(data.participants, allRiskRecords);
+    const riskSummary = allRiskRecords.reduce((summary, row) => {
+      summary.evaluated += 1;
+      if (row.riskLevel === 'high') summary.high += 1;
+      else if (row.riskLevel === 'medium') summary.medium += 1;
+      else if (row.riskLevel === 'low') summary.low += 1;
+      else summary.insufficient += 1;
+      return summary;
+    }, { evaluated: 0, high: 0, medium: 0, low: 0, insufficient: 0 });
     const totalScheduledRecords = data.analytics.participants
       .reduce((sum, participant) => sum + participant.scheduled, 0);
     const totalPresentRecords = data.analytics.participants
       .reduce((sum, participant) => sum + participant.present, 0);
     const statusCounts = data.participants.reduce((counts, participant) => {
-      const key = participant.participationStatus === 'SECOND_CHANCE'
-        ? 'WARNING'
-        : participant.participationStatus === 'REMOVED_FROM_SPONSORSHIP'
+      const key = participant.participationStatus === 'REMOVED_FROM_SPONSORSHIP'
           ? 'INACTIVE'
           : participant.participationStatus;
       counts[key] = (counts[key] || 0) + 1;
@@ -5708,6 +6597,7 @@ app.get('/api/analytics/data', authenticate, checkPermission('analytics:view'), 
       },
       participants: data.analytics.participants,
       riskRecords,
+      riskSummary,
     });
   } catch (error) { next(error); }
 });
@@ -5730,15 +6620,32 @@ app.get('/api/analytics/trends', authenticate, checkPermission('analytics:view')
 
 app.get('/api/analytics/risk', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
   try {
-    const range = analyticsDateRange(req);
-    if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
     res.json({
       records: await computeRiskRecords(normalizeRiskFilter(req.query.riskLevel), {
-        range,
         educationLevel: req.query.educationLevel,
         status: normalizeAnalyticsStatus(req.query.status),
-        eventId: String(req.query.event || '').trim(),
       }),
+    });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/analytics/risk/:participantId', authenticate, checkPermission('analytics:view'), async (req, res, next) => {
+  try {
+    const participantId = Number(req.params.participantId);
+    if (!Number.isSafeInteger(participantId) || participantId <= 0) {
+      return res.status(400).json({ error: 'Enter a valid sponsored child ID' });
+    }
+    const [children, settings] = await Promise.all([
+      loadPredictionAttendanceData({ participantId }),
+      loadAttendanceRiskSettings(),
+    ]);
+    const child = children[0];
+    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
+    const { events, ...identity } = child;
+    res.json({
+      ...identity,
+      ...buildAttendanceRiskAssessment(events, settings),
+      assessmentMethod: 'rule_based',
     });
   } catch (error) { next(error); }
 });
@@ -5840,13 +6747,9 @@ app.get('/api/reports/at-risk', authenticate, checkPermission('reports:view'), c
   try {
     const riskLevel = normalizeRiskFilter(req.query.riskLevel);
     const password = req.query.password ? String(req.query.password) : '';
-    const range = analyticsDateRange(req);
-    if (!range) return res.status(400).json({ error: 'Enter a valid date range' });
     const records = await computeRiskRecords(riskLevel, {
-      range,
       educationLevel: req.query.educationLevel,
       status: normalizeAnalyticsStatus(req.query.status),
-      eventId: String(req.query.event || '').trim(),
     });
     const stamp = new Date().toISOString().slice(0, 10);
     const filename = `at-risk-sponsored-children-${riskLevel}-${stamp}`;
@@ -5855,9 +6758,9 @@ app.get('/api/reports/at-risk', authenticate, checkPermission('reports:view'), c
         doc.fontSize(18).text('At-Risk Sponsored Child Report');
         doc.fontSize(10).text(`Generated: ${new Date().toLocaleString()} · Risk level filter: ${riskLevel}`);
         doc.moveDown();
-        doc.fontSize(11).text('Sponsored Child · Education · Attendance rate · Predicted risk · Risk level · Recommendation');
+        doc.fontSize(11).text('Sponsored Child · Education · Attendance rate · Rule-based score · Pattern · Risk level · Recommendation');
         records.forEach((row) => {
-          doc.fontSize(9).text(`${row.participantName} (ID ${row.participantId}) | ${row.educationLevel || '—'} | ${row.attendanceRate == null ? 'N/A' : `${row.attendanceRate}%`} | ${row.riskScore == null ? 'Insufficient data' : `${row.riskScore}%`} | ${row.riskLevel} | ${row.recommendedAction}`);
+          doc.fontSize(9).text(`${row.participantName} (ID ${row.participantId}) | ${row.educationLevel || '—'} | ${row.attendanceRate == null ? 'N/A' : `${row.attendanceRate}%`} | ${row.riskScore == null ? 'Insufficient data' : `${row.riskScore}/100`} | ${row.pattern} | ${row.riskLevel} | ${row.recommendedAction}`);
         });
         doc.moveDown();
         doc.fontSize(10).text('Risk scores are decision-support information and require staff review. They are not a sole basis for decisions about a child.');
@@ -5868,20 +6771,29 @@ app.get('/api/reports/at-risk', authenticate, checkPermission('reports:view'), c
       res,
       `${filename}.csv`,
       csvPayload(
-        ['sponsoredChildId', 'sponsoredChildCode', 'name', 'educationLevel', 'attendanceRate', 'participationStatus', 'riskScore', 'riskLevel', 'modelVersion', 'trend', 'insufficientData', 'evidence', 'recommendedAction'],
+        ['sponsoredChildId', 'sponsoredChildCode', 'name', 'educationLevel', 'registrationDate', 'participationStatus', 'scheduledEvents', 'recordedEvents', 'present', 'absent', 'unrecorded', 'attendanceRate', 'absenceRate', 'attendanceFrequency', 'recentAttendancePattern', 'riskScore', 'riskLevel', 'assessmentMethod', 'insufficientData', 'consecutiveAbsences', 'recencyDays', 'recommendedAction'],
         records.map((row) => ({
           sponsoredChildId: row.participantId,
           sponsoredChildCode: row.participantCode,
           name: row.participantName,
           educationLevel: row.educationLevel,
-          attendanceRate: row.attendanceRate,
+          registrationDate: row.registrationDate,
           participationStatus: row.participationStatus,
+          scheduledEvents: row.scheduledEvents,
+          recordedEvents: row.recordedEvents,
+          present: row.present,
+          absent: row.absent,
+          unrecorded: row.unrecorded,
+          attendanceRate: row.attendanceRate,
+          absenceRate: row.absenceRate,
+          attendanceFrequency: row.attendanceFrequency,
+          recentAttendancePattern: row.pattern,
           riskScore: row.riskScore,
           riskLevel: row.riskLevel,
-          modelVersion: row.modelVersion,
-          trend: row.trend,
+          assessmentMethod: row.assessmentMethod,
           insufficientData: row.insufficientData,
-          evidence: row.summary,
+          consecutiveAbsences: row.consecutiveAbsences,
+          recencyDays: row.recencyDays,
           recommendedAction: row.recommendedAction,
         })),
       ),
@@ -6040,80 +6952,6 @@ app.get('/api/reports/audit-trail', authenticate, checkPermission('reports:view'
 
 app.use((error, req, res, next) => { console.error(error); res.status(500).json({ error: 'Internal server error' }); });
 
-async function refreshRiskScores() {
-  await Promise.all([
-    attendanceModelValidationReady,
-    participantProfileColumnsReady,
-    eventsTableReady,
-    participationTrackingReady,
-  ]);
-  const [history] = await pool.query(`
-    SELECT c.participant_id, UNIX_TIMESTAMP(MIN(c.checked_in_at)) * 1000 AS checked_in_at_ms
-    FROM check_in_logs c
-    JOIN participants p ON p.id = c.participant_id
-    JOIN events e
-      ON LOWER(TRIM(e.name)) = LOWER(TRIM(c.event_name))
-     AND c.checked_in_at >= DATE(e.starts_at)
-     AND c.checked_in_at < DATE_ADD(DATE(e.starts_at), INTERVAL 1 DAY)
-     AND e.is_sample = FALSE AND e.status = 'completed'
-     AND e.starts_at < NOW()
-    WHERE p.participant_type = 'sponsored_child'
-      AND p.status <> 'deleted'
-      AND c.status = 'checked_in'
-      AND c.checked_in_at IS NOT NULL
-      AND c.checked_in_at >= COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at)
-    GROUP BY c.participant_id, e.id
-    ORDER BY MIN(c.checked_in_at) ASC
-  `);
-  const attendanceHistory = history.map((row) => ({
-    participantId: row.participant_id,
-    checkedInAt: Number(row.checked_in_at_ms),
-  }));
-  const evaluatedAt = Date.now();
-  const validation = validateAttendanceModel(attendanceHistory, evaluatedAt);
-  const { coefficients, ...validationReport } = validation;
-  await pool.execute(
-    `INSERT INTO attendance_model_validation_runs (status, model_version, details_json)
-     VALUES (?, ?, ?)`,
-    [validationReport.status, validationReport.modelVersion, JSON.stringify(validationReport)],
-  );
-  const [participants] = await pool.query(
-    "SELECT id FROM participants WHERE participant_type = 'sponsored_child' AND status <> 'deleted'",
-  );
-  const currentFeatures = getCurrentAttendanceFeatures(
-    attendanceHistory,
-    participants.map((participant) => participant.id),
-    evaluatedAt,
-  );
-  const recentCounts = new Map();
-  for (const attendance of attendanceHistory) {
-    if (evaluatedAt - attendance.checkedInAt <= 180 * 86400000) {
-      recentCounts.set(
-        String(attendance.participantId),
-        (recentCounts.get(String(attendance.participantId)) || 0) + 1,
-      );
-    }
-  }
-  let refreshed = 0;
-  for (const participant of participants) {
-    const features = currentFeatures.get(String(participant.id));
-    if (!coefficients || (recentCounts.get(String(participant.id)) || 0) < 2) continue;
-    const trainedProbability = predictInactivityProbability(features, coefficients);
-    const score = Math.round(trainedProbability * 10000) / 100;
-    await pool.execute(
-      'INSERT INTO predictive_risk_scores (participant_id, risk_score, risk_level, model_version, computed_at, created_at) VALUES (?, ?, ?, ?, NOW(), NOW())',
-      [
-        participant.id,
-        score,
-        score >= 70 ? 'high' : score >= 40 ? 'medium' : 'low',
-        MODEL_VERSION,
-      ],
-    );
-    refreshed += 1;
-  }
-  return { refreshed, validation: validationReport };
-}
-cron.schedule('0 2 * * *', () => refreshRiskScores().catch(console.error));
 cron.schedule('23 * * * *', () => {
   pool.execute(
     'DELETE FROM security_rate_limits WHERE window_started_at < DATE_SUB(NOW(), INTERVAL 1 DAY)',

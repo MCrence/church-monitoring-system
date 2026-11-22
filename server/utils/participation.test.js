@@ -33,6 +33,25 @@ test("counts all scheduled activities and deduplicates repeat check-ins", () => 
   assert.equal(result.lifetime.attended, 3);
 });
 
+test("counts imported present records without timestamps but does not treat absent records as check-ins", () => {
+  const result = summarizeParticipation({
+    registrationDate: "2026-10-01",
+    asOf: "2026-10-24",
+    events: [
+      event("Children's Ministry", "2026-10-05"),
+      event("Sunday Service", "2026-10-19"),
+    ],
+    checkIns: [
+      { eventName: "Children's Ministry", eventDate: "2026-10-05", attendanceStatus: "present" },
+      { eventName: "Sunday Service", eventDate: "2026-10-19", attendanceStatus: "absent" },
+    ],
+  });
+
+  assert.equal(result.currentMonth.required, 2);
+  assert.equal(result.currentMonth.attended, 1);
+  assert.equal(result.currentMonth.absent, 1);
+});
+
 test("calculates missed monthly participation and yearly totals", () => {
   const result = summarizeParticipation({
     registrationDate: "2026-09-01",
@@ -53,6 +72,28 @@ test("calculates missed monthly participation and yearly totals", () => {
   assert.equal(result.lifetime.absent, 3);
   assert.equal(result.currentYear.required, 4);
   assert.equal(result.currentYear.absent, 3);
+});
+
+test("keeps historical absences while annual status thresholds reset", () => {
+  const events = Array.from({ length: 6 }, (_, index) =>
+    event(
+      `Activity ${index + 1}`,
+      `2026-${String(10 + Math.floor(index / 2)).padStart(2, "0")}-${index % 2 ? "19" : "05"}`,
+    ),
+  );
+  const result = summarizeParticipation({
+    registrationDate: "2026-10-01",
+    asOf: "2027-01-02",
+    events,
+    checkIns: [
+      checkIn("Activity 1", "2026-10-05 09:00:00"),
+      checkIn("Activity 2", "2026-10-19 09:00:00"),
+    ],
+  });
+
+  assert.equal(result.years.find((year) => year.year === 2026).absent, 4);
+  assert.equal(result.currentYear.absent, 0);
+  assert.equal(getParticipationStatus({ currentYearAbsences: result.currentYear.absent }), "ACTIVE");
 });
 
 test("does not count absences in months without scheduled activities", () => {
@@ -221,29 +262,19 @@ test("calculates yearly attendance and absence rates from actual scheduled activ
   assert.equal(result.currentYear.required, 0);
 });
 
-test("evaluates warning and grounds thresholds using current-year absences", () => {
+test("evaluates annual status thresholds at four, five, and six absences", () => {
+  assert.equal(getParticipationStatus({ currentYearAbsences: 3 }), "ACTIVE");
   assert.equal(getParticipationStatus({
     currentYearAbsences: 4,
-    monthsMonitored: 4,
   }), "WARNING");
   assert.equal(getParticipationStatus({
     currentYearAbsences: 5,
-    monthsMonitored: 2,
-  }), "ACTIVE");
+  }), "WARNING");
   assert.equal(getParticipationStatus({
-    currentYearAbsences: 7,
-    monthsMonitored: 3,
-  }), "ACTIVE");
-  assert.equal(getParticipationStatus({
-    currentYearAbsences: 7,
-    monthsMonitored: 4,
+    currentYearAbsences: 6,
   }), "GROUNDS_FOR_DEPARTURE");
 });
 
-test("keeps second chance and removal distinct from the annual thresholds", () => {
-  assert.equal(getParticipationStatus({ currentYearAbsences: 3, monthsMonitored: 4 }), "WARNING");
-  assert.equal(getParticipationStatus({ currentYearAbsences: 6, monthsMonitored: 4 }), "ACTIVE");
-  assert.equal(getParticipationStatus({ currentYearAbsences: 7, monthsMonitored: 4, secondChanceGranted: true }), "SECOND_CHANCE");
-  assert.equal(getParticipationStatus({ currentYearAbsences: 0, secondChanceGranted: true }), "SECOND_CHANCE");
-  assert.equal(getParticipationStatus({ currentYearAbsences: 8, secondChanceGranted: true, removed: true }), "REMOVED_FROM_SPONSORSHIP");
+test("keeps inactive decisions distinct from annual attendance thresholds", () => {
+  assert.equal(getParticipationStatus({ currentYearAbsences: 8, removed: true }), "REMOVED_FROM_SPONSORSHIP");
 });

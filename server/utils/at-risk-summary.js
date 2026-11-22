@@ -14,12 +14,12 @@ function summarizeAtRiskParticipants(participants, riskRecords) {
     const status = String(participant.participationStatus || '').toUpperCase();
     if (['INACTIVE', 'REMOVED_FROM_SPONSORSHIP'].includes(status)) continue;
     const risk = risksById.get(id);
-    if (['WARNING', 'SECOND_CHANCE'].includes(status)) categories.warning.add(id);
+    if (status === 'WARNING') categories.warning.add(id);
     if (status === 'GROUNDS_FOR_DEPARTURE') categories.groundsForDeparture.add(id);
     if (risk === 'medium') categories.mediumPredictiveRisk.add(id);
     if (risk === 'high') categories.highPredictiveRisk.add(id);
     if (
-      ['WARNING', 'SECOND_CHANCE', 'GROUNDS_FOR_DEPARTURE'].includes(status)
+      ['WARNING', 'GROUNDS_FOR_DEPARTURE'].includes(status)
       || ['medium', 'high'].includes(risk)
     ) uniqueAtRisk.add(id);
   }

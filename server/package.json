@@ -6,7 +6,8 @@
   "scripts": {
     "test": "node --test utils/*.test.js && node --check index.js",
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "reconcile-attendance": "node scripts/reconcile-official-attendance.js"
   },
   "keywords": [],
   "author": "",

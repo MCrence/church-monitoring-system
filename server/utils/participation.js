@@ -55,7 +55,12 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
 
   const attendedKeys = new Set();
   for (const checkIn of checkIns) {
-    const date = dateKey(checkIn.checkedInAt);
+    if (String(checkIn.attendanceStatus || "").toLowerCase() === "absent") continue;
+    const date = dateKey(checkIn.checkedInAt || (
+      String(checkIn.attendanceStatus || "").toLowerCase() === "present"
+        ? checkIn.eventDate
+        : ""
+    ));
     if (!date || date < registrationDateKey || date > lastDay) continue;
     const key = occurrenceKey(checkIn.eventName, date);
     if (activityByKey.has(key)) attendedKeys.add(key);
@@ -182,16 +187,12 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
 
 function getParticipationStatus({
   currentYearAbsences = 0,
-  secondChanceGranted = false,
   removed = false,
-  monthsMonitored,
 } = {}) {
   if (removed) return "REMOVED_FROM_SPONSORSHIP";
-  if (secondChanceGranted) return "SECOND_CHANCE";
-  const monitoredMonths = Number.isFinite(Number(monthsMonitored)) ? Number(monthsMonitored) : 0;
   const absences = Number(currentYearAbsences) || 0;
-  if (monitoredMonths >= 4 && absences > GROUNDS_FOR_DEPARTURE_ABSENCES) return "GROUNDS_FOR_DEPARTURE";
-  if (absences >= 3 && absences <= 4) return "WARNING";
+  if (absences >= GROUNDS_FOR_DEPARTURE_ABSENCES) return "GROUNDS_FOR_DEPARTURE";
+  if (absences >= 4) return "WARNING";
   return "ACTIVE";
 }
 

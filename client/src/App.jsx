@@ -35,6 +35,13 @@ const formatCount = (value) => {
   const num = Number(value);
   return Number.isFinite(num) ? num.toLocaleString() : "0";
 };
+const formatDashboardDateTime = (value) => {
+  if (!value) return "Date unavailable";
+  const date = value instanceof Date
+    ? value
+    : new Date(typeof value === "string" ? value.replace(" ", "T") : value);
+  return Number.isNaN(date.getTime()) ? "Date unavailable" : date.toLocaleString();
+};
 const STAFF_ROLES = ["system administrator", "church administrator"];
 const GOER_ROLE = "goer";
 const STAFF_PERMISSION_OPTIONS = [
@@ -111,7 +118,6 @@ const PARTICIPATION_STATUSES = [
   { value: "ACTIVE", label: "Active" },
   { value: "WARNING", label: "Warning" },
   { value: "GROUNDS_FOR_DEPARTURE", label: "Grounds for Departure" },
-  { value: "SECOND_CHANCE", label: "Second Chance" },
   { value: "REMOVED_FROM_SPONSORSHIP", label: "Inactive" },
 ];
 const normalizeParticipationStatus = (value) => {
@@ -217,9 +223,6 @@ function validateParticipantRegistration(form) {
     errors.emergencyContactName = "Guardian name must contain a valid name.";
   }
   if (!text("emergencyContactPhone")) errors.emergencyContactPhone = "Guardian contact number is required.";
-  else if (!/^09[0-9]{9}$/.test(text("emergencyContactPhone"))) {
-    errors.emergencyContactPhone = "Guardian contact number must be 11 digits and start with 09.";
-  }
 
   const dateOfBirth = text("dateOfBirth");
   const parsedBirthDate = /^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)
@@ -330,7 +333,9 @@ function Login({ done, onBack }) {
       localStorage.user = JSON.stringify(d.user);
       done(d.user);
     } catch (x) {
-      setErr(x.message);
+      setErr(x.message === "Invalid credentials"
+        ? "Email or password is incorrect. Please try again."
+        : x.message);
       setSubmitting(false);
     }
   };
@@ -351,35 +356,49 @@ function Login({ done, onBack }) {
           )}
           <div className="brand-mark">
             <img src="/church-logo.png" alt="FMC Field Care logo" />
-            <span>FMC FIELD CARE</span>
+            <span className="login-brand-caption"><NavigationIcon name="shield" />FMC FIELD CARE</span>
           </div>
           <h1>Welcome back</h1>
-          <p className="text-secondary mb-4">Secure sponsored child monitoring</p>
+          <p className="login-intro text-secondary mb-4"><span><NavigationIcon name="shield" /></span>Secure sponsored child monitoring</p>
           <form onSubmit={submit} className="vstack gap-3">
-            <input
-              className="form-control form-control-lg"
-              type="email"
-              placeholder="Email address"
-              value={f.email}
-              onChange={(e) => setF({ ...f, email: e.target.value })}
-              autoComplete="email"
-              disabled={submitting}
-              required
-            />
-            <input
-              className="form-control form-control-lg"
-              type="password"
-              placeholder="Password"
-              value={f.password}
-              onChange={(e) => setF({ ...f, password: e.target.value })}
-              autoComplete="current-password"
-              disabled={submitting}
-              required
-            />
-            <button className="btn btn-dark btn-lg" disabled={submitting}>
-              {submitting ? "Signing in…" : "Sign in →"}
+            <label className="login-input-wrap">
+              <NavigationIcon name="mail" />
+              <input
+                className="form-control form-control-lg"
+                type="email"
+                placeholder="Email address"
+                aria-label="Email address"
+                value={f.email}
+                onChange={(e) => setF({ ...f, email: e.target.value })}
+                autoComplete="email"
+                disabled={submitting}
+                required
+              />
+            </label>
+            <label className="login-input-wrap">
+              <NavigationIcon name="lock" />
+              <input
+                className="form-control form-control-lg"
+                type="password"
+                placeholder="Password"
+                aria-label="Password"
+                value={f.password}
+                onChange={(e) => setF({ ...f, password: e.target.value })}
+                autoComplete="current-password"
+                disabled={submitting}
+                required
+              />
+            </label>
+            <button className="btn btn-dark btn-lg login-submit" disabled={submitting}>
+              <span>{submitting ? "Signing in…" : "Sign in"}</span>
+              <span className="login-submit-icon"><NavigationIcon name="arrowRight" /></span>
             </button>
-            {err && <div className="alert alert-danger" role="alert">{err}</div>}
+            {err && (
+              <div className="login-error" role="alert">
+                <span className="login-error-icon"><NavigationIcon name="warning" /></span>
+                <div><strong>Unable to sign in</strong><small>{err}</small></div>
+              </div>
+            )}
           </form>
         </div>
         <div className="login-art">
@@ -418,6 +437,23 @@ const NAVIGATION_ICON_CONTENT = {
   staff: <><circle cx="9" cy="8" r="3" /><path d="M3.5 20v-1.5a5.5 5.5 0 0 1 11 0V20z" /><path d="M16 5.5a3 3 0 0 1 0 5.8M17 14a4.5 4.5 0 0 1 3.5 4.4V20h-3" /></>,
   audit: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2M4.5 5.5 3 4M19.5 5.5 21 4" /></>,
   account: <><circle cx="12" cy="8" r="3.5" /><path d="M4 20a8 8 0 0 1 16 0" /></>,
+  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+  location: <><path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 1 1 14 0Z" /><circle cx="12" cy="10" r="2" /></>,
+  photo: <><rect x="3" y="4.5" width="18" height="15" rx="2" /><circle cx="8.5" cy="9.5" r="1.5" /><path d="m21 15-5-5L5 19.5" /></>,
+  plus: <path d="M12 5v14M5 12h14" />,
+  arrowRight: <><path d="M5 12h14" /><path d="m13 6 6 6-6 6" /></>,
+  mail: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m4 7 8 6 8-6" /></>,
+  lock: <><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" /></>,
+  shield: <><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z" /><path d="m9 12 2 2 4-4" /></>,
+  sparkle: <path d="m12 2 2.1 7.1L21 12l-6.9 2.9L12 22l-2.1-7.1L3 12l6.9-2.9L12 2Z" />,
+  settings: <><circle cx="12" cy="12" r="3" /><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.7a8 8 0 0 1-1.7 1l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.7-1l-1.7.7-1.4-2.4L7.3 15a8 8 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.7.7a8 8 0 0 1 1.7-1l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.7 1l1.7-.7 1.4 2.4L19.3 13a8 8 0 0 1 .1 2Z" /></>,
+  search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.5 4.5" /></>,
+  view: <><path d="M2.5 12s3.3-6 9.5-6 9.5 6 9.5 6-3.3 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.5" /></>,
+  addAccount: <><circle cx="9" cy="8" r="3" /><path d="M3.5 20v-1.3a5.5 5.5 0 0 1 11 0V20zM18 8v6M15 11h6" /></>,
+  check: <path d="m5 12 4.2 4.2L19 6.5" />,
+  close: <><path d="m6 6 12 12M18 6 6 18" /></>,
+  warning: <><path d="M10.3 4.5 2.8 17.4A1.7 1.7 0 0 0 4.3 20h15.4a1.7 1.7 0 0 0 1.5-2.6L13.7 4.5a2 2 0 0 0-3.4 0Z" /><path d="M12 9v4m0 3h.01" /></>,
+  upload: <><path d="M12 15V3m-4.5 4.5L12 3l4.5 4.5M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" /></>,
 };
 function NavigationIcon({ name }) {
   return (
@@ -433,6 +469,56 @@ function NavigationIcon({ name }) {
       focusable="false"
     >
       {NAVIGATION_ICON_CONTENT[name]}
+    </svg>
+  );
+}
+function DashboardMetricIcon({ label }) {
+  const text = String(label || "").toLowerCase();
+  const tone = text.includes("departure")
+    ? "critical"
+    : text.includes("warning")
+      ? "warning"
+    : text.includes("inactive") || text.includes("absent")
+      ? "inactive"
+      : text.includes("attendance") || text.includes("month") || text.includes("year")
+        ? "attendance"
+        : text.includes("activit") || text.includes("upcoming") || text.includes("new")
+          ? "events"
+          : text.includes("staff")
+            ? "staff"
+            : text.includes("goer") || text.includes("child") || text.includes("male") || text.includes("female")
+              ? "people"
+              : text.includes("active") || text.includes("present")
+                ? "active"
+                : "account";
+  const icon = {
+    warning: "warning",
+    critical: "warning",
+    inactive: "close",
+    attendance: "analytics",
+    events: "events",
+    staff: "staff",
+    people: "participants",
+    active: "check",
+    account: "account",
+  }[tone];
+  return <span className={`dashboard-metric-icon ${tone}`} aria-hidden="true"><NavigationIcon name={icon} /></span>;
+}
+function GenderIcon() {
+  return (
+    <svg
+      className="gender-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="12" cy="8" r="3.5" />
+      <path d="M5 21c.7-4.1 3.1-6.2 7-6.2s6.3 2.1 7 6.2" />
     </svg>
   );
 }
@@ -454,8 +540,9 @@ function Header({ user, page, go, logout }) {
         <img src="/church-logo.png" alt="" />
         <span>FMC FIELD CARE</span>
       </button>
+      <div className="sidebar-nav-label">Your workspace</div>
       <button
-        className="mobile-menu-toggle"
+        className={`mobile-menu-toggle${menuOpen ? " is-open" : ""}`}
         type="button"
         aria-label={menuOpen ? "Close navigation menu" : "Open navigation menu"}
         aria-expanded={menuOpen}
@@ -804,8 +891,7 @@ function AgeField({ dateOfBirth }) {
 }
 const EditIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-    <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-    <path d="m15 5 4 4" />
+    <path d="m15 5 4 4M4 20l4.5-1 11-11a2.1 2.1 0 0 0-3-3l-11 11L4 20Z" />
   </svg>
 );
 const DeleteIcon = () => (
@@ -877,6 +963,10 @@ function Dashboard({ go, user }) {
   }, []);
   const isGoer = String(user?.role || "").toLowerCase() === GOER_ROLE;
   const isAdmin = String(user?.role || "").toLowerCase() === "system administrator";
+  const isChurchAdmin = String(user?.role || "").toLowerCase() === "church administrator";
+  const canImportData = isAdmin || isChurchAdmin ||
+    canAccessPermission("events:manage", user) ||
+    canAccessPermission("sponsorship:manage", user);
   const canViewParticipants = canAccessPermission("participants:view", user);
   const canManageParticipants = isAdmin;
   const canViewEvents = canAccessPermission("events:view", user);
@@ -894,14 +984,15 @@ function Dashboard({ go, user }) {
     ...(canManageParticipants ? [{ label: "Add Sponsored Child", icon: "participants", page: "participants" }] : []),
     ...(canManageEvents ? [{ label: "Create Church Activity", icon: "events", page: "events" }] : []),
     ...(canCheckIn ? [{ label: "Check-in", icon: "scanner", page: "scanner" }] : []),
-    ...(canManageParticipants ? [{ label: "Import Data", icon: "participants", page: "participants" }] : []),
+    ...(canImportData ? [{ label: "Import Data", icon: "participants", page: "participants" }] : []),
     ...(isAdmin ? [{ label: "Manage Accounts", icon: "staff", page: "staff" }] : []),
   ];
   const renderEvents = (rows, emptyText) => rows.length ? (
     <ul className="dashboard-list">
-      {rows.map((event) => (
-        <li key={event.id}>
-          <div><strong>{event.name}</strong><small>{new Date(event.starts_at).toLocaleString()} {event.location ? `· ${event.location}` : ""}</small></div>
+      {rows.map((event, index) => (
+        <li key={event.id ?? `${event.name}-${event.starts_at}-${index}`}>
+          <DashboardMetricIcon label="Church Activities" />
+          <div><strong>{event.name}</strong><small>{formatDashboardDateTime(event.starts_at)} {event.location ? `· ${event.location}` : ""}</small></div>
           {event.status && <span className="dashboard-status">{event.status}</span>}
         </li>
       ))}
@@ -911,7 +1002,8 @@ function Dashboard({ go, user }) {
     <ul className="dashboard-list">
       {followups.map((child) => (
         <li key={child.id}>
-          <div><strong>{child.name}</strong><small>{child.absent} absences{child.status === "SECOND_CHANCE" ? ` · ${child.postSecondChanceAbsences || 0} after second chance` : ""}</small></div>
+          <DashboardMetricIcon label={participationStatusLabel(child.status)} />
+          <div><strong>{child.name}</strong><small>{child.absent} absences</small></div>
           <span className={`dashboard-status ${child.status === "GROUNDS_FOR_DEPARTURE" ? "is-critical" : child.status === "WARNING" ? "is-warning" : ""}`}>{participationStatusLabel(child.status)}</span>
         </li>
       ))}
@@ -923,8 +1015,8 @@ function Dashboard({ go, user }) {
     return (
       <>
         <div className="dashboard-attendance-periods">
-          {[["Today", d?.attendance?.today], ["This Week", d?.attendance?.week], ["This Month", d?.attendance?.month], ["This Year", d?.attendance?.year]].map(([label, period]) => (
-            <div key={label}><small>{label}</small><strong>{formatCount(period?.attended || 0)} / {formatCount(period?.required || 0)}</strong><span>{rateLabel(period)}</span></div>
+          {[["This Month", d?.attendance?.month], ["This Year", d?.attendance?.year]].map(([label, period]) => (
+            <div key={label}><DashboardMetricIcon label={label} /><small>{label}</small><strong>{formatCount(period?.attended || 0)} / {formatCount(period?.required || 0)}</strong><span>{rateLabel(period)}</span></div>
           ))}
         </div>
         <p className="dashboard-absence-total">Total absences this year: <strong>{formatCount(d?.attendance?.year?.absent || 0)}</strong></p>
@@ -953,9 +1045,9 @@ function Dashboard({ go, user }) {
         <>
           <div className="row g-3 mb-4">
             {(isAdmin ? [
-              ["Total Sponsored Children", d.participantCounts.total, `${formatCount(d.participantCounts.newThisMonth)} new this month`],
+              ["Total Sponsored Children", d.participantCounts.total, `${formatCount(d.participantCounts.newThisYear)} new this year`],
               ["Active Sponsored Children", d.participantCounts.active, `${formatCount(d.participantCounts.inactive)} inactive`],
-              ["Attendance Rate", rateLabel(d.attendance.month), "This month"],
+              ["Attendance Rate", rateLabel(d.attendance.year), "This year"],
               ["Upcoming Church Activities", d.events.upcoming, "Scheduled"],
             ] : isGoer ? [
               ["My Sponsored Children", d.participantCounts.total, d.educationLevel],
@@ -969,25 +1061,25 @@ function Dashboard({ go, user }) {
               ["Attendance Follow-ups", canViewCare ? d.followupCount || 0 : "—", canViewCare ? "Care status requires review" : "Sponsored-care access not assigned"],
             ]).map(([label, value, caption]) => (
               <div className="col-12 col-sm-6 col-xl-3" key={label}>
-                <div className="stat-card"><small>{label}</small><strong>{typeof value === "number" ? formatCount(value) : value}</strong><span>{caption}</span></div>
+                <div className="stat-card dashboard-stat-card"><DashboardMetricIcon label={label} /><small>{label}</small><strong>{typeof value === "number" ? formatCount(value) : value}</strong><span>{caption}</span></div>
               </div>
             ))}
           </div>
           {isAdmin && (
             <section className="surface dashboard-section mb-4">
-              <div className="dashboard-section-heading"><div><h2>Sponsored Child Overview</h2><p>Current sponsored child registry</p></div>{canViewParticipants && <button className="btn btn-outline-primary btn-sm" onClick={() => go("participants")}>View Sponsored Children</button>}</div>
+              <div className="dashboard-section-heading"><div><h2>Sponsored Child Overview</h2><p>Current sponsored child registry</p></div>{canViewParticipants && <button className="btn btn-sm dashboard-action-button" onClick={() => go("participants")}><span className="dashboard-action-icon"><NavigationIcon name="participants" /></span><span>View Sponsored Children</span><span className="dashboard-action-arrow"><NavigationIcon name="arrowRight" /></span></button>}</div>
               <div className="dashboard-overview-stats">
-                {[["Male", d.participantCounts.male], ["Female", d.participantCounts.female], ["Active", d.participantCounts.active], ["Inactive", d.participantCounts.inactive], ["New this month", d.participantCounts.newThisMonth]].map(([label, value]) => <div key={label}><small>{label}</small><strong>{formatCount(value)}</strong></div>)}
+                {[["Male", d.participantCounts.male], ["Female", d.participantCounts.female], ["Active", d.participantCounts.active], ["Inactive", d.participantCounts.inactive], ["New this Year", d.participantCounts.newThisYear]].map(([label, value]) => <div key={label}><DashboardMetricIcon label={label} /><small>{label}</small><strong>{formatCount(value)}</strong></div>)}
               </div>
             </section>
           )}
-          {isAdmin && <section className="surface dashboard-section mb-4"><div className="dashboard-section-heading"><div><h2>System Accounts</h2><p>Staff and Goer account totals</p></div></div><div className="dashboard-overview-stats">{[["Total Staff", d.users.totalStaff], ["Active Staff", d.users.activeStaff], ["Goer Accounts", d.users.goerAccounts], ["Church Administrators", d.users.churchAdministrators]].map(([label, value]) => <div key={label}><small>{label}</small><strong>{formatCount(value)}</strong></div>)}</div></section>}
+          {isAdmin && <section className="surface dashboard-section mb-4"><div className="dashboard-section-heading"><div><h2>System Accounts</h2><p>Staff and Goer account totals</p></div></div><div className="dashboard-overview-stats">{[["Total Staff", d.users.totalStaff], ["Active Staff", d.users.activeStaff], ["Goer Accounts", d.users.goerAccounts], ["Church Staff", d.users.churchAdministrators]].map(([label, value]) => <div key={label}><DashboardMetricIcon label={label} /><small>{label}</small><strong>{formatCount(value)}</strong></div>)}</div></section>}
           <div className="row g-4 mb-4">
             <section className={`${isAdmin ? "col-12 col-xl-7" : "col-12 col-xl-6"}`}>
-              <article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>{isGoer ? "Group Attendance" : "Attendance Overview"}</h2><p>{isGoer ? `Attendance for ${d.educationLevel} sponsored children` : "Based on scheduled events and recorded check-ins"}</p></div>{canCheckIn && <button className="btn btn-outline-primary btn-sm" onClick={() => go("scanner")}>Open Check-in</button>}</div>{renderAttendance()}</article>
+              <article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>{isGoer ? "Group Attendance" : "Attendance Overview"}</h2><p>{isGoer ? `Attendance for ${d.educationLevel} sponsored children` : "Based on scheduled events and recorded check-ins"}</p></div>{canCheckIn && <button className="btn btn-sm dashboard-action-button" onClick={() => go("scanner")}><span className="dashboard-action-icon"><NavigationIcon name="scanner" /></span><span>Open Check-in</span><span className="dashboard-action-arrow"><NavigationIcon name="arrowRight" /></span></button>}</div>{renderAttendance()}</article>
             </section>
             <section className={`${isAdmin ? "col-12 col-xl-5" : "col-12 col-xl-6"}`}>
-              <article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>{isGoer ? "Upcoming Activities" : "Church Activities"}</h2><p>{formatCount(d.events.upcoming)} upcoming · {formatCount(d.events.thisMonth)} this month · {formatCount(d.events.completedThisMonth)} completed this month</p></div>{canViewEvents && <button className="btn btn-outline-primary btn-sm" onClick={() => go("events")}>View Church Activities</button>}</div><h3 className="dashboard-subheading">Today’s Church Activities</h3>{renderEvents(d.todayEvents, "No church activities scheduled for today.")}<h3 className="dashboard-subheading">Upcoming Church Activities</h3>{renderEvents(upcoming, "No upcoming church activities.")}</article>
+              <article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>{isGoer ? "Upcoming Activities" : "Church Activities"}</h2><p>{formatCount(d.events.upcoming)} upcoming · {formatCount(d.events.thisMonth)} this month · {formatCount(d.events.completedThisMonth)} completed this month</p></div>{canViewEvents && <button className="btn btn-sm dashboard-action-button" onClick={() => go("events")}><span className="dashboard-action-icon"><NavigationIcon name="events" /></span><span>View Church Activities</span><span className="dashboard-action-arrow"><NavigationIcon name="arrowRight" /></span></button>}</div><h3 className="dashboard-subheading">This Year Church Activities</h3>{renderEvents(d.yearEvents || [], "No church activities scheduled this year.")}<h3 className="dashboard-subheading">Upcoming Church Activities</h3>{renderEvents(upcoming, "No upcoming church activities.")}</article>
             </section>
           </div>
           {isGoer && (
@@ -998,13 +1090,13 @@ function Dashboard({ go, user }) {
           )}
           {(isAdmin || canViewCare) && (
             <div className="row g-4 mb-4">
-              {isAdmin && <section className="col-12 col-lg-5"><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Sponsored Care</h2><p>Participation status summary</p></div><button className="btn btn-outline-primary btn-sm" onClick={() => go("sponsorship")}>View Sponsored Care</button></div><div className="dashboard-overview-stats">{[["Active", d.sponsoredCare.active], ["Warning", d.sponsoredCare.warning], ["Grounds for Departure", d.sponsoredCare.groundsForDeparture], ["Second Chance", d.sponsoredCare.secondChance], ["Inactive", d.sponsoredCare.removed]].map(([label, value]) => <div key={label}><small>{label}</small><strong>{formatCount(value)}</strong></div>)}</div></article></section>}
+              {isAdmin && <section className="col-12 col-lg-5"><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Sponsored Care</h2><p>Participation status summary</p></div><button className="btn btn-sm dashboard-action-button" onClick={() => go("sponsorship")}><span className="dashboard-action-icon"><NavigationIcon name="sponsorship" /></span><span>View Sponsored Care</span><span className="dashboard-action-arrow"><NavigationIcon name="arrowRight" /></span></button></div><div className="dashboard-overview-stats">{[["Active", d.sponsoredCare.active], ["Warning", d.sponsoredCare.warning], ["Grounds for Departure", d.sponsoredCare.groundsForDeparture], ["Inactive", d.sponsoredCare.removed]].map(([label, value]) => <div key={label}><DashboardMetricIcon label={label} /><small>{label}</small><strong>{formatCount(value)}</strong></div>)}</div></article></section>}
               <section className={isAdmin ? "col-12 col-lg-7" : "col-12"}><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Attendance Follow-up</h2><p>Sponsored children who may need a conversation or support</p></div></div>{renderFollowups()}</article></section>
             </div>
           )}
           {!isAdmin && !isGoer && canViewCare && (
             <section className="surface dashboard-section mb-4">
-              <div className="dashboard-section-heading"><div><h2>Recent Growth &amp; Activity</h2><p>Latest sponsored child care updates</p></div>{canViewParticipants && <button className="btn btn-outline-primary btn-sm" onClick={() => go("participants")}>View Sponsored Children</button>}</div>
+              <div className="dashboard-section-heading"><div><h2>Recent Growth &amp; Activity</h2><p>Latest sponsored child care updates</p></div>{canViewParticipants && <button className="btn btn-sm dashboard-action-button" onClick={() => go("participants")}><span className="dashboard-action-icon"><NavigationIcon name="participants" /></span><span>View Sponsored Children</span><span className="dashboard-action-arrow"><NavigationIcon name="arrowRight" /></span></button>}</div>
               {d.recentCareUpdates?.length ? <ul className="dashboard-list">{d.recentCareUpdates.map((entry) => <li key={entry.id}><div><strong>{entry.participantName}</strong><small>{entry.type === "growth" ? "Growth update" : entry.type === "activity" ? "Activity update" : "Care note"} · {entry.recordedOn ? new Date(entry.recordedOn).toLocaleDateString() : new Date(entry.createdAt).toLocaleDateString()}</small></div></li>)}</ul> : <p className="dashboard-empty">No recent care updates.</p>}
             </section>
           )}
@@ -1386,14 +1478,11 @@ function Register({ onClose, onCreated }) {
                       name="emergencyContactPhone"
                       label="Guardian contact number"
                       type="tel"
-                      inputMode="numeric"
-                      autoComplete="tel-national"
-                      placeholder="e.g. 09123456789"
+                      autoComplete="tel"
+                      placeholder="Enter contact number"
                       value={f.emergencyContactPhone}
                       onChange={update("emergencyContactPhone")}
-                      onKeyDown={(event) => restrictNumericKeyDown(event)}
                       onBlur={() => touchField("emergencyContactPhone")}
-                      pattern="09[0-9]{9}"
                       required
                       error={fieldErrors.emergencyContactPhone}
                     />
@@ -1459,113 +1548,168 @@ function participantHistoryStatusLabel(value) {
 
 const IMPORT_FIELDS = {
   participants: [
-    ["participantIdentifier", "Sponsored Child ID"],
-    ["fullName", "Sponsored Child Name"],
+    ["participantId", "Sponsored Child ID"],
+    ["participantCode", "Sponsored Child Code"],
     ["firstName", "First Name"],
     ["middleName", "Middle Name"],
     ["lastName", "Last Name"],
+    ["suffix", "Suffix"],
+    ["gender", "Gender"],
     ["dateOfBirth", "Date of Birth"],
-    ["gender", "Sex"],
-    ["address", "Address"],
-    ["phone", "Phone"],
-    ["guardianName", "Guardian Name"],
-    ["guardianContact", "Guardian Contact"],
-    ["medicalConditions", "Medical Conditions"],
-    ["educationLevel", "Education Level"],
-    ["currentSchool", "Current School"],
-    ["schoolAddress", "School Address"],
-    ["gradeLevel", "Grade/Year"],
-    ["collegeCourse", "College Course"],
+    ["age", "Age"],
+    ["phone", "Contact Information"],
+    ["address", "Address or Location"],
     ["registrationDate", "Registration Date"],
-    ["sponsorshipRegistrationDate", "Sponsorship Registration Date"],
-  ],
-  education: [
-    ["participantIdentifier", "Sponsored Child ID"],
-    ["educationLevel", "Education Level"],
-    ["schoolName", "School Name"],
-    ["schoolAddress", "School Address"],
-    ["startYear", "Start Year"],
-    ["endYear", "End Year"],
-    ["status", "Status"],
-    ["courseStrand", "Course/Strand"],
-    ["notes", "Notes"],
-  ],
-  attendance: [
-    ["participantIdentifier", "Sponsored Child ID"],
-    ["eventId", "Event ID"],
-    ["eventName", "Event Name"],
-    ["eventDate", "Event Date"],
-    ["attendanceStatus", "Attendance Status"],
+    ["currentStatus", "Current Sponsorship Status"],
+    ["guardianName", "Guardian Name"],
+    ["guardianRelationship", "Guardian Relationship"],
+    ["guardianContact", "Guardian Contact Number"],
+    ["guardianEmail", "Guardian Email"],
   ],
   events: [
-    ["eventName", "Event Name"],
+    ["eventId", "Activity/Event ID"],
+    ["eventName", "Activity Name"],
+    ["eventType", "Activity Type"],
     ["eventDescription", "Description"],
-    ["eventStart", "Starts At"],
-    ["eventEnd", "Ends At"],
-    ["eventLocation", "Location"],
+    ["educationGroup", "Education Group"],
+    ["eventDate", "Event Date"],
+    ["startTime", "Start Time"],
+    ["endTime", "End Time"],
+    ["eventLocation", "Venue or Location"],
+    ["eventStatus", "Event Status"],
+    ["createdDate", "Created Date"],
+  ],
+  education: [
+    ["educationHistoryId", "Education History ID"],
+    ["participantId", "Sponsored Child ID"],
+    ["participantCode", "Sponsored Child Code"],
+    ["participantName", "Sponsored Child Name"],
+    ["schoolName", "School Name"],
+    ["schoolAddress", "School Address"],
+    ["gradeLevel", "Grade or Year Level"],
+    ["educationLevel", "Education Level"],
+    ["schoolYear", "School Year"],
+    ["startDate", "Start Date"],
+    ["endDate", "End Date"],
+    ["status", "Current Education Status"],
+    ["completionInformation", "Graduation or Completion Information"],
+  ],
+  attendance: [
+    ["attendanceRecordId", "Attendance Record ID"],
+    ["participantId", "Sponsored Child ID"],
+    ["participantName", "Sponsored Child Full Name"],
+    ["gender", "Gender"],
+    ["educationLevel", "Education Level"],
+    ["eventId", "Activity/Event ID"],
+    ["eventName", "Activity Name"],
+    ["eventDate", "Event Date"],
+    ["attendanceStatus", "Attendance Status"],
+    ["checkedInAt", "Check-in Date and Time"],
+    ["checkedOutAt", "Check-out Date and Time"],
+    ["recordedBy", "Recorded By"],
+    ["attendanceRemarks", "Attendance Remarks"],
   ],
   attendanceSummary: [
-    ["participantIdentifier", "Sponsored Child ID"],
-    ["year", "Year"],
-    ["required", "Required"],
-    ["attended", "Attended"],
-    ["absent", "Absent"],
+    ["participantId", "Sponsored Child ID"],
+    ["year", "Attendance Year"],
+    ["required", "Required Count"],
+    ["attended", "Attended Count"],
+    ["absent", "Absent Count"],
+    ["attendanceRate", "Attendance Rate"],
+    ["absenceRate", "Absence Rate"],
   ],
+};
+
+const IMPORT_COLUMNS = {
+  participants: {
+    required: ["firstName", "lastName", "gender", "dateOfBirth", "registrationDate", "currentStatus"],
+    optional: ["participantId", "participantCode", "middleName", "suffix", "age", "phone", "address", "guardianName", "guardianRelationship", "guardianContact", "guardianEmail"],
+  },
+  events: {
+    required: ["eventName", "eventDate", "eventStatus"],
+    optional: ["eventId", "eventType", "eventDescription", "educationGroup", "startTime", "endTime", "eventLocation", "createdDate"],
+  },
+  education: {
+    required: ["participantId or participantCode", "schoolName", "educationLevel", "schoolYear", "startDate", "status"],
+    optional: ["educationHistoryId", "participantCode", "participantName", "schoolAddress", "gradeLevel", "endDate", "completionInformation"],
+  },
+  attendance: {
+    required: ["participantId", "eventId or eventName and eventDate", "attendanceStatus"],
+    optional: ["attendanceRecordId", "participantName", "gender", "educationLevel", "eventName", "eventDate", "checkedInAt", "checkedOutAt", "recordedBy", "attendanceRemarks"],
+  },
+  attendanceSummary: {
+    required: ["participantId", "year", "required", "attended", "absent"],
+    optional: ["attendanceRate", "absenceRate"],
+  },
 };
 
 const IMPORT_TYPE_LABELS = {
-  participants: "Sponsored child information",
+  participants: "Sponsored Child Information",
   events: "Church Activities",
-  education: "Education history",
-  attendance: "Detailed attendance records",
-  attendanceSummary: "Historical attendance summary",
+  education: "Education History",
+  attendance: "Detailed Attendance Records",
+  attendanceSummary: "Historical Attendance Summary",
 };
 
 const IMPORT_ALIASES = {
-  participantIdentifier: ["participant id", "participant code", "child id", "fmc id", "id"],
-  fullName: ["participant name", "child name", "full name", "name"],
+  participantId: ["sponsored child id", "participant id", "child id", "fmc id", "id"],
+  participantCode: ["sponsored child code", "participant code", "child code"],
+  participantName: ["sponsored child name", "sponsored child full name", "participant name", "child name", "full name", "name"],
   firstName: ["first name", "firstname", "given name"],
   middleName: ["middle name", "middlename"],
   lastName: ["last name", "lastname", "surname", "family name"],
+  suffix: ["suffix"],
   dateOfBirth: ["dob", "birth date", "date of birth"],
   gender: ["sex", "gender"],
-  address: ["address", "home address"],
-  phone: ["phone", "phone number", "mobile"],
+  age: ["age"],
+  address: ["address", "home address", "address or location"],
+  phone: ["phone", "phone number", "mobile", "contact information"],
   guardianName: ["guardian name", "parent name"],
+  guardianRelationship: ["guardian relationship"],
   guardianContact: ["guardian contact", "guardian contact number", "guardian phone", "emergency contact", "emergency contact number"],
-  medicalConditions: ["medical conditions", "medical condition"],
+  guardianEmail: ["guardian email", "parent email"],
+  currentStatus: ["current sponsorship status", "sponsorship status", "current status"],
+  registrationDate: ["registration date", "participant registration date", "date registered"],
+  eventId: ["activity event id", "activity id", "event id"],
+  eventName: ["activity name", "event name", "event"],
+  eventType: ["activity type", "event type"],
+  eventDescription: ["description", "event description"],
+  educationGroup: ["education group", "group"],
+  eventDate: ["event date", "attendance date", "date"],
+  startTime: ["start time", "starts at", "event start"],
+  endTime: ["end time", "ends at", "event end"],
+  eventLocation: ["venue or location", "location", "event location", "venue"],
+  eventStatus: ["event status", "status"],
+  createdDate: ["created date", "created at"],
+  educationHistoryId: ["education history id"],
   educationLevel: ["education level", "education", "level"],
-  currentSchool: ["current school", "school", "school name"],
   schoolName: ["school name", "school", "previous school"],
   schoolAddress: ["school address"],
-  gradeLevel: ["grade year", "grade/year", "grade level", "year level"],
-  collegeCourse: ["college course", "course", "program"],
-  registrationDate: ["registration date", "participant registration date", "date registered"],
-  sponsorshipRegistrationDate: ["sponsorship registration date", "sponsorship date", "sponsor date", "date registered for sponsorship"],
-  startYear: ["start year", "start"],
-  endYear: ["end year", "end"],
-  status: ["status", "education status"],
-  courseStrand: ["course strand", "strand", "course"],
-  notes: ["notes", "remarks"],
-  eventId: ["event id"],
-  eventName: ["event name", "event"],
-  eventDate: ["event date", "attendance date", "date"],
-  eventDescription: ["description", "event description"],
-  eventStart: ["starts at", "start date", "start time", "event start", "event starts at"],
-  eventEnd: ["ends at", "end date", "end time", "event end", "event ends at"],
-  eventLocation: ["location", "event location"],
+  gradeLevel: ["grade or year level", "grade year", "grade/year", "grade level", "year level"],
+  schoolYear: ["school year", "academic year"],
+  startDate: ["start date", "education start date"],
+  endDate: ["end date", "education end date"],
+  status: ["current education status", "education status", "status"],
+  completionInformation: ["graduation or completion information", "completion information", "graduation information", "notes"],
+  attendanceRecordId: ["attendance record id"],
   attendanceStatus: ["attendance status", "status", "attendance"],
-  year: ["year", "attendance year"],
-  required: ["required", "required activities"],
-  attended: ["attended", "attended activities"],
-  absent: ["absent", "absences"],
+  checkedInAt: ["check in date and time", "check-in date and time", "check in", "checked in at", "check-in time"],
+  checkedOutAt: ["check out date and time", "check-out date and time", "check out", "checked out at", "check-out time"],
+  recordedBy: ["recorded by"],
+  attendanceRemarks: ["attendance remarks", "remarks"],
+  year: ["attendance year", "year"],
+  required: ["required count", "required", "required activities"],
+  attended: ["attended count", "attended", "attended activities"],
+  absent: ["absent count", "absent", "absences"],
+  attendanceRate: ["attendance rate"],
+  absenceRate: ["absence rate"],
 };
 
 function normalizeImportDate(value) {
   const text = String(value || "").trim();
   const iso = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$/);
   if (iso) return `${iso[1]}-${iso[2].padStart(2, "0")}-${iso[3].padStart(2, "0")}`;
-  const local = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+  const local = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:[T ].*)?$/);
   if (local) return `${local[3]}-${local[1].padStart(2, "0")}-${local[2].padStart(2, "0")}`;
   return text;
 }
@@ -1581,7 +1725,16 @@ function csvDownload(fileName, rows) {
   URL.revokeObjectURL(url);
 }
 
-function ImportDataModal({ onClose, onCompleted, initialImportType = "participants" }) {
+function importColumnLabel(type, field) {
+  const conditional = {
+    "participantId or participantCode": "Sponsored Child ID or Sponsored Child Code",
+    "eventId or eventName and eventDate": "Activity/Event ID or Activity Name and Event Date",
+  };
+  if (conditional[field]) return conditional[field];
+  return IMPORT_FIELDS[type].find(([key]) => key === field)?.[1] || field;
+}
+
+function ImportDataModal({ onClose, onCompleted, initialImportType = "participants", user }) {
   const [importType, setImportType] = useState(initialImportType);
   const [file, setFile] = useState(null);
   const [worksheet, setWorksheet] = useState(null);
@@ -1589,9 +1742,18 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
   const [preview, setPreview] = useState(null);
   const [decisions, setDecisions] = useState({});
   const [history, setHistory] = useState([]);
+  const [historyDetails, setHistoryDetails] = useState(null);
+  const [historyDetailsLoading, setHistoryDetailsLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+  const canImportType = (type) => {
+    const role = String(user?.role || "").toLowerCase();
+    if (role === "system administrator") return true;
+    if (type === "participants") return role === "church administrator";
+    if (type === "events") return canAccessPermission("events:manage", user);
+    return canAccessPermission("sponsorship:manage", user);
+  };
 
   useEffect(() => {
     apiCall("/participants/import/history").then(setHistory).catch((requestError) => setError(requestError.message));
@@ -1604,6 +1766,17 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
     setPreview(null);
     setResult(null);
     setError("");
+  };
+  const loadHistoryDetails = async (item) => {
+    setHistoryDetailsLoading(true);
+    setError("");
+    try {
+      setHistoryDetails(await apiCall(`/participants/import/history/${item.id}`));
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setHistoryDetailsLoading(false);
+    }
   };
   const inspectFile = async (selectedFile) => {
     setError("");
@@ -1633,12 +1806,12 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
       }
       const inspected = await apiCall("/participants/import/inspect", {
         method: "POST",
-        body: JSON.stringify({ fileName: selectedFile.name, fileData: btoa(binary) }),
+          body: JSON.stringify({ fileName: selectedFile.name, importType, fileData: btoa(binary) }),
       });
       setWorksheet(inspected);
       const availableFields = IMPORT_FIELDS[importType].map(([key]) => key);
       setMapping(inspected.headers.map((header) => {
-        const normalized = String(header).trim().toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ");
+          const normalized = String(header).trim().toLowerCase().replace(/[/_-]/g, " ").replace(/\s+/g, " ");
         const matched = availableFields.find((key) => IMPORT_ALIASES[key]?.includes(normalized));
         return matched || "";
       }));
@@ -1654,16 +1827,16 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
       mapping.forEach((field, columnIndex) => {
         if (field) row[field] = String(values[columnIndex] ?? "").trim();
       });
-      for (const field of ["dateOfBirth", "registrationDate", "sponsorshipRegistrationDate", "eventDate"]) {
+      for (const field of ["dateOfBirth", "registrationDate", "eventDate", "startDate", "endDate", "createdDate"]) {
         if (row[field]) row[field] = normalizeImportDate(row[field]);
       }
-      for (const field of ["eventStart", "eventEnd"]) {
+      for (const field of ["checkedInAt", "checkedOutAt"]) {
         if (row[field]) {
           const dateTime = row[field].match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
           if (dateTime) row[field] = `${dateTime[1]} ${dateTime[2]}:${dateTime[3]}:${dateTime[4] || "00"}`;
         }
       }
-      for (const field of ["eventId", "startYear", "endYear"]) {
+      for (const field of ["eventId", "educationHistoryId", "attendanceRecordId"]) {
         if (row[field] !== undefined && row[field] !== "") row[field] = String(row[field]).trim();
       }
       return row;
@@ -1673,10 +1846,34 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
     if (!worksheet) return;
     setLoading(true);
     setError("");
+    const requiredColumns = IMPORT_COLUMNS[importType].required;
+    const missingColumns = requiredColumns.filter((field) => {
+      if (field === "participantId or participantCode") return !mapping.includes("participantId") && !mapping.includes("participantCode");
+      if (field === "eventId or eventName and eventDate") {
+        return !mapping.includes("eventId") && !(mapping.includes("eventName") && mapping.includes("eventDate"));
+      }
+      if (field === "participantId") return !mapping.includes("participantId") && !mapping.includes("participantCode");
+      return !mapping.includes(field);
+    });
+    const unmappedHeaders = mapping
+      .map((field, index) => field ? "" : worksheet.headers[index])
+      .filter(Boolean);
+    const duplicateMappings = [...new Set(mapping.filter(Boolean))]
+      .filter((field) => mapping.filter((mapped) => mapped === field).length > 1);
+    if (missingColumns.length || unmappedHeaders.length || duplicateMappings.length) {
+      const issues = [
+        ...(missingColumns.length ? [`Missing required columns: ${missingColumns.join(", ")}`] : []),
+        ...(unmappedHeaders.length ? [`Unrecognized columns must be mapped or removed: ${unmappedHeaders.join(", ")}`] : []),
+        ...(duplicateMappings.length ? [`Columns are mapped more than once: ${duplicateMappings.join(", ")}`] : []),
+      ];
+      setError(issues.join(". "));
+      setLoading(false);
+      return;
+    }
     try {
       const data = await apiCall("/participants/import/preview", {
         method: "POST",
-        body: JSON.stringify({ fileName: file.name, importType, rows: mappedRows() }),
+        body: JSON.stringify({ fileName: file.name, importType, headers: worksheet.headers, mapping, rows: mappedRows() }),
       });
       setPreview(data);
       const initialDecisions = {};
@@ -1700,6 +1897,8 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
         body: JSON.stringify({
           fileName: file.name,
           importType,
+          headers: worksheet.headers,
+          mapping,
           rows: mappedRows(),
           decisions,
         }),
@@ -1716,10 +1915,10 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
   };
   const downloadTemplate = (type) => {
     const fields = IMPORT_FIELDS[type].map(([, label]) => label);
-    const name = type === "participants" ? "sponsored-child-template.csv"
-      : type === "education" ? "education-history-template.csv"
-        : type === "events" ? "events-template.csv"
-          : type === "attendanceSummary" ? "attendance-summary-template.csv" : "attendance-template.csv";
+    const name = type === "participants" ? "FMC_Sponsored_Children_Template.csv"
+      : type === "education" ? "FMC_Sponsored_Child_Education_History_Template.csv"
+        : type === "events" ? "FMC_Church_Activities_Template.csv"
+          : type === "attendanceSummary" ? "FMC_Historical_Attendance_Summary_Template.csv" : "FMC_Sponsored_Child_Attendance_Template.csv";
     csvDownload(name, [fields]);
   };
   const downloadErrors = () => {
@@ -1739,7 +1938,7 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
           <div>
             <span className="eyebrow">DATA / IMPORT</span>
             <h2 id="participant-import-title">Import Data</h2>
-            <p className="text-secondary mb-0">Supported formats: Excel (.xlsx, .xls) and CSV (.csv). Maximum file size: 5 MB.</p>
+            <p className="text-secondary mb-0">Supported formats: Excel (.xlsx, .xls) and CSV (.csv). Maximum file size: 5 MB and 20,000 data rows.</p>
           </div>
           <button type="button" className="btn-close" aria-label="Close import dialog" onClick={onClose} disabled={loading} />
         </header>
@@ -1753,7 +1952,7 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
             <p className="mb-1">Historical attendance summaries imported: {result.attendanceSummariesImported}</p>
             <p className="mb-1">Education records imported: {result.educationImported}</p>
             <p className="mb-1">Church activities imported: {result.eventsImported}</p>
-            <p className="mb-0">Skipped: {result.skipped} · Errors: {result.failed}</p>
+            <p className="mb-0">Skipped: {result.skipped} · Failed: {result.failed}</p>
           </div>
         ) : (
           <>
@@ -1761,11 +1960,11 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
               <div className="col-12 col-md-6">
                 <label className="form-label" htmlFor="participant-import-type">Import type</label>
                 <select id="participant-import-type" className="form-select" value={importType} onChange={(event) => chooseImportType(event.target.value)}>
-                  <option value="participants">Sponsored child information</option>
-                  <option value="events">Church Activities</option>
-                  <option value="education">Education history</option>
-                  <option value="attendance">Detailed attendance records</option>
-                  <option value="attendanceSummary">Historical attendance summary</option>
+                  <option value="participants" disabled={!canImportType("participants")}>Sponsored Child Information</option>
+                  <option value="events" disabled={!canImportType("events")}>Church Activities</option>
+                  <option value="education" disabled={!canImportType("education")}>Education History</option>
+                  <option value="attendance" disabled={!canImportType("attendance")}>Detailed Attendance Records</option>
+                  <option value="attendanceSummary" disabled={!canImportType("attendanceSummary")}>Historical Attendance Summary</option>
                 </select>
               </div>
               <div className="col-12 col-md-6">
@@ -1773,17 +1972,36 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
                 <input id="participant-import-file" className="form-control" type="file" accept=".csv,.xlsx,.xls" disabled={loading} onChange={(event) => inspectFile(event.target.files?.[0])} />
               </div>
             </div>
-            <div className="d-flex flex-wrap gap-2 mb-4">
-              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("participants")}>Download Sponsored Child Template</button>
-              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("events")}>Download Church Activities Template</button>
-              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("education")}>Download Education History Template</button>
-              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("attendance")}>Download Attendance Template</button>
-              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate("attendanceSummary")}>Download Attendance Summary Template</button>
+            <div className="d-flex flex-wrap gap-2 mb-3">
+              <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => downloadTemplate(importType)}>
+                Download {IMPORT_TYPE_LABELS[importType]} Template
+              </button>
+            </div>
+            <div className="row g-3 mb-4">
+              <div className="col-12 col-md-6">
+                <h3 className="h6">Required columns</h3>
+                <p className="small text-secondary mb-0">{IMPORT_COLUMNS[importType].required.map((field) => importColumnLabel(importType, field)).join(" · ")}</p>
+              </div>
+              <div className="col-12 col-md-6">
+                <h3 className="h6">Optional columns</h3>
+                <p className="small text-secondary mb-0">{IMPORT_COLUMNS[importType].optional.map((field) => importColumnLabel(importType, field)).join(" · ") || "None"}</p>
+              </div>
             </div>
             {worksheet && (
               <>
                 <h3>Step 2 — Map your columns</h3>
                 <p className="text-secondary">Review and adjust every suggested mapping before validating.</p>
+                <div className="mb-3">
+                  <h4 className="h6">Uploaded file preview</h4>
+                  <div className="table-responsive">
+                    <table className="table table-sm table-bordered">
+                      <thead><tr>{worksheet.headers.map((header, index) => <th key={`${header}-${index}`}>{header}</th>)}</tr></thead>
+                      <tbody>{worksheet.rows.slice(0, 5).map((row, rowIndex) => (
+                        <tr key={`sample-${rowIndex}`}>{worksheet.headers.map((header, columnIndex) => <td key={`${header}-${columnIndex}`}>{String(row[columnIndex] ?? "")}</td>)}</tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                </div>
                 <div className="table-responsive mb-4">
                   <table className="table align-middle">
                     <thead><tr><th>File column</th><th>Map to system field</th></tr></thead>
@@ -1805,7 +2023,7 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
             {preview && (
               <section className="mb-4">
                 <h3>Step 3 — Validate and preview</h3>
-                <p>Total rows: {preview.totalRows} · Valid: {preview.validRows} · Warnings: {preview.warningCount} · Errors: {preview.errorCount}</p>
+                <p>Total rows: {preview.totalRows} · Valid: {preview.validRows} · Warnings: {preview.warningCount} · Duplicates: {preview.duplicateRows || 0} · Errors: {preview.errorCount}</p>
                 <div className="table-responsive">
                   <table className="table table-sm align-middle">
                     <thead><tr><th>Row</th><th>Operation</th><th>Validation</th></tr></thead>
@@ -1842,12 +2060,42 @@ function ImportDataModal({ onClose, onCompleted, initialImportType = "participan
           <h3>Import History</h3>
           {history.length ? (
             <div className="table-responsive"><table className="table table-sm">
-              <thead><tr><th>File</th><th>Imported by</th><th>Date</th><th>Type</th><th>Records</th><th>Failed</th></tr></thead>
+              <thead><tr><th>File</th><th>Imported by</th><th>Date and time</th><th>Type</th><th>Imported</th><th>Updated</th><th>Skipped</th><th>Failed</th></tr></thead>
               <tbody>{history.map((item) => (
-                <tr key={item.id}><td>{item.file_name}</td><td>{item.imported_by_name}</td><td>{formatParticipantHistoryDate(item.created_at)}</td><td>{IMPORT_TYPE_LABELS[item.import_type] || item.import_type}</td><td>{Number(item.participants_imported) + Number(item.participants_updated) + Number(item.attendance_imported) + Number(item.attendance_summaries_imported) + Number(item.education_imported) + Number(item.events_imported)}</td><td>{item.failed}</td></tr>
+                <tr key={item.id}>
+                  <td><button type="button" className="btn btn-link p-0 text-start" onClick={() => loadHistoryDetails(item)}>{item.file_name}</button></td>
+                  <td>{item.imported_by_name}</td><td>{formatParticipantHistoryDate(item.created_at)}</td>
+                  <td>{IMPORT_TYPE_LABELS[item.import_type] || item.import_type}</td>
+                  <td>{Number(item.participants_imported) + Number(item.attendance_imported) + Number(item.attendance_summaries_imported) + Number(item.education_imported) + Number(item.events_imported)}</td>
+                  <td>{item.participants_updated}</td><td>{item.skipped}</td><td>{item.failed}</td>
+                </tr>
               ))}</tbody>
             </table></div>
           ) : <p className="text-secondary">No previous imports.</p>}
+          {historyDetailsLoading && <p className="text-secondary">Loading import details…</p>}
+          {historyDetails && (
+            <div className="border rounded p-3 mt-3">
+              <div className="d-flex justify-content-between align-items-start">
+                <h4 className="h6">{historyDetails.file_name} — validation and results</h4>
+                <button type="button" className="btn-close" aria-label="Close import details" onClick={() => setHistoryDetails(null)} />
+              </div>
+              <p className="small text-secondary">
+                Imported {["participantsImported", "attendanceImported", "attendanceSummariesImported", "educationImported", "eventsImported"]
+                  .reduce((total, key) => total + Number(historyDetails.summary?.[key] || 0), 0)}
+                {" · "}Updated {historyDetails.summary?.participantsUpdated || 0}
+                {" · "}Skipped {historyDetails.summary?.skipped || 0}
+                {" · "}Failed {historyDetails.summary?.failed || 0}
+              </p>
+              <div className="table-responsive">
+                <table className="table table-sm">
+                  <thead><tr><th>Row</th><th>Result</th><th>Errors</th><th>Warnings</th></tr></thead>
+                  <tbody>{(historyDetails.rows || []).map((row) => (
+                    <tr key={row.rowNumber}><td>{row.rowNumber}</td><td>{row.result}</td><td>{(row.errors || []).join("; ")}</td><td>{(row.warnings || []).join("; ")}</td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </section>
       </section>
     </div>,
@@ -1870,6 +2118,7 @@ function ParticipantHistoryPage({ participantId, onBack }) {
   });
   const [attendancePage, setAttendancePage] = useState(1);
   const [historyPage, setHistoryPage] = useState(1);
+  const [historyReload, setHistoryReload] = useState(0);
   const chartRef = useRef(null);
   const chartCanvasRef = useRef(null);
   const attendanceQuery = new URLSearchParams({
@@ -1902,7 +2151,7 @@ function ParticipantHistoryPage({ participantId, onBack }) {
     return () => {
       active = false;
     };
-  }, [participantId, attendanceQueryString]);
+  }, [participantId, attendanceQueryString, historyReload]);
   useEffect(() => {
     if (loading || tab !== "attendance" || !chartCanvasRef.current || !data) return undefined;
     const points = attendanceView === "monthly"
@@ -1949,6 +2198,11 @@ function ParticipantHistoryPage({ participantId, onBack }) {
     setLoading(true);
     setHistoryPage(nextPage);
   };
+  const retryHistoryLoad = () => {
+    setLoading(true);
+    setError("");
+    setHistoryReload((attempt) => attempt + 1);
+  };
   const participant = data?.participant;
   const summary = data?.summary || {};
   const attendance = data?.attendance || { records: [], page: 1, pageSize: 10, total: 0 };
@@ -1959,10 +2213,34 @@ function ParticipantHistoryPage({ participantId, onBack }) {
     new Date().getFullYear(),
     ...(data?.attendanceByYear || []).map((entry) => entry.year),
   ])].sort((first, second) => second - first);
-  const monthlyAttendance = data?.attendanceByMonth || [];
+  const displayAttendanceByYear = data?.attendanceByYear || [];
   const selectedYearData = (data?.attendanceByYear || []).find(
     (entry) => String(entry.year) === selectedYear,
   );
+  const selectedYearSummary = displayAttendanceByYear.find(
+    (entry) => String(entry.year) === selectedYear,
+  ) || {
+    totalAttended: 0,
+    totalAbsent: 0,
+    totalEvents: 0,
+    attendanceRate: 0,
+  };
+  const monthlyAttendance = selectedYearData?.months || data?.attendanceByMonth || [];
+  const now = new Date();
+  const currentMonthActual = (data?.attendanceByYear || [])
+    .find((entry) => Number(entry.year) === now.getFullYear())
+    ?.months?.find((entry) => Number(entry.month) === now.getMonth() + 1);
+  const currentMonthAttendance = currentMonthActual || {
+    totalEvents: 0,
+    totalAttended: 0,
+    totalAbsent: 0,
+    attendanceRate: 0,
+  };
+  const actualRecentAttendance = Array.isArray(data?.recentAttendance)
+    ? data.recentAttendance
+    : attendance.records;
+  const recentAttendanceRows = actualRecentAttendance.slice(0, 5);
+  const displayedAttendanceSummary = summary;
   if (loading && !data) {
     return <div className="participant-history-loading" role="status">Loading attendance history…</div>;
   }
@@ -1970,7 +2248,10 @@ function ParticipantHistoryPage({ participantId, onBack }) {
     return (
       <section className="participant-history-page">
         <button type="button" className="btn btn-outline-primary mb-4" onClick={onBack}>← Back to records</button>
-        <div className="alert alert-danger" role="alert">{error}</div>
+        <div className="alert alert-danger" role="alert">
+          {error}
+          <button type="button" className="btn btn-sm btn-outline-danger ms-3" onClick={retryHistoryLoad}>Try again</button>
+        </div>
       </section>
     );
   }
@@ -1984,7 +2265,6 @@ function ParticipantHistoryPage({ participantId, onBack }) {
   }
   const isSponsoredChild = participant.participantType === "sponsored_child";
   const recordLabel = isSponsoredChild ? "Sponsored Child" : "Church Goer";
-  const participation = data?.participation;
   return (
     <section className="participant-history-page">
       <button type="button" className="participant-history-back" onClick={onBack}>← Back to records</button>
@@ -1999,14 +2279,19 @@ function ParticipantHistoryPage({ participantId, onBack }) {
           </div>
         </div>
       </header>
-      {error && <div className="alert alert-danger" role="alert">{error}</div>}
+      {error && (
+        <div className="alert alert-danger" role="alert">
+          {error}
+          <button type="button" className="btn btn-sm btn-outline-danger ms-3" onClick={retryHistoryLoad}>Try again</button>
+        </div>
+      )}
       {loading && <div className="participant-history-refresh" role="status">Refreshing history…</div>}
       <div className="participant-history-summary">
         {[
           ["Registration Date", formatParticipantHistoryDate(summary.registrationDate)],
-          ["Activities Attended", formatCount(participation?.lifetime.attended ?? summary.totalAttended)],
-          ["Attendance Rate", (participation?.lifetime.required ?? summary.totalEvents) ? `${participation?.lifetime.attendanceRate ?? summary.attendanceRate}%` : "—"],
-          ["Total Absences", formatCount(participation?.lifetime.absent ?? summary.totalAbsences)],
+          ["Activities Attended", formatCount(displayedAttendanceSummary.totalAttended)],
+          ["Attendance Rate", displayedAttendanceSummary.totalEvents ? `${displayedAttendanceSummary.attendanceRate}%` : "—"],
+          ["Total Absences", formatCount(displayedAttendanceSummary.totalAbsences)],
         ].map(([label, value]) => (
           <article className="participant-history-summary-card" key={label}>
             <small>{label}</small>
@@ -2053,10 +2338,10 @@ function ParticipantHistoryPage({ participantId, onBack }) {
             <article className="surface participant-history-section">
               <h2>Attendance summary</h2>
               <div className="participant-history-attendance-numbers">
-                <div><strong>{formatCount(participation?.lifetime.attended ?? summary.totalAttended)}</strong><span>Attended</span></div>
-                <div><strong>{formatCount(participation?.lifetime.absent ?? summary.totalAbsences)}</strong><span>Absent</span></div>
-                <div><strong>{formatCount(participation?.lifetime.required ?? summary.totalEvents)}</strong><span>Required activities</span></div>
-                <div><strong>{(participation?.lifetime.required ?? summary.totalEvents) ? `${participation?.lifetime.attendanceRate ?? summary.attendanceRate}%` : "—"}</strong><span>Attendance rate</span></div>
+                <div><strong>{formatCount(displayedAttendanceSummary.totalAttended)}</strong><span>Attended</span></div>
+                <div><strong>{formatCount(displayedAttendanceSummary.totalAbsences)}</strong><span>Absent</span></div>
+                <div><strong>{formatCount(displayedAttendanceSummary.totalEvents)}</strong><span>Required activities</span></div>
+                <div><strong>{displayedAttendanceSummary.totalEvents ? `${displayedAttendanceSummary.attendanceRate}%` : "—"}</strong><span>Attendance rate</span></div>
               </div>
               {isSponsoredChild && <p className="mb-0">Participation status: <strong>{participantHistoryStatusLabel(participant.status)}</strong></p>}
             </article>
@@ -2080,33 +2365,28 @@ function ParticipantHistoryPage({ participantId, onBack }) {
             ) : <p className="text-secondary mb-0">No education history has been recorded.</p>}
           </article>
           <article className="surface participant-history-section">
-            <h2>Weekly Attendance — Current Month</h2>
-            {data?.currentMonthWeeklyAttendance?.length ? (
-              <ul className="participation-event-history">
-                {data.currentMonthWeeklyAttendance.map((week) => (
-                  <li key={week.week}>
-                    <span className={week.totalAttended ? "attendance-check" : "attendance-missed"}>
-                      {week.totalAttended ? "✓" : "×"}
-                    </span>
-                    <div>
-                      <strong>Week {week.week}</strong>
-                      <small>{week.totalAttended}/{week.totalEvents} attended · {week.totalEvents - week.totalAttended} absent</small>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            ) : <p className="text-secondary mb-0">No events recorded for the current month.</p>}
+            <h2>
+              Monthly Attendance — {now.toLocaleDateString(undefined, { month: "long", year: "numeric" })}
+            </h2>
+            {currentMonthAttendance.totalEvents ? (
+              <div className="participant-history-attendance-numbers">
+                <div><strong>{formatCount(currentMonthAttendance.totalEvents)}</strong><span>Scheduled events</span></div>
+                <div><strong>{formatCount(currentMonthAttendance.totalAttended)}</strong><span>Present</span></div>
+                <div><strong>{formatCount(currentMonthAttendance.totalAbsent)}</strong><span>Absent</span></div>
+                <div><strong>{currentMonthAttendance.attendanceRate}%</strong><span>Attendance rate</span></div>
+              </div>
+            ) : <p className="text-secondary mb-0">No completed scheduled events are recorded for this month.</p>}
           </article>
           <article className="surface participant-history-section">
             <div className="participant-history-section-heading">
               <h2>Recent attendance</h2>
               <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => setTab("attendance")}>View attendance</button>
             </div>
-            {attendance.records.length ? (
+            {recentAttendanceRows.length ? (
               <div className="table-responsive">
                 <table className="table align-middle participant-history-table">
                   <thead><tr><th>Event</th><th>Event date</th><th>Check-in time</th><th>Status</th></tr></thead>
-                  <tbody>{attendance.records.slice(0, 5).map((record, index) => (
+                  <tbody>{recentAttendanceRows.map((record, index) => (
                     <tr key={`${record.event}-${record.eventDate}-${index}`}>
                       <td>{record.event}</td>
                       <td>{formatParticipantHistoryDate(record.eventDate)}</td>
@@ -2140,36 +2420,37 @@ function ParticipantHistoryPage({ participantId, onBack }) {
       {tab === "attendance" && (
         <div className="participant-history-content">
           <div className="participant-history-attendance-heading">
-            <div><h2>Attendance history</h2><p>Attendance is calculated from completed, non-sample events and this sponsored child’s check-ins. Previous years remain historical; warning and Grounds for Departure thresholds use the current calendar year only.</p></div>
+            <div><h2>Attendance history</h2><p>Monthly and yearly totals use completed scheduled event records from the child’s registration date onward. Imported yearly summaries remain separate.</p></div>
             <div className="participant-history-view-toggle" role="group" aria-label="Attendance trend view">
               <button type="button" className={attendanceView === "monthly" ? "active" : ""} onClick={() => setAttendanceView("monthly")}>Monthly</button>
               <button type="button" className={attendanceView === "yearly" ? "active" : ""} onClick={() => setAttendanceView("yearly")}>Yearly</button>
             </div>
-            {attendanceView === "monthly" && (
-              <label className="participant-history-year-select">
-                <span>Trend year</span>
-                <select className="form-select" value={selectedYear} onChange={(event) => { setLoading(true); setSelectedYear(event.target.value); }}>
-                  {years.map((year) => <option value={year} key={year}>{year}</option>)}
-                </select>
-              </label>
-            )}
+            <label className="participant-history-year-select">
+              <span>Selected year</span>
+              <select className="form-select" value={selectedYear} onChange={(event) => { setLoading(true); setSelectedYear(event.target.value); }}>
+                {years.map((year) => <option value={year} key={year}>{year}</option>)}
+              </select>
+            </label>
           </div>
           <div className="participant-history-attendance-numbers">
-            <div><strong>{formatCount(attendanceView === "yearly" && selectedYearData ? selectedYearData.totalAttended : summary.totalAttended)}</strong><span>{attendanceView === "yearly" ? `${selectedYear} Present` : "Total events attended"}</span></div>
-            <div><strong>{formatCount(attendanceView === "yearly" && selectedYearData ? selectedYearData.totalAbsent : summary.totalAbsences)}</strong><span>{attendanceView === "yearly" ? `${selectedYear} Absent` : "Total absences"}</span></div>
-            <div><strong>{formatCount(attendanceView === "yearly" && selectedYearData ? selectedYearData.totalEvents : summary.totalEvents)}</strong><span>{attendanceView === "yearly" ? `${selectedYear} scheduled events` : "Total scheduled events"}</span></div>
-            <div><strong>{attendanceView === "yearly" && selectedYearData?.totalEvents ? `${selectedYearData.attendanceRate}%` : attendanceView === "yearly" ? "—" : summary.totalEvents ? `${summary.attendanceRate}%` : "—"}</strong><span>Attendance percentage</span></div>
+            <div><strong>{formatCount(selectedYearSummary.totalAttended)}</strong><span>{selectedYear} Present</span></div>
+            <div><strong>{formatCount(selectedYearSummary.totalAbsent)}</strong><span>{selectedYear} Absent</span></div>
+            <div><strong>{formatCount(selectedYearSummary.totalEvents)}</strong><span>{selectedYear} scheduled events</span></div>
+            <div><strong>{selectedYearSummary.totalEvents ? `${selectedYearSummary.attendanceRate}%` : "—"}</strong><span>Attendance percentage</span></div>
           </div>
           <article className="surface participant-history-chart">
             <div className="participant-history-chart-canvas"><canvas ref={chartCanvasRef} aria-label={`${attendanceView} attendance trend`} /></div>
           </article>
           <article className="surface participant-history-section">
             <h2>{attendanceView === "monthly" ? `Monthly attendance — ${selectedYear}` : "Yearly attendance"}</h2>
+            {attendanceView === "monthly" && !selectedYearSummary.totalEvents && (
+              <p className="text-secondary">No completed eligible event records are available for {selectedYear}. Monthly totals remain zero.</p>
+            )}
             <div className="table-responsive">
               <table className="table align-middle participant-history-table">
                 <thead><tr><th>{attendanceView === "monthly" ? "Month" : "Year"}</th><th>Present</th><th>Scheduled events</th><th>Absent</th><th>Attendance</th><th>Absence</th></tr></thead>
                 <tbody>
-                  {(attendanceView === "monthly" ? monthlyAttendance : data?.attendanceByYear || []).map((entry) => {
+                  {(attendanceView === "monthly" ? monthlyAttendance : displayAttendanceByYear).map((entry) => {
                     const label = attendanceView === "monthly"
                       ? new Date(2000, entry.month - 1, 1).toLocaleDateString(undefined, { month: "long" })
                       : entry.year;
@@ -2184,7 +2465,7 @@ function ParticipantHistoryPage({ participantId, onBack }) {
             </div>
           </article>
           <article className="surface participant-history-section">
-            <h2>Historical Attendance Summary (Imported)</h2>
+            <h2>Historical Attendance Summary</h2>
             <p className="text-secondary">Yearly summaries are preserved separately and do not replace detailed event attendance or affect participation status.</p>
             {data?.historicalAttendanceSummary?.length ? (
               <div className="table-responsive">
@@ -2289,12 +2570,13 @@ function ParticipantHistoryPage({ participantId, onBack }) {
     </section>
   );
 }
-function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onViewHistory }) {
+function Participants({ canCreateImport, canImportData, canEdit, canDelete, isGoer, user, onViewHistory }) {
   const canViewSponsorship = canAccessPermission("sponsorship:view", user);
   const [list, setList] = useState([]);
   const [selected, setSelected] = useState(null);
   const [form, setForm] = useState(null);
   const [editing, setEditing] = useState(false);
+  const [profileClosing, setProfileClosing] = useState(false);
   const [query, setQuery] = useState("");
   const [sortBy, setSortBy] = useState("newest");
   const [genderFilter, setGenderFilter] = useState("all");
@@ -2305,12 +2587,14 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
   const [educationHistory, setEducationHistory] = useState([]);
   const [growthUpdates, setGrowthUpdates] = useState([]);
   const [profileAttendance, setProfileAttendance] = useState(null);
+  const [profileAttendanceYear, setProfileAttendanceYear] = useState(String(new Date().getFullYear()));
   const [educationFilter, setEducationFilter] = useState("all");
   const [visiblePasscode, setVisiblePasscode] = useState(null);
   const [passcodeMessage, setPasscodeMessage] = useState("");
   const [loadingPasscode, setLoadingPasscode] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const profileCloseTimer = useRef(null);
   useEffect(() => {
     if (!confirmDelete) return undefined;
     const closeOnEscape = (event) => {
@@ -2327,14 +2611,28 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
   }, []);
   const update = (key) => (event) =>
     setForm({ ...form, [key]: event.target.value });
-  const closeProfile = () => {
-    setSelected(null);
-    setForm(null);
-    setGrowthUpdates([]);
-    setProfileAttendance(null);
-    setEditing(false);
-    setMessage("");
-  };
+  const closeProfile = useCallback(() => {
+    if (profileClosing) return;
+    setProfileClosing(true);
+    profileCloseTimer.current = window.setTimeout(() => {
+      setSelected(null);
+      setForm(null);
+      setGrowthUpdates([]);
+      setProfileAttendance(null);
+      setEditing(false);
+      setMessage("");
+      setProfileClosing(false);
+    }, 220);
+  }, [profileClosing]);
+  useEffect(() => () => {
+    if (profileCloseTimer.current) window.clearTimeout(profileCloseTimer.current);
+  }, []);
+  useEffect(() => {
+    if (!form) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [form]);
   useEffect(() => {
     if (!form) return undefined;
     const closeOnEscape = (event) => {
@@ -2342,7 +2640,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [form]);
+  }, [form, closeProfile]);
   useEffect(() => {
     apiCall("/participants")
       .then((data) => setList(Array.isArray(data) ? data.filter((participant) => participant.status !== "deleted") : []))
@@ -2367,6 +2665,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
       setEducationHistory(educationRows);
       setGrowthUpdates(growthData.updates);
       setProfileAttendance(attendanceData.loadError ? null : attendanceData);
+      setProfileAttendanceYear(String(new Date().getFullYear()));
       setVisiblePasscode(null);
       setPasscodeMessage("");
       setForm({
@@ -2440,27 +2739,10 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
     setConfirmDelete(false);
     setDeleting(true);
     try {
-      const headers = { 'Content-Type': 'application/json', ...(localStorage.token ? { Authorization: `Bearer ${localStorage.token}` } : {}) };
-      const resp = await fetch(`${api}/participants/${selected}`, { method: 'DELETE', headers });
-      const d = await resp.json().catch(() => ({}));
-      if (resp.status === 401) {
-        localStorage.removeItem("token");
-        localStorage.removeItem("user");
-        window.dispatchEvent(new Event("auth-expired"));
-        return;
-      }
-      if (!resp.ok) throw new Error(d.error || 'Request failed');
+      await apiCall(`/participants/${selected}`, { method: "DELETE" });
       setSelected(null);
       setForm(null);
-      // Refresh the list with a direct request after the deletion.
-      try {
-        const headers = { 'Content-Type': 'application/json', ...(localStorage.token ? { Authorization: `Bearer ${localStorage.token}` } : {}) };
-        const resp = await fetch(api + '/participants', { headers });
-        const listData = await resp.json().catch(() => []);
-        setList(Array.isArray(listData) ? listData.filter(p => p.status !== 'deleted') : []);
-      } catch {
-        setList([]);
-      }
+      await refreshParticipants();
       setMessage('Sponsored child deleted.');
     } catch (err) {
       setMessage(err.message);
@@ -2515,6 +2797,12 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
     return sortBy === "oldest" ? firstCreated - secondCreated : secondCreated - firstCreated;
   });
   const sponsoredChildren = list.filter((item) => item.participant_type === "sponsored_child");
+  const profileAttendanceYears = profileAttendance?.attendanceByYear || [];
+  const profileAttendanceYearData = profileAttendanceYears.find(
+    (year) => String(year.year) === profileAttendanceYear,
+  );
+  const profileYearlyAttendance = profileAttendanceYears;
+  const profileMonthlyAttendance = profileAttendanceYearData?.months || profileAttendance?.attendanceByMonth || [];
   return (
     <>
       <Title
@@ -2524,25 +2812,33 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
           ? "View the children assigned to your group."
           : "Explore sponsored child records, review activity history, and monitor attendance and care."}
       />
-      {canCreateImport && (
+      {(canCreateImport || canImportData) && (
         <div className="participant-register-action d-flex flex-wrap gap-2">
-          <button type="button" className="btn btn-dark" onClick={() => setShowRegistration(true)}>
-            + Register Child
-          </button>
-          <button type="button" className="btn btn-outline-primary" onClick={() => setShowImport(true)}>
-            Import Data
-          </button>
+          {canCreateImport && <button type="button" className="btn btn-dark" onClick={() => setShowRegistration(true)}>
+            <NavigationIcon name="addAccount" /> Register Child
+          </button>}
+          {canImportData && <button type="button" className="btn btn-outline-primary" onClick={() => setShowImport(true)}>
+            <NavigationIcon name="upload" /> Import Data
+          </button>}
         </div>
       )}
       <section className="participant-gender-summary" aria-label="Sponsored child gender totals">
-        <article className="surface"><small>Total Sponsored Children</small><strong>{sponsoredChildren.length}</strong></article>
-        <article className="surface"><small>Male</small><strong>{sponsoredChildren.filter((item) => String(item.gender || "").toLowerCase() === "male").length}</strong></article>
-        <article className="surface"><small>Female</small><strong>{sponsoredChildren.filter((item) => String(item.gender || "").toLowerCase() === "female").length}</strong></article>
+        {[
+          { label: "Total Sponsored Children", value: sponsoredChildren.length, icon: "participants", tone: "total" },
+          { label: "Male", value: sponsoredChildren.filter((item) => String(item.gender || "").toLowerCase() === "male").length, icon: "account", tone: "male" },
+          { label: "Female", value: sponsoredChildren.filter((item) => String(item.gender || "").toLowerCase() === "female").length, icon: "account", tone: "female" },
+        ].map((card) => (
+          <article className={`surface participant-summary-card ${card.tone}`} key={card.label}>
+            <span className="participant-summary-icon"><NavigationIcon name={card.icon} /></span>
+            <div><small>{card.label}</small><strong>{card.value}</strong></div>
+          </article>
+        ))}
       </section>
       <div className="row g-4">
         <div className="col-12">
           <div className="surface directory-panel participant-directory-panel">
-            <div className="participant-directory-toolbar">
+            <div className="participant-directory-toolbar participant-directory-search">
+              <NavigationIcon name="search" />
               <input
                 className="form-control"
                 type="search"
@@ -2554,7 +2850,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
             </div>
             <div className="participant-directory-filters">
               <div className="participant-filter-field">
-                <label className="form-label" htmlFor="participants-education-type">Education type</label>
+                <label className="form-label" htmlFor="participants-education-type"><NavigationIcon name="events" />Education type</label>
                 <select
                   id="participants-education-type"
                   className="form-select"
@@ -2568,7 +2864,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                 </select>
               </div>
               <div className="participant-filter-field">
-                <label className="form-label" htmlFor="participants-gender">Gender</label>
+                <label className="form-label" htmlFor="participants-gender"><NavigationIcon name="participants" />Gender</label>
                 <select id="participants-gender" className="form-select" value={genderFilter} onChange={(event) => setGenderFilter(event.target.value)}>
                   <option value="all">All</option>
                   <option value="male">Male</option>
@@ -2576,7 +2872,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                 </select>
               </div>
               <div className="participant-filter-field participant-status-filter">
-                <label className="form-label" htmlFor="participants-status">Status</label>
+                <label className="form-label" htmlFor="participants-status"><NavigationIcon name="audit" />Status</label>
                 <select
                   id="participants-status"
                   className="form-select"
@@ -2589,7 +2885,6 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                       <option value="ACTIVE">Active</option>
                       <option value="WARNING">Warning</option>
                       <option value="GROUNDS_FOR_DEPARTURE">Ground for Departure</option>
-                      <option value="SECOND_CHANCE">Second Chance</option>
                       <option value="REMOVED_FROM_SPONSORSHIP">Inactive</option>
                     </>
                   ) : (
@@ -2601,7 +2896,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                 </select>
               </div>
               <div className="participant-directory-sort">
-                <label className="form-label" htmlFor="participants-sort">Sort by</label>
+                <label className="form-label" htmlFor="participants-sort"><NavigationIcon name="analytics" />Sort by</label>
                 <select
                   id="participants-sort"
                   className="form-select"
@@ -2626,7 +2921,10 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                 key={item.id}
               >
                 <button type="button" className="directory-row-main" onClick={() => choose(item.id)}>
-                  <span>
+                  <span className="participant-directory-avatar" aria-hidden="true">
+                    {String(item.fullName || "?").trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}
+                  </span>
+                  <span className="directory-row-copy">
                     <strong>{item.fullName || (item.participant_type === "sponsored_child" ? "Unnamed sponsored child" : "Unnamed Church Goer")}</strong>
                     <small>
                       {item.gender || "Sex not set"}
@@ -2650,22 +2948,8 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                           : participationStatusLabel(item.participation_status)}
                     </span>
                   )}
+                  <span className="directory-arrow" aria-hidden="true">→</span>
                 </button>
-                <div className="participant-row-actions">
-                  <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => choose(item.id)}>View</button>
-                  {canEdit && <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => choose(item.id, true)}>Edit</button>}
-                  {canDelete && (
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-outline-danger"
-                      onClick={async () => {
-                        if (await choose(item.id)) setConfirmDelete(true);
-                      }}
-                    >
-                      Delete
-                    </button>
-                  )}
-                </div>
               </article>
             ))}
             {!sortedParticipants.length && (
@@ -2678,24 +2962,44 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
       </div>
         {form && createPortal(
           <div
-            className="participant-modal-backdrop participant-profile-backdrop"
+            className={`participant-modal-backdrop participant-profile-backdrop ${profileClosing ? "is-closing" : ""}`}
             onMouseDown={(event) => {
               if (event.target === event.currentTarget) closeProfile();
             }}
           >
-            <section className="participant-modal participant-profile-modal" role="dialog" aria-modal="true" aria-labelledby="participant-profile-title">
+            <section className={`participant-modal participant-profile-modal ${profileClosing ? "is-closing" : ""}`} role="dialog" aria-modal="true" aria-labelledby="participant-profile-title">
           {form && !editing ? (
             <div className="participant-qr-card participant-profile-card">
               <header className="profile-card-header">
                 <div className="profile-card-id">
-                  <span className="eyebrow">SPONSORED CHILD ID</span>
+                  <span className="eyebrow">SPONSORED CHILD PROFILE</span>
                   <h2 id="participant-profile-title">{form.fullName}</h2>
                   <p className="text-secondary mb-0">
-                    {form.participantType === "sponsored_child"
-                      ? `Sponsored Child · ${participationStatusLabel(form.participation_status)}`
-                      : `Goer · ${form.status}`}
+                    {form.participantType === "sponsored_child" ? "Sponsored Child" : "Goer"}
+                    {" · "}
+                    <span className={`participant-profile-status-chip${form.participantType === "sponsored_child" ? ` ${normalizeParticipationStatus(form.participation_status).toLowerCase().replaceAll("_", "-")}` : ""}`}>
+                      {form.participantType === "sponsored_child"
+                        ? participationStatusLabel(form.participation_status)
+                        : form.status}
+                    </span>
                   </p>
-                  <p className="text-secondary mt-2 mb-0">{form.participant_code} · <AgeValue dateOfBirth={form.dateOfBirth} /></p>
+                  <div className="profile-header-meta">
+                    <span className="participant-profile-id-badge">
+                      <small>CHILD ID</small>
+                      <strong>{form.participant_code || `#${form.id}`}</strong>
+                    </span>
+                    <span className="profile-header-meta-chip"><AgeValue dateOfBirth={form.dateOfBirth} /></span>
+                    {form.gender && (
+                      <span className="profile-header-meta-chip">
+                        <GenderIcon />{form.gender}
+                      </span>
+                    )}
+                    {form.participantType === "sponsored_child" && (
+                      <span className="profile-header-meta-chip">
+                        {[form.educationLevel, form.gradeLevel].filter(Boolean).join(" / ") || "Education not provided"}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="profile-card-tools">
                   <button
@@ -2706,7 +3010,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                     View History
                   </button>
                   {canEdit && (
-                    <button type="button" className="profile-tool-btn" title="Edit details" aria-label="Edit sponsored child details" onClick={() => { setMessage(""); setEditing(true); }}>
+                    <button type="button" className="profile-tool-btn" title="Edit sponsored child" aria-label="Edit sponsored child" onClick={() => { setMessage(""); setEditing(true); }}>
                       <EditIcon />
                     </button>
                   )}
@@ -2735,9 +3039,18 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
               {message && <div className="alert alert-info mt-3 mb-0" role="status">{message}</div>}
               {canViewSponsorship && form.participantType === "sponsored_child" && (
                 <div className="profile-grid mt-4">
-                  <div><small>Participation status</small><strong>{participationStatusLabel(form.participation_status)}</strong></div>
-                  <div><small>Monthly activities attended</small><strong>{form.monthly_participation?.attended ?? 0} / {form.monthly_participation?.required ?? 0}</strong></div>
-                  <div><small>Monthly absences</small><strong>{form.monthly_participation?.absent ?? 0}</strong></div>
+                  <div className={`profile-detail-card profile-detail-status profile-detail-status-${normalizeParticipationStatus(form.participation_status).toLowerCase().replaceAll("_", "-")}`}>
+                    <small>Participation status</small>
+                    <strong><span className={`profile-info-status-badge ${normalizeParticipationStatus(form.participation_status).toLowerCase().replaceAll("_", "-")}`}>{participationStatusLabel(form.participation_status)}</span></strong>
+                  </div>
+                  <div className="profile-detail-card profile-detail-attended">
+                    <small>Monthly activities attended</small>
+                    <strong>{form.monthly_participation?.attended ?? 0} / {form.monthly_participation?.required ?? 0}</strong>
+                  </div>
+                  <div className="profile-detail-card profile-detail-absences">
+                    <small>Monthly absences</small>
+                    <strong>{form.monthly_participation?.absent ?? 0}</strong>
+                  </div>
                 </div>
               )}
               {canViewPasscode && form.participantType === "sponsored_child" && (
@@ -2773,7 +3086,9 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
               <div className="profile-grid">
                   {[
                     ["Name", form.fullName],
-                    ["Sex", form.gender],
+                    ["Sex", form.gender
+                      ? <span className="participant-gender-value" key="sex"><GenderIcon />{form.gender}</span>
+                      : null],
                     ["Date of birth", form.dateOfBirth],
                     ["Age", <AgeValue key="age" dateOfBirth={form.dateOfBirth} />],
                     ["Sponsorship registered", form.sponsorshipRegistrationDate || form.sponsorship_registered_at
@@ -2787,7 +3102,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                     ["Emergency phone", form.emergencyContactPhone],
                     ["Medical conditions", form.medicalConditions],
                   ].map(([label, value]) => (
-                    <div key={label}>
+                    <div className={`profile-detail-card profile-detail-${label.toLowerCase().replaceAll(" ", "-")}`} key={label}>
                       <small>{label}</small>
                       <strong>{value || "Not Provided"}</strong>
                     </div>
@@ -2803,7 +3118,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                     ["Grade / year level", form.gradeLevel],
                     ["College course", form.programCourse],
                   ].map(([label, value]) => (
-                    <div key={label}><small>{label}</small><strong>{value || "Not Provided"}</strong></div>
+                    <div className={`profile-detail-card profile-detail-${label.toLowerCase().replaceAll(" ", "-")}`} key={label}><small>{label}</small><strong>{value || "Not Provided"}</strong></div>
                   ))}
                 </div>
               </section>
@@ -2863,23 +3178,32 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
               )}
               <section className="participant-profile-education">
                 <h3>Attendance</h3>
-                <p className="text-secondary">Attendance counts completed, non-sample scheduled events and matching check-in records.</p>
-                <h4>Weekly Attendance — Current Month</h4>
-                {profileAttendance?.currentMonthWeeklyAttendance?.length ? (
-                  <ul className="participation-event-history">
-                    {profileAttendance.currentMonthWeeklyAttendance.map((week) => (
-                      <li key={week.week}>
-                        <span className={week.totalAttended ? "attendance-check" : "attendance-missed"}>{week.totalAttended ? "✓" : "×"}</span>
-                        <div><strong>Week {week.week}</strong><small>{week.totalAttended}/{week.totalEvents} attended · {week.totalEvents - week.totalAttended} absent</small></div>
-                      </li>
-                    ))}
-                  </ul>
-                ) : <p className="text-secondary">No events recorded this month.</p>}
-                <h4>Monthly Attendance</h4>
-                {profileAttendance?.attendanceByMonth?.length ? (
+                <p className="text-secondary">Monthly totals use completed scheduled event records from the child’s registration date.</p>
+                <div className="d-flex justify-content-between align-items-center gap-3">
+                  <h4 className="mb-0">Monthly Attendance</h4>
+                  <label className="d-flex align-items-center gap-2">
+                    <span>Year</span>
+                    <select
+                      className="form-select form-select-sm"
+                      value={profileAttendanceYear}
+                      onChange={(event) => setProfileAttendanceYear(event.target.value)}
+                      disabled={!profileAttendanceYears.length}
+                      aria-label="Monthly attendance year"
+                    >
+                      {profileAttendanceYears.map((year) => (
+                        <option value={year.year} key={year.year}>{year.year}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                {profileMonthlyAttendance.length ? (
+                  <>
+                    {!profileMonthlyAttendance.some((month) => month.totalEvents > 0) && (
+                      <p className="text-secondary mt-2 mb-0">No completed scheduled events are recorded for {profileAttendanceYear}.</p>
+                    )}
                   <div className="table-responsive"><table className="table table-sm">
                     <thead><tr><th>Month</th><th>Present</th><th>Scheduled activities</th><th>Absent</th><th>Attendance</th><th>Absence</th></tr></thead>
-                    <tbody>{profileAttendance.attendanceByMonth.map((month) => (
+                    <tbody>{profileMonthlyAttendance.map((month) => (
                       <tr key={month.month}>
                         <td>{new Date(2000, month.month - 1, 1).toLocaleDateString(undefined, { month: "long" })}</td>
                         <td>{month.totalAttended}</td>
@@ -2890,17 +3214,20 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
                       </tr>
                     ))}</tbody>
                   </table></div>
+                  </>
                 ) : <p className="text-secondary">No monthly attendance is available.</p>}
                 <h4>Yearly Attendance</h4>
-                {profileAttendance?.attendanceByYear?.length ? (
+                {profileYearlyAttendance.length ? (
+                  <>
                   <div className="table-responsive"><table className="table table-sm">
                     <thead><tr><th>Year</th><th>Present</th><th>Scheduled activities</th><th>Absent</th><th>Attendance</th><th>Absence</th></tr></thead>
-                    <tbody>{profileAttendance.attendanceByYear.map((year) => (
+                    <tbody>{profileYearlyAttendance.map((year) => (
                       <tr key={year.year}><td>{year.year}</td><td>{year.totalAttended}</td><td>{year.totalEvents}</td><td>{year.totalAbsent}</td><td>{year.totalEvents ? `${year.attendanceRate}%` : "—"}</td><td>{year.totalEvents ? `${year.absenceRate}%` : "—"}</td></tr>
                     ))}</tbody>
                   </table></div>
+                  </>
                 ) : <p className="text-secondary">No yearly attendance is available.</p>}
-                <h4>Historical Attendance Summary (Imported)</h4>
+                <h4>Historical Attendance Summary</h4>
                 <p className="text-secondary">Summary-only imports are separate from detailed attendance and do not affect participation status.</p>
                 {profileAttendance?.historicalAttendanceSummary?.length ? (
                   <div className="table-responsive"><table className="table table-sm">
@@ -3148,7 +3475,7 @@ function Participants({ canCreateImport, canEdit, canDelete, isGoer, user, onVie
           onCreated={refreshParticipants}
         />
       )}
-      {showImport && canCreateImport && <ImportDataModal onClose={() => setShowImport(false)} onCompleted={refreshParticipants} />}
+      {showImport && canImportData && <ImportDataModal user={user} onClose={() => setShowImport(false)} onCompleted={refreshParticipants} />}
     </>
   );
 }
@@ -3221,19 +3548,23 @@ function PublicHome({ onLogin }) {
           <img src="/church-logo.png" alt="FMC Field Care logo" />
           <span>FMC FIELD CARE</span>
         </div>
-        <span className="public-home-header-note"><span /> A community that cares</span>
+        <span className="public-home-header-note"><span className="public-home-header-icon"><NavigationIcon name="sponsorship" /></span>A community that cares</span>
       </header>
       <section className="public-home-hero">
         <div className="public-home-intro">
-          <span className="public-home-kicker"><span />COMMUNITY FIRST</span>
+          <span className="public-home-kicker"><NavigationIcon name="sparkle" />COMMUNITY FIRST</span>
           <h1>Care that<br />makes a difference</h1>
           <p>One caring community. Every child supported, every milestone celebrated, and every story connected.</p>
           <div className="public-home-actions">
             <button type="button" className="public-home-primary-action" onClick={() => setScreen("sponsor")}>
-              Scan QR Code <span aria-hidden="true">↗</span>
+              <span className="public-home-action-icon" aria-hidden="true"><NavigationIcon name="scanner" /></span>
+              <span>Scan QR Code</span>
+              <span className="public-home-action-arrow" aria-hidden="true"><NavigationIcon name="arrowRight" /></span>
             </button>
             <button type="button" className="public-home-secondary-action" onClick={() => setScreen("staff")}>
-              Sign in <span aria-hidden="true">→</span>
+              <span className="public-home-action-icon" aria-hidden="true"><NavigationIcon name="staff" /></span>
+              <span>Sign in</span>
+              <span className="public-home-action-arrow" aria-hidden="true"><NavigationIcon name="arrowRight" /></span>
             </button>
           </div>
         </div>
@@ -3243,15 +3574,15 @@ function PublicHome({ onLogin }) {
           <div className="public-home-logo-glow">
             <img src="/church-logo.png" alt="" />
           </div>
-          <span className="public-home-visual-label">Every child.<br /><strong>Every journey.</strong></span>
-          <span className="public-home-spark public-home-spark-one">✦</span>
-          <span className="public-home-spark public-home-spark-two">✦</span>
+          <span className="public-home-visual-label"><span className="public-home-label-icon"><NavigationIcon name="sponsorship" /></span><span>Every child.<br /><strong>Every journey.</strong></span></span>
+          <span className="public-home-spark public-home-spark-one"><NavigationIcon name="sparkle" /></span>
+          <span className="public-home-spark public-home-spark-two"><NavigationIcon name="sparkle" /></span>
         </div>
       </section>
       <section className="public-home-portals" aria-labelledby="public-home-portals-title">
         <div className="public-home-section-heading">
           <div>
-            <span className="eyebrow">HOW CAN WE HELP?</span>
+            <span className="eyebrow public-home-help-kicker"><NavigationIcon name="sparkle" />HOW CAN WE HELP?</span>
             <h2 id="public-home-portals-title">Choose your way in</h2>
           </div>
           <span className="public-home-section-caption">Choose a secure space to continue</span>
@@ -3259,24 +3590,24 @@ function PublicHome({ onLogin }) {
         <div className="public-access-grid">
         <button className="public-access-card public-access-staff" onClick={() => setScreen("staff")}>
           <span className="public-access-card-top"><span className="public-access-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-13Z" /><path d="M8 9h8M8 13h5M8 17h3" /></svg>
+            <NavigationIcon name="staff" />
           </span><span className="public-access-number">01 / STAFF</span></span>
           <strong>Staff &amp; Admin</strong>
           <span>Sign in to manage sponsored children, view attendance, and track child progress.</span>
-          <b>Continue to sign in <span aria-hidden="true">↗</span></b>
+          <b>Continue to sign in <span aria-hidden="true"><NavigationIcon name="arrowRight" /></span></b>
         </button>
         <button className="public-access-card public-access-guardian" onClick={() => setScreen("sponsor")}>
           <span className="public-access-card-top"><span className="public-access-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M20.8 8.7c0 5.4-8.8 11-8.8 11s-8.8-5.6-8.8-11A4.7 4.7 0 0 1 12 6.1a4.7 4.7 0 0 1 8.8 2.6Z" /><path d="M8.5 12h2l1.2-2.2 1.7 4.4 1.1-2.2h1" /></svg>
+            <NavigationIcon name="sponsorship" />
           </span><span className="public-access-number">02 / GUARDIAN</span></span>
           <strong>Guardian Space</strong>
           <span>Scan your child’s QR code and enter the 6-digit passcode to view their progress and participation.</span>
-          <b>View child progress <span aria-hidden="true">↗</span></b>
+          <b>View child progress <span aria-hidden="true"><NavigationIcon name="arrowRight" /></span></b>
         </button>
         </div>
       </section>
       <footer className="public-home-footer">
-        <span><span className="public-home-lock" aria-hidden="true">◆</span> Your information is handled with care.</span>
+        <span><span className="public-home-lock" aria-hidden="true"><NavigationIcon name="shield" /></span> Your information is handled with care.</span>
         <span>Guardian access requires the child’s active QR code and passcode.</span>
       </footer>
     </main>
@@ -3514,16 +3845,10 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
       message: `Your child has ${currentYear?.absent ?? 0} recorded ${currentYear?.absent === 1 ? "absence" : "absences"} in ${currentYear?.year || new Date().getFullYear()}.`,
       icon: "⚠",
     },
-    SECOND_CHANCE: {
-      label: "Second chance",
-      badge: "↻ SECOND CHANCE",
-      message: "Your child is currently under a second-chance attendance period.",
-      icon: "↻",
-    },
     GROUNDS_FOR_DEPARTURE: {
       label: "Grounds for departure",
       badge: "! GROUNDS FOR DEPARTURE",
-      message: `Your child has exceeded six absences in ${currentYear?.year || new Date().getFullYear()}. Please contact the Church Administrator for review.`,
+      message: `Your child has six or more absences in ${currentYear?.year || new Date().getFullYear()}. Please contact the Church Administrator for review.`,
       icon: "!",
     },
     REMOVED_FROM_SPONSORSHIP: {
@@ -3769,7 +4094,7 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
                 ["Overall attendance rate", participation?.lifetime?.required ? `${participation.lifetime.attendanceRate}%` : "—"],
               ].map(([label, value]) => <article key={label}><span>{label}</span><strong>{value}</strong></article>)}
             </div>
-            <p className="guardian-threshold-note">More than six absences in the current calendar year may result in Grounds for Departure after the minimum participation period. Final Inactive decisions are made only by the Church Administrator. Previous years remain in attendance history and do not count toward this year’s thresholds.</p>
+            <p className="guardian-threshold-note">Four or five absences in the current calendar year result in Warning; six or more result in Grounds for Departure. Status thresholds reset each calendar year. Final Inactive decisions are made only by the Church Administrator. Previous years remain in attendance history but do not count toward this year’s thresholds.</p>
           </section>
 
           <section className="guardian-dashboard-card">
@@ -4112,7 +4437,7 @@ function Scanner({ portal = false, user = null }) {
       </>
     );
   return (
-    <>
+    <div className={portal ? "checkin-portal-page" : "checkin-page"}>
       {portal ? (
         <Title
           e="SPONSORED CHILD PORTAL"
@@ -4122,7 +4447,7 @@ function Scanner({ portal = false, user = null }) {
       ) : (
         <section className={`checkin-hero${isGoer ? " checkin-hero-goer" : ""}`}>
           <div className="checkin-hero-copy">
-            <span className="checkin-hero-kicker"><span aria-hidden="true">●</span> {isGoer ? "GROUP ATTENDANCE" : "COMMUNITY CHECK-IN"}</span>
+            <span className="checkin-hero-kicker"><NavigationIcon name={isGoer ? "participants" : "scanner"} />{isGoer ? "GROUP ATTENDANCE" : "COMMUNITY CHECK-IN"}</span>
             <h1>{isGoer ? "Welcome your group." : "Every arrival matters."}</h1>
             <p>{isGoer
               ? `Record attendance for your ${user.goerEducationLevel} group with a quick, secure scan.`
@@ -4131,8 +4456,8 @@ function Scanner({ portal = false, user = null }) {
           <div className="checkin-hero-side" aria-hidden="true">
             <span className="checkin-hero-ring checkin-hero-ring-one" />
             <span className="checkin-hero-ring checkin-hero-ring-two" />
-            <span className="checkin-hero-symbol">✓</span>
-            <span className="checkin-hero-chip">READY TO WELCOME</span>
+            <span className="checkin-hero-symbol"><NavigationIcon name="check" /></span>
+            <span className="checkin-hero-chip"><NavigationIcon name="shield" />READY TO WELCOME</span>
           </div>
         </section>
       )}
@@ -4140,18 +4465,19 @@ function Scanner({ portal = false, user = null }) {
         <div className="col-12 col-md-6">
           <div className={`surface scanner-card${portal ? "" : " checkin-scan-card"}`}>
             {!portal && <div className="checkin-card-heading">
-              <div><span className="checkin-step">STEP 01</span><h2>Scan attendance QR</h2><p>Position the sponsored child or Church Goer QR code inside the camera frame.</p></div>
-              <span className="checkin-live-indicator"><i /> QR SCAN</span>
+              <div><span className="checkin-step"><NavigationIcon name="scanner" />STEP 01</span><h2>Scan attendance QR</h2><p>Position the sponsored child or Church Goer QR code inside the camera frame.</p></div>
+              <span className="checkin-live-indicator"><NavigationIcon name="scanner" /><i />QR SCAN</span>
             </div>}
             <Camera
               id={portal ? "portal-camera" : "station-camera"}
               onScan={scan}
             />
             <label className="checkin-payload-label" htmlFor={portal ? "portal-payload" : "station-payload"}>
+              <NavigationIcon name="scanner" />
               {portal ? "Or paste QR payload" : "Can’t scan? Enter the QR code manually"}
             </label>
             <div className="checkin-payload-field">
-              <span aria-hidden="true">⌁</span>
+              <span aria-hidden="true"><NavigationIcon name="scanner" /></span>
               <input
                 id={portal ? "portal-payload" : "station-payload"}
                 className="form-control"
@@ -4172,21 +4498,21 @@ function Scanner({ portal = false, user = null }) {
             ) : (
               <>
                 <div className="checkin-card-heading checkin-settings-heading">
-                  <div><span className="checkin-step">STEP 02</span><h2>Set up attendance</h2><p>Choose the event and what you’re recording.</p></div>
-                  <span className="checkin-settings-icon" aria-hidden="true">⚙</span>
+                  <div><span className="checkin-step"><NavigationIcon name="settings" />STEP 02</span><h2>Set up attendance</h2><p>Choose the event and what you’re recording.</p></div>
+                  <span className="checkin-settings-icon" aria-hidden="true"><NavigationIcon name="settings" /></span>
                 </div>
                 <div className="checkin-setting-field">
-                  <label className="form-label" htmlFor="checkin-event">Event</label>
+                  <label className="form-label checkin-form-label" htmlFor="checkin-event"><NavigationIcon name="events" />Event</label>
                   <select id="checkin-event" className="form-select" value={event} onChange={(e) => setEvent(e.target.value)}>
                     <option value="custom">Sunday service (custom)</option>
                     {events.map((item) => <option key={item.id} value={String(item.id)}>{item.name} · {new Date(item.starts_at).toLocaleString()}</option>)}
                   </select>
                 </div>
                 {selectedEvent?.location && (
-                  <div className="checkin-location"><span aria-hidden="true">⌖</span><span>Event location<strong>{selectedEvent.location}</strong></span></div>
+                  <div className="checkin-location"><NavigationIcon name="location" /><span>Event location<strong>{selectedEvent.location}</strong></span></div>
                 )}
                 <div className="checkin-setting-field checkin-action-field">
-                  <label className="form-label" htmlFor="attendance-action">Attendance action</label>
+                  <label className="form-label checkin-form-label" htmlFor="attendance-action"><NavigationIcon name="audit" />Attendance action</label>
                   <select
                     id="attendance-action"
                     className="form-select"
@@ -4197,6 +4523,7 @@ function Scanner({ portal = false, user = null }) {
                     <option value="check_out">Check out</option>
                   </select>
                   <small className="checkin-helper-text">
+                    <NavigationIcon name="shield" />
                     {attendanceAction === "check_out"
                       ? "Only attendees with an active check-in for this event can check out."
                       : "Check-in records the attendee’s arrival for the selected event."}
@@ -4209,9 +4536,11 @@ function Scanner({ portal = false, user = null }) {
               disabled={!payload}
               onClick={send}
             >
-              {portal ? "Verify and open profile" : attendanceAction === "check_out" ? "Record check-out" : "Record check-in"} →
+              <span className="checkin-submit-icon"><NavigationIcon name={portal ? "shield" : attendanceAction === "check_out" ? "arrowRight" : "check"} /></span>
+              <span>{portal ? "Verify and open profile" : attendanceAction === "check_out" ? "Record check-out" : "Record check-in"}</span>
+              <span className="checkin-submit-arrow"><NavigationIcon name="arrowRight" /></span>
             </button>
-            {!portal && <p className="checkin-privacy-note"><span aria-hidden="true">◇</span> QR details are used only to verify and record attendance.</p>}
+            {!portal && <p className="checkin-privacy-note"><NavigationIcon name="shield" />QR details are used only to verify and record attendance.</p>}
             {/* Toast handled separately */}
           </div>
         </div>
@@ -4219,8 +4548,8 @@ function Scanner({ portal = false, user = null }) {
       {!portal && isGoer && (
         <section className="surface table-surface staff-list-panel mt-4 checkin-roster">
           <div className="panel-title">
-            <div><span className="checkin-step">TODAY’S OVERVIEW</span><h2>{groupRoster?.educationLevel || user.goerEducationLevel} group attendance</h2></div>
-            <span className="checkin-roster-count">{groupRoster?.children.length ?? 0} children</span>
+            <div><span className="checkin-step"><NavigationIcon name="events" />TODAY’S OVERVIEW</span><h2>{groupRoster?.educationLevel || user.goerEducationLevel} group attendance</h2></div>
+            <span className="checkin-roster-count"><NavigationIcon name="participants" />{groupRoster?.children.length ?? 0} children</span>
           </div>
           {groupRosterError && <div className="alert alert-danger" role="alert">{groupRosterError}</div>}
           {groupRosterLoading ? <p role="status">Loading group attendance...</p> : groupRoster?.children.length ? (
@@ -4265,7 +4594,7 @@ function Scanner({ portal = false, user = null }) {
           </section>
         </div>
       )}
-    </>
+    </div>
   );
 }
 const MAX_EVENT_PHOTOS = 5;
@@ -4284,7 +4613,7 @@ function encodeEventPhotos(files) {
   })));
 }
 
-function Events({ canManage, canImport = false }) {
+function Events({ canManage, canImport = false, user }) {
   const [events, setEvents] = useState([]);
   const [selected, setSelected] = useState(null);
   const [attendance, setAttendance] = useState([]);
@@ -4407,6 +4736,8 @@ function Events({ canManage, canImport = false }) {
       setUploadingPhotos(false);
     }
   };
+  const currentYear = new Date().getFullYear();
+  const yearActivities = events.filter((item) => new Date(item.starts_at).getFullYear() === currentYear);
   const upcoming = events.filter((item) => new Date(item.starts_at) >= new Date());
   const past = events.filter((item) => new Date(item.starts_at) < new Date());
   const EventCard = ({ item }) => {
@@ -4422,12 +4753,14 @@ function Events({ canManage, canImport = false }) {
         </div>
         <div className="event-card-body">
           <strong>{item.name}</strong>
-          {item.is_sample && <small className="event-card-sample">Sample data · excluded from attendance calculations</small>}
-          <small>{startTime}{item.location ? ` · ${item.location}` : ""}</small>
+          <div className="event-card-meta">
+            <span><NavigationIcon name="clock" />{startTime}</span>
+            {item.location && <span><NavigationIcon name="location" />{item.location}</span>}
+          </div>
           {item.description && <p>{item.description}</p>}
-          {item.photo_count > 0 && <span className="event-card-photos">{item.photo_count} photo{item.photo_count === 1 ? "" : "s"}</span>}
+          {item.photo_count > 0 && <span className="event-card-photos"><NavigationIcon name="photo" />{item.photo_count} photo{item.photo_count === 1 ? "" : "s"}</span>}
         </div>
-        <button className="btn btn-sm btn-outline-dark event-card-btn" onClick={() => viewAttendance(item.id)}>View attendance</button>
+        <button className="btn btn-sm btn-outline-dark event-card-btn" onClick={() => viewAttendance(item.id)}><NavigationIcon name="scanner" />View attendance</button>
       </article>
     );
   };
@@ -4441,28 +4774,58 @@ function Events({ canManage, canImport = false }) {
     )}
     <div className="events-toolbar">
       <div>
-        <h2>Church activity schedule</h2>
-        <p>{events.length} church {events.length === 1 ? "activity" : "activities"} · {upcoming.length} upcoming</p>
+        <h2><span className="events-toolbar-icon"><NavigationIcon name="events" /></span>Church activity schedule</h2>
+        <p>Plan gatherings and review attendance in one place.</p>
       </div>
       {canManage && (
         <button type="button" className="event-create-btn" onClick={() => setShowCreate(true)}>
-          <span className="event-create-btn-icon" aria-hidden="true">＋</span> Create church activity
+          <span className="event-create-btn-icon" aria-hidden="true"><NavigationIcon name="plus" /></span>
+          <span className="event-create-btn-label">Create church activity</span>
         </button>
       )}
       {canImport && (
-        <button type="button" className="btn btn-outline-primary" onClick={() => setShowImport(true)}>
+        <button type="button" className="btn btn-outline-primary event-import-btn" onClick={() => setShowImport(true)}>
+          <NavigationIcon name="upload" />
           Import church activities
         </button>
       )}
     </div>
+    <div className="events-summary-grid" aria-label="Activity schedule summary">
+      {[
+        { label: "All activities", value: events.length, icon: "events", tone: "total" },
+        { label: "Upcoming", value: upcoming.length, icon: "clock", tone: "upcoming" },
+        { label: "Past activities", value: past.length, icon: "audit", tone: "past" },
+      ].map((item) => (
+        <article className={`events-summary-card ${item.tone}`} key={item.label}>
+          <span className="events-summary-icon"><NavigationIcon name={item.icon} /></span>
+          <div><small>{item.label}</small><strong>{item.value}</strong></div>
+        </article>
+      ))}
+    </div>
+    <section className="events-year-section" aria-labelledby="events-year-heading">
+      <div className="events-column-heading events-year-heading">
+        <div>
+          <h3 id="events-year-heading"><NavigationIcon name="events" />This year activities</h3>
+          <p>Church activities scheduled for {currentYear}</p>
+        </div>
+        <span>{yearActivities.length}</span>
+      </div>
+      {yearActivities.length ? (
+        <div className="events-year-grid">
+          {yearActivities.map((item) => <EventCard item={item} key={item.id} />)}
+        </div>
+      ) : (
+        <div className="events-empty"><NavigationIcon name="events" /><span>No activities scheduled for {currentYear}.</span></div>
+      )}
+    </section>
     <div className="events-grid">
       <section className="events-column">
-        <div className="events-column-heading"><h3>Upcoming church activities</h3><span>{upcoming.length}</span></div>
-        {upcoming.length ? upcoming.map((item) => <EventCard item={item} key={item.id} />) : <div className="events-empty">No upcoming church activities.</div>}
+        <div className="events-column-heading"><h3><NavigationIcon name="clock" />Upcoming church activities</h3><span>{upcoming.length}</span></div>
+        {upcoming.length ? upcoming.map((item) => <EventCard item={item} key={item.id} />) : <div className="events-empty"><NavigationIcon name="events" /><span>No upcoming church activities.</span></div>}
       </section>
       <section className="events-column">
-        <div className="events-column-heading"><h3>Past church activities</h3><span>{past.length}</span></div>
-        {past.length ? past.map((item) => <EventCard item={item} key={item.id} />) : <div className="events-empty">No past church activities.</div>}
+        <div className="events-column-heading"><h3><NavigationIcon name="audit" />Past church activities</h3><span>{past.length}</span></div>
+        {past.length ? past.map((item) => <EventCard item={item} key={item.id} />) : <div className="events-empty"><NavigationIcon name="audit" /><span>No past church activities.</span></div>}
       </section>
     </div>
     {showCreate && createPortal(
@@ -4471,36 +4834,39 @@ function Events({ canManage, canImport = false }) {
       }}>
         <section className="event-modal event-create-modal" role="dialog" aria-modal="true" aria-labelledby="event-create-title">
           <header className="event-modal-header">
-            <div>
-              <span className="eyebrow">EVENT SCHEDULE / NEW</span>
-              <h2 id="event-create-title">Create church activity</h2>
-              <p>Add a new gathering to the church schedule.</p>
+            <div className="event-create-heading">
+              <span className="event-create-header-icon"><NavigationIcon name="events" /></span>
+              <div className="event-create-heading-copy">
+                <span className="eyebrow">EVENT SCHEDULE / NEW</span>
+                <h2 id="event-create-title">Create church activity</h2>
+                <p>Add a new gathering to the church schedule.</p>
+              </div>
             </div>
             <button type="button" className="btn-close" aria-label="Close create event" onClick={() => setShowCreate(false)} />
           </header>
           <form className="event-create-form" onSubmit={create}>
             <div className="event-create-field">
-              <label className="form-label" htmlFor="event-create-name">Event name</label>
+              <label className="form-label event-create-form-label" htmlFor="event-create-name"><NavigationIcon name="events" />Event name</label>
               <input id="event-create-name" className="form-control" required value={form.name} onChange={update("name")} />
             </div>
             <div className="event-create-field">
-              <label className="form-label" htmlFor="event-create-location">Location</label>
+              <label className="form-label event-create-form-label" htmlFor="event-create-location"><NavigationIcon name="location" />Location</label>
               <input id="event-create-location" className="form-control" value={form.location} onChange={update("location")} />
             </div>
             <div className="event-create-field">
-              <label className="form-label" htmlFor="event-create-starts">Starts</label>
+              <label className="form-label event-create-form-label" htmlFor="event-create-starts"><NavigationIcon name="clock" />Starts</label>
               <input id="event-create-starts" className="form-control" type="datetime-local" required value={form.startsAt} onChange={update("startsAt")} />
             </div>
             <div className="event-create-field">
-              <label className="form-label" htmlFor="event-create-ends">Ends</label>
+              <label className="form-label event-create-form-label" htmlFor="event-create-ends"><NavigationIcon name="clock" />Ends</label>
               <input id="event-create-ends" className="form-control" type="datetime-local" value={form.endsAt} onChange={update("endsAt")} />
             </div>
             <div className="event-create-full">
-              <label className="form-label" htmlFor="event-create-description">Description</label>
+              <label className="form-label event-create-form-label" htmlFor="event-create-description"><NavigationIcon name="reports" />Description</label>
               <textarea id="event-create-description" className="form-control" rows="3" value={form.description} onChange={update("description")} />
             </div>
             <div className="event-create-full">
-              <label className="form-label" htmlFor="event-create-photos">Event photos (optional, up to 5)</label>
+              <label className="form-label event-create-form-label" htmlFor="event-create-photos"><NavigationIcon name="photo" />Event photos <span>(optional, up to 5)</span></label>
               <input
                 ref={createPhotoInput}
                 id="event-create-photos"
@@ -4519,8 +4885,8 @@ function Events({ canManage, canImport = false }) {
               {createPhotoError && <div className="alert alert-danger mt-2 mb-0" role="alert">{createPhotoError}</div>}
             </div>
             <div className="event-create-actions">
-              <button type="button" className="btn btn-outline-secondary" onClick={() => setShowCreate(false)}>Cancel</button>
-              <button className="btn btn-dark" type="submit" disabled={savingEvent}>{savingEvent ? "Saving…" : "Save event schedule"}</button>
+              <button type="button" className="btn btn-outline-secondary" onClick={() => setShowCreate(false)}><NavigationIcon name="close" />Cancel</button>
+              <button className="btn btn-dark" type="submit" disabled={savingEvent}><NavigationIcon name={savingEvent ? "clock" : "check"} />{savingEvent ? "Saving…" : "Save event schedule"}</button>
             </div>
           </form>
         </section>
@@ -4555,7 +4921,7 @@ function Events({ canManage, canImport = false }) {
                         <td>{row.participant_code || (row.participant_type === "sponsored_child" ? `Sponsored Child #${row.participant_id}` : `Church Goer #${row.participant_id}`)}</td>
                         <td>{row.participant_type === "sponsored_child" ? "Sponsored Child" : "Church Goer"}</td>
                         <td>{row.location || "—"}</td>
-                        <td>{new Date(row.checked_in_at).toLocaleString()}</td>
+                        <td>{row.checked_in_at ? new Date(row.checked_in_at).toLocaleString() : "Time unavailable"}</td>
                         <td>{row.checked_out_at ? new Date(row.checked_out_at).toLocaleString() : "—"}</td>
                       </tr>
                     ))}</tbody>
@@ -4613,6 +4979,7 @@ function Events({ canManage, canImport = false }) {
     {showImport && (
       <ImportDataModal
         initialImportType="events"
+        user={user}
         onClose={() => setShowImport(false)}
         onCompleted={load}
       />
@@ -4622,6 +4989,8 @@ function Events({ canManage, canImport = false }) {
 function Analytics({ user }) {
   const canExportReports = canAccessPermission("reports:view", user);
   const isSystemAdmin = String(user?.role).toLowerCase() === "system administrator";
+  const canManagePredictions = ["church administrator", "system administrator"]
+    .includes(String(user?.role || "").toLowerCase());
   const dateInput = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   const defaultRangeStart = new Date();
   defaultRangeStart.setDate(defaultRangeStart.getDate() - 89);
@@ -4637,10 +5006,19 @@ function Analytics({ user }) {
   const [trends, setTrends] = useState([]);
   const [trendEvents, setTrendEvents] = useState([]);
   const trendCanvas = useRef(null);
-  const [validation, setValidation] = useState(null);
+  const [predictionUpdatedAt, setPredictionUpdatedAt] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [riskRows, setRiskRows] = useState([]);
+  const [riskSummary, setRiskSummary] = useState(null);
   const [riskLevel, setRiskLevel] = useState("all");
+  const [riskSearch, setRiskSearch] = useState("");
+  const [riskPage, setRiskPage] = useState(1);
+  const [predictionDetail, setPredictionDetail] = useState(null);
+  const [predictionDetailLoading, setPredictionDetailLoading] = useState(false);
+  const [riskConfig, setRiskConfig] = useState(null);
+  const [riskConfigDraft, setRiskConfigDraft] = useState(null);
+  const [riskConfigSaving, setRiskConfigSaving] = useState(false);
+  const [riskConfigError, setRiskConfigError] = useState("");
   const [participantRows, setParticipantRows] = useState([]);
   const [dataRevision, setDataRevision] = useState(0);
   const [history, setHistory] = useState(null);
@@ -4680,23 +5058,32 @@ function Analytics({ user }) {
         setTrendEvents(data.trends?.events || []);
         setParticipantRows(data.participants || []);
         setRiskRows(data.riskRecords || []);
+        setRiskSummary(data.riskSummary || null);
+        setPredictionUpdatedAt(new Date());
+        setRiskPage(1);
         setLoadError("");
       })
       .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); })
       .finally(() => {
         if (!mounted) return;
         setLoadedDataKey(dataRequestKey);
+        setRefreshing(false);
       });
     return () => { mounted = false; };
   }, [dataParams, dataRequestKey]);
 
   useEffect(() => {
+    if (!canManagePredictions) return undefined;
     let mounted = true;
-    apiCall("/risk-scores/validation")
-      .then((report) => { if (mounted) setValidation(report); })
-      .catch((fetchError) => { if (mounted) setLoadError(fetchError.message); });
+    apiCall("/analytics/risk-settings")
+      .then((config) => {
+        if (!mounted) return;
+        setRiskConfig(config);
+        setRiskConfigDraft(config);
+      })
+      .catch((fetchError) => { if (mounted) setRiskConfigError(fetchError.message); });
     return () => { mounted = false; };
-  }, []);
+  }, [canManagePredictions]);
 
   useEffect(() => {
     if (!history && !historyLoading) return undefined;
@@ -4709,6 +5096,18 @@ function Analytics({ user }) {
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [history, historyLoading]);
+
+  useEffect(() => {
+    if (!predictionDetail && !predictionDetailLoading) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") {
+        setPredictionDetail(null);
+        setPredictionDetailLoading(false);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [predictionDetail, predictionDetailLoading]);
 
   useEffect(() => {
     if (!trendCanvas.current || trends.length === 0) return;
@@ -4746,17 +5145,42 @@ function Analytics({ user }) {
     if (value && from && value < from) setFrom(value);
   };
 
-  const refreshModel = async () => {
+  const refreshPredictions = () => {
     setRefreshing(true);
     setLoadError("");
+    setDataRevision((revision) => revision + 1);
+  };
+
+  const openPredictionDetail = async (participantId) => {
+    setPredictionDetail(null);
+    setPredictionDetailLoading(true);
     try {
-      const report = await apiCall("/risk-scores/refresh", { method: "POST" });
-      setValidation(report.validation);
-      setDataRevision((revision) => revision + 1);
-    } catch (refreshError) {
-      setLoadError(refreshError.message);
+      setPredictionDetail(await apiCall(`/analytics/risk/${participantId}`));
+    } catch (detailError) {
+      setLoadError(detailError.message);
     } finally {
-      setRefreshing(false);
+      setPredictionDetailLoading(false);
+    }
+  };
+
+  const saveRiskConfig = async (event) => {
+    event.preventDefault();
+    if (!riskConfigDraft) return;
+    setRiskConfigSaving(true);
+    setRiskConfigError("");
+    try {
+      const saved = await apiCall("/analytics/risk-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(riskConfigDraft),
+      });
+      setRiskConfig(saved);
+      setRiskConfigDraft(saved);
+      setDataRevision((revision) => revision + 1);
+    } catch (saveError) {
+      setRiskConfigError(saveError.message);
+    } finally {
+      setRiskConfigSaving(false);
     }
   };
 
@@ -4778,6 +5202,17 @@ function Analytics({ user }) {
     absent: acc.absent + row.absent,
     scheduled: acc.scheduled + row.scheduled,
   }), { present: 0, absent: 0, scheduled: 0 });
+  const filteredRiskRows = riskRows.filter((row) => {
+    const search = riskSearch.trim().toLowerCase();
+    return !search || [row.participantName, row.participantCode, row.participantId]
+      .some((value) => String(value || "").toLowerCase().includes(search));
+  });
+  const riskPageSize = 10;
+  const riskPageCount = Math.max(1, Math.ceil(filteredRiskRows.length / riskPageSize));
+  const visibleRiskRows = filteredRiskRows.slice(
+    (Math.min(riskPage, riskPageCount) - 1) * riskPageSize,
+    Math.min(riskPage, riskPageCount) * riskPageSize,
+  );
 
   const downloadReport = async () => {
     setExportBusy(true);
@@ -4796,11 +5231,8 @@ function Analytics({ user }) {
         path = "analytics-attendance";
       } else if (reportType === "at-risk") {
         params.set("riskLevel", riskLevel);
-        params.set("from", from);
-        params.set("to", to);
         params.set("educationLevel", educationLevel);
         params.set("status", participantStatus);
-        if (trendEvent) params.set("event", trendEvent);
         path = "at-risk";
       } else if (reportType === "participant-history") {
         if (!exportParticipantId) {
@@ -4883,7 +5315,7 @@ function Analytics({ user }) {
   const participationStatusOptions = [
     ["", "All statuses"],
     ["ACTIVE", "Active"],
-    ["WARNING", "Warning (Second Chance)"],
+    ["WARNING", "Warning"],
     ["GROUNDS_FOR_DEPARTURE", "Grounds for Departure"],
     ["REMOVED_FROM_SPONSORSHIP", "Inactive"],
   ];
@@ -4966,7 +5398,7 @@ function Analytics({ user }) {
             <span className="analytics-stat-label">At-risk sponsored children</span>
             <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? formatCount(overview.atRiskChildren) : "0")}</strong>
             <div className="analytics-stat-sub analytics-risk-breakdown">
-              <span>Warning (Second Chance): {formatCount(overview?.atRiskBreakdown?.warning)}</span>
+              <span>Attendance Warning: {formatCount(overview?.atRiskBreakdown?.warning)}</span>
               <span>Grounds for Departure: {formatCount(overview?.atRiskBreakdown?.groundsForDeparture)}</span>
               <span>Medium Predictive Risk: {formatCount(overview?.atRiskBreakdown?.mediumPredictiveRisk)}</span>
               <span>High Predictive Risk: {formatCount(overview?.atRiskBreakdown?.highPredictiveRisk)}</span>
@@ -5046,105 +5478,109 @@ function Analytics({ user }) {
         <div className="analytics-section-heading">
           <div>
             <h2>Predictive participation</h2>
-            <p className="analytics-section-sub">Risk scores from attendance frequency, regularity, and recency. Decision-support only — never a sole basis for decisions about a child.</p>
+            <p className="analytics-section-sub">Rule-based risk scores from explicit attendance frequency, regularity, and recency. Missing attendance is not treated as an absence; results are decision-support only.</p>
           </div>
           <div className="analytics-filters">
             <div className="analytics-filter-field">
               <label className="form-label" htmlFor="analytics-risk-level">Risk level</label>
-              <select id="analytics-risk-level" className="form-select" value={riskLevel} onChange={(event) => setRiskLevel(event.target.value)}>
+              <select id="analytics-risk-level" className="form-select" value={riskLevel} onChange={(event) => { setRiskLevel(event.target.value); setRiskPage(1); }}>
                 {riskFilterOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </div>
-            <button className="btn btn-dark" type="button" disabled={refreshing} onClick={refreshModel}>
-              {refreshing ? "Evaluating history…" : "Evaluate and refresh scores"}
+            <button className="btn btn-dark" type="button" disabled={refreshing} onClick={refreshPredictions}>
+              {refreshing ? "Refreshing attendance…" : "Refresh participation data"}
             </button>
           </div>
         </div>
-        <section className={`alert ${validation?.status === "validated" ? "alert-success" : "alert-warning"}`} role="status">
-          <div className="d-flex flex-wrap justify-content-between align-items-start gap-3">
-            <div>
-              <strong>
-                {validation?.status === "validated"
-                  ? "Temporal evaluation passed"
-                  : validation?.status === "insufficient_or_failed"
-                    ? "Predictions are not validated"
-                    : "No evaluation has been recorded"}
-              </strong>
-              <p className="mb-1 mt-2">{validation?.target || "Outcome: no attendance check-in in the 30 days after a score date."}</p>
-              {validation?.evaluatedAt && (
-                <small>Last evaluated {new Date(validation.evaluatedAt).toLocaleString()}</small>
-              )}
+        <div className="analytics-stat-grid prediction-summary-grid">
+          <div className="analytics-stat-card"><span className="analytics-stat-label">Children evaluated</span><strong className="analytics-stat-value">{riskLoading ? "—" : formatCount(riskSummary?.evaluated)}</strong><span className="analytics-stat-sub">Actual sponsored-child records</span></div>
+          <div className="analytics-stat-card"><span className="analytics-stat-label">High risk</span><strong className="analytics-stat-value">{riskLoading ? "—" : formatCount(riskSummary?.high)}</strong><span className="analytics-stat-sub">Rule-based score ≥ configured high threshold</span></div>
+          <div className="analytics-stat-card"><span className="analytics-stat-label">Medium risk</span><strong className="analytics-stat-value">{riskLoading ? "—" : formatCount(riskSummary?.medium)}</strong><span className="analytics-stat-sub">Rule-based score within configured range</span></div>
+          <div className="analytics-stat-card"><span className="analytics-stat-label">Low risk</span><strong className="analytics-stat-value">{riskLoading ? "—" : formatCount(riskSummary?.low)}</strong><span className="analytics-stat-sub">Rule-based score below medium threshold</span></div>
+          <div className="analytics-stat-card"><span className="analytics-stat-label">Insufficient data</span><strong className="analytics-stat-value">{riskLoading ? "—" : formatCount(riskSummary?.insufficient)}</strong><span className="analytics-stat-sub">Fewer than three explicitly recorded recent events</span></div>
+          <div className="analytics-stat-card"><span className="analytics-stat-label">Last refreshed</span><strong className="analytics-stat-value prediction-time-value">{predictionUpdatedAt ? predictionUpdatedAt.toLocaleTimeString() : "—"}</strong><span className="analytics-stat-sub">{predictionUpdatedAt ? predictionUpdatedAt.toLocaleDateString() : "No attendance data loaded yet"}</span></div>
+        </div>
+        {canManagePredictions && (
+          <form className="prediction-config" onSubmit={saveRiskConfig}>
+            <div className="prediction-config-heading">
+              <div><h3>Attendance risk configuration</h3><p>Weights must total 100%. Thresholds classify attendance-based scores and can be changed by administrators.{riskConfig?.updatedAt ? ` Last updated ${new Date(riskConfig.updatedAt).toLocaleString()}.` : ""}</p></div>
+              <button className="btn btn-outline-dark" type="submit" disabled={riskConfigSaving || !riskConfigDraft}>
+                {riskConfigSaving ? "Saving…" : "Save configuration"}
+              </button>
             </div>
-          </div>
-          {validation?.metrics && validation?.baseline && validation?.counts && (
-            <div className="mt-3">
-              <strong>Held-out results</strong>
-              <p className="mb-1">
-                Training: {validation.counts.trainingExamples} snapshots from {validation.counts.trainingParticipants} sponsored children · test: {validation.counts.testExamples} snapshots from {validation.counts.testParticipants} sponsored children
-                ({validation.counts.testPositive} inactive, {validation.counts.testNegative} attended).
-              </p>
-              <p className="mb-1">
-                PR-AUC {validation.metrics.prAuc} vs prevalence baseline {validation.baseline.prevalence} ·
-                Brier {validation.metrics.brierScore} vs baseline {validation.baseline.brierScore} ·
-                calibration error {validation.metrics.expectedCalibrationError} vs baseline {validation.baseline.expectedCalibrationError}.
-              </p>
-              <small>
-                {validation.evaluationMethod}. A passing retrospective evaluation is not a guarantee of future accuracy; review results with staff and never use scores as the sole basis for decisions about a child.
-              </small>
-            </div>
-          )}
-          {validation?.reasons?.length > 0 && (
-            <ul className="mb-0 mt-3">
-              {validation.reasons.map((reason) => <li key={reason}>{reason}</li>)}
-            </ul>
-          )}
-        </section>
-        {riskLoading ? (
-          <div className="analytics-empty">Loading risk scores…</div>
-        ) : riskRows.length === 0 ? (
-          <div className="analytics-empty">Predictive data is unavailable for the selected filters. No validated risk scores are available yet; evaluate attendance history to refresh eligible sponsored children.</div>
-        ) : (
-          <div className="analytics-table-wrap">
-            <table className="analytics-table">
-              <thead>
-                <tr>
-                  <th>Sponsored Child</th>
-                  <th>Education</th>
-                  <th>Attendance rate</th>
-                  <th>Recent attendance pattern</th>
-                  <th>Predicted risk</th>
-                  <th>Risk level</th>
-                  <th>Current attendance status</th>
-                  <th>Recommended staff action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {riskRows.map((row) => (
-                  <tr key={row.participantId}>
-                    <td>
-                      <strong>{row.participantName}</strong>
-                      <small>ID {row.participantId}{row.participantCode ? ` · ${row.participantCode}` : ""}</small>
-                    </td>
-                    <td>{row.educationLevel || "—"}</td>
-                    <td>{row.attendanceRate == null ? "N/A" : `${row.attendanceRate}%`}</td>
-                    <td>
-                      {row.insufficientData ? (
-                        <span className="insufficient-badge">Insufficient Data</span>
-                      ) : (
-                        <span className="evidence-text" title={row.summary}>
-                          {row.trend} · {row.checkInsPerWeek} present events/week · last present {row.recencyDays} days ago
-                        </span>
-                      )}
-                    </td>
-                    <td>{row.riskScore == null ? "Insufficient Data" : `${Number(row.riskScore).toFixed(0)}%`}</td>
-                    <td>{row.riskLevel === "insufficient_data" ? <span className="insufficient-badge">Insufficient Data</span> : <Badge level={row.riskLevel} />}</td>
-                    <td>{PARTICIPATION_STATUS_LABELS[row.participationStatus] || row.participationStatus}</td>
-                    <td>{row.recommendedAction}</td>
-                  </tr>
+            {riskConfigError && <div className="alert alert-danger" role="alert">{riskConfigError}</div>}
+            {!riskConfigDraft ? <div className="analytics-empty">Loading scoring configuration…</div> : (
+              <div className="prediction-config-fields">
+                {[
+                  ["frequencyWeight", "Frequency weight"],
+                  ["regularityWeight", "Regularity weight"],
+                  ["recencyWeight", "Recency weight"],
+                  ["mediumThreshold", "Medium threshold"],
+                  ["highThreshold", "High threshold"],
+                ].map(([key, label]) => (
+                  <label className="analytics-filter-field" key={key}>
+                    <span className="form-label">{label}</span>
+                    <input
+                      className="form-control"
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={riskConfigDraft[key]}
+                      onChange={(event) => setRiskConfigDraft((current) => ({ ...current, [key]: Number(event.target.value) }))}
+                    />
+                  </label>
                 ))}
-              </tbody>
-            </table>
-          </div>
+                <span className="prediction-weight-total">Weight total: {Number(riskConfigDraft.frequencyWeight) + Number(riskConfigDraft.regularityWeight) + Number(riskConfigDraft.recencyWeight)}%</span>
+              </div>
+            )}
+          </form>
+        )}
+        {riskLoading ? (
+          <div className="analytics-empty">Loading rule-based attendance assessments…</div>
+        ) : riskRows.length === 0 ? (
+          <div className="analytics-empty">No sponsored children match the selected filters.</div>
+        ) : (
+          <>
+            <div className="prediction-table-controls">
+              <label className="analytics-filter-field">
+                <span className="form-label">Search child</span>
+                <input className="form-control" value={riskSearch} onChange={(event) => { setRiskSearch(event.target.value); setRiskPage(1); }} placeholder="Name, ID, or reference number" />
+              </label>
+              <span>{formatCount(filteredRiskRows.length)} matching children</span>
+            </div>
+            {visibleRiskRows.length === 0 ? <div className="analytics-empty">No children match that search.</div> : (
+              <div className="analytics-table-wrap">
+                <table className="analytics-table">
+                  <thead>
+                    <tr><th>Sponsored Child</th><th>Education</th><th>Recorded attendance rate</th><th>Recent attendance pattern</th><th>Risk score (rule-based)</th><th>Risk level</th><th>Current attendance status</th><th>Recommended staff action</th><th>Details</th></tr>
+                  </thead>
+                  <tbody>
+                    {visibleRiskRows.map((row) => (
+                      <tr key={row.participantId}>
+                        <td><strong>{row.participantName}</strong><small>ID {row.participantId}{row.participantCode ? ` · ${row.participantCode}` : ""}</small></td>
+                        <td>{row.educationLevel || "—"}</td>
+                        <td>{row.attendanceRate == null ? "N/A" : `${row.attendanceRate}%`}</td>
+                        <td><span className="evidence-text">{row.pattern}{row.recencyDays == null ? "" : ` · last present ${row.recencyDays} days ago`}</span></td>
+                        <td>{row.riskScore == null ? "N/A" : `${row.riskScore}/100`}</td>
+                        <td>{row.riskLevel === "insufficient_data" ? <span className="insufficient-badge">Insufficient Data</span> : <Badge level={row.riskLevel} />}</td>
+                        <td>{PARTICIPATION_STATUS_LABELS[row.participationStatus] || row.participationStatus}</td>
+                        <td>{row.recommendedAction}</td>
+                        <td><button className="btn btn-sm btn-outline-dark" type="button" onClick={() => openPredictionDetail(row.participantId)}>View details</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {filteredRiskRows.length > riskPageSize && (
+              <div className="prediction-pagination">
+                <button className="btn btn-sm btn-outline-dark" type="button" disabled={Math.min(riskPage, riskPageCount) <= 1} onClick={() => setRiskPage((page) => page - 1)}>Previous</button>
+                <span>Page {Math.min(riskPage, riskPageCount)} of {riskPageCount}</span>
+                <button className="btn btn-sm btn-outline-dark" type="button" disabled={Math.min(riskPage, riskPageCount) >= riskPageCount} onClick={() => setRiskPage((page) => page + 1)}>Next</button>
+              </div>
+            )}
+          </>
         )}
       </section>
 
@@ -5189,7 +5625,6 @@ function Analytics({ user }) {
                     <td>{row.attendanceRate == null ? "N/A" : `${row.attendanceRate}%`}</td>
                     <td>
                       <span className="status-pill">{PARTICIPATION_STATUS_LABELS[row.participationStatus] || row.participationStatus}</span>
-                      {row.secondChance && <small>Second Chance</small>}
                     </td>
                     <td><button className="btn btn-sm btn-outline-dark" type="button" onClick={() => openHistory(row.id)}>Full history</button></td>
                   </tr>
@@ -5248,7 +5683,7 @@ function Analytics({ user }) {
           {exportError && <div className="alert alert-danger" role="alert">{exportError}</div>}
           <div className="analytics-export-note">
             {reportType === "attendance" && `Uses the selected range (${from} to ${to}), sponsored-child education/status, interval, and completed-event filters.`}
-            {reportType === "at-risk" && `Includes sponsored children and validated risk evidence for ${riskLevel === "all" ? "all risk levels" : `${riskLevel} risk`}.`}
+            {reportType === "at-risk" && `Includes current rule-based assessments from complete available attendance history for ${riskLevel === "all" ? "all risk levels" : `${riskLevel} risk`}; education and status filters apply.`}
             {reportType === "participant-history" && "Includes one sponsored child's completed-event attendance history and monthly/yearly summaries."}
             {reportType === "audit-trail" && "System audit trail is restricted to System Administrators and includes the 5,000 most recent entries."}
             {reportPassword ? "This export will be encrypted with AES-256-GCM (PBKDF2-derived key) and downloaded as a .enc file." : "Leave the password blank to download an unencrypted file."}
@@ -5299,7 +5734,7 @@ function Analytics({ user }) {
                   <div><strong>{PARTICIPATION_STATUS_LABELS[history?.participant?.status] || history?.participant?.status}</strong><span>Current status</span></div>
                   <div><strong>{history.summary.lastCheckIn ? new Date(history.summary.lastCheckIn).toLocaleDateString() : "—"}</strong><span>Last check-in</span></div>
                 </div>
-                <h3 className="h6 mt-3">Monthly attendance</h3>
+                <h3 className="h6 mt-3">Monthly Attendance</h3>
                 <div className="analytics-table-wrap analytics-history-table">
                   <table className="analytics-table">
                     <thead><tr><th>Month</th><th>Scheduled</th><th>Present</th><th>Absent</th><th>Attendance rate</th><th>Current status</th></tr></thead>
@@ -5356,15 +5791,113 @@ function Analytics({ user }) {
         </div>,
         document.body,
       )}
+
+      {(predictionDetail || predictionDetailLoading) && createPortal(
+        <div className="participant-modal-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setPredictionDetail(null);
+            setPredictionDetailLoading(false);
+          }
+        }}>
+          <section className="participant-modal history-modal prediction-detail-modal" role="dialog" aria-modal="true" aria-labelledby="prediction-detail-title">
+            <header className="participant-modal-header">
+              <div>
+                <span className="eyebrow">PREDICTION ANALYTICS / ATTENDANCE EVIDENCE</span>
+                <h2 id="prediction-detail-title">{predictionDetail?.participantName || (predictionDetailLoading ? "Loading attendance analysis…" : "Attendance analysis")}</h2>
+                {predictionDetail && <p>ID {predictionDetail.participantId}{predictionDetail.participantCode ? ` · ${predictionDetail.participantCode}` : ""} · {predictionDetail.educationLevel || "Education not provided"} · Registered {predictionDetail.registrationDate ? new Date(predictionDetail.registrationDate).toLocaleDateString() : "date unavailable"}</p>}
+              </div>
+              <button type="button" className="btn-close" aria-label="Close prediction details" onClick={() => { setPredictionDetail(null); setPredictionDetailLoading(false); }} />
+            </header>
+            {predictionDetailLoading ? <div className="analytics-empty">Loading complete attendance history…</div> : predictionDetail && (
+              <>
+                <div className="analytics-trend-summary">
+                  <div><strong>{predictionDetail.riskScore == null ? "N/A" : `${predictionDetail.riskScore}/100`}</strong><span>Rule-based score</span></div>
+                  <div><strong>{predictionDetail.riskLevel === "insufficient_data" ? "Insufficient data" : predictionDetail.riskLevel}</strong><span>Risk classification</span></div>
+                  <div><strong>{predictionDetail.attendanceRate == null ? "N/A" : `${predictionDetail.attendanceRate}%`}</strong><span>Recorded attendance rate</span></div>
+                  <div><strong>{formatCount(predictionDetail.scheduledEvents)}</strong><span>Completed scheduled events</span></div>
+                  <div><strong>{formatCount(predictionDetail.present)} / {formatCount(predictionDetail.recordedEvents)}</strong><span>Present / recorded</span></div>
+                  <div><strong>{predictionDetail.mostRecentAttendanceDate ? new Date(predictionDetail.mostRecentAttendanceDate).toLocaleDateString() : "—"}</strong><span>Most recent attendance</span></div>
+                </div>
+                <div className="prediction-detail-grid">
+                  <section>
+                    <h3>Attendance analysis</h3>
+                    <dl>
+                      <div><dt>Recent attendance pattern</dt><dd>{predictionDetail.pattern}</dd></div>
+                      <div><dt>Attendance frequency, recent events</dt><dd>{predictionDetail.attendanceFrequency == null ? "N/A" : `${predictionDetail.attendanceFrequency}%`}</dd></div>
+                      <div><dt>Repeated consecutive absences</dt><dd>{formatCount(predictionDetail.consecutiveAbsences)}</dd></div>
+                      <div><dt>Days since most recent attendance</dt><dd>{predictionDetail.recencyDays == null ? "No recorded attendance" : predictionDetail.recencyDays}</dd></div>
+                      <div><dt>Scheduled events without attendance records</dt><dd>{formatCount(predictionDetail.unrecorded)} (not counted as absent)</dd></div>
+                    </dl>
+                  </section>
+                  <section>
+                    <h3>Rule-based risk breakdown</h3>
+                    <div className="analytics-table-wrap">
+                      <table className="analytics-table">
+                        <thead><tr><th>Factor</th><th>Factor score</th><th>Weight</th></tr></thead>
+                        <tbody>
+                          {[
+                            ["Frequency", predictionDetail.riskFactors?.frequency, predictionDetail.riskFactors?.weights?.frequency],
+                            ["Regularity", predictionDetail.riskFactors?.regularity, predictionDetail.riskFactors?.weights?.regularity],
+                            ["Recency", predictionDetail.riskFactors?.recency, predictionDetail.riskFactors?.weights?.recency],
+                          ].map(([label, score, weight]) => (
+                            <tr key={label}><td>{label}</td><td>{score == null ? "Insufficient data" : `${score}%`}</td><td>{weight}%</td></tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="prediction-method-note">A score is a decision-support indicator, not a measure of a child’s commitment, behavior, or sponsorship eligibility.</p>
+                  </section>
+                </div>
+                <section className="prediction-recommendations">
+                  <h3>Recommended staff actions</h3>
+                  <ul>{predictionDetail.recommendedActions.map((action) => <li key={action}>{action}</li>)}</ul>
+                </section>
+                <h3 className="h6 mt-3">Complete attendance history</h3>
+                <div className="analytics-table-wrap analytics-history-table">
+                  <table className="analytics-table">
+                    <thead><tr><th>Event date</th><th>Church activity</th><th>Recorded attendance</th></tr></thead>
+                    <tbody>
+                      {predictionDetail.history.map((event) => (
+                        <tr key={event.eventId ?? `${event.startsAt}-${event.eventName}`}>
+                          <td>{new Date(event.startsAt).toLocaleString()}</td>
+                          <td>{event.eventName || "Church activity"}</td>
+                          <td>{event.status === "unrecorded" ? "No attendance record" : event.status === "present" ? "Present" : "Absent"}</td>
+                        </tr>
+                      ))}
+                      {!predictionDetail.history.length && <tr><td colSpan="3">No completed scheduled events since registration.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </section>
+        </div>,
+        document.body,
+      )}
     </>
   );
 }
 function Reports({ user }) {
-  const canViewParticipation = canAccessPermission("sponsorship:view", user);
+  const isReportAdministrator = ["church administrator", "system administrator"]
+    .includes(String(user?.role || "").toLowerCase());
+  const canViewParticipation = isReportAdministrator || canAccessPermission("sponsorship:view", user);
+  const canViewActivities = isReportAdministrator || canAccessPermission("events:view", user);
   const [range, setRange] = useState("yearly");
   const [children, setChildren] = useState([]);
-  const [loadingParticipation, setLoadingParticipation] = useState(true);
+  const [loadingParticipation, setLoadingParticipation] = useState(canViewParticipation);
   const [participationError, setParticipationError] = useState("");
+  const [counts, setCounts] = useState({});
+  const [countsLoading, setCountsLoading] = useState(true);
+  const [exportBusy, setExportBusy] = useState("");
+  const [exportMessage, setExportMessage] = useState("");
+  const [exportError, setExportError] = useState("");
+  const [childFilters, setChildFilters] = useState({
+    educationLevel: "", gender: "", status: "", registrationYear: "",
+  });
+  const [activityFilters, setActivityFilters] = useState({ status: "", year: "" });
+  const [attendanceFilters, setAttendanceFilters] = useState({
+    participantId: "", educationLevel: "", status: "", attendanceStatus: "", month: "", year: "",
+  });
   const reportRows = children.flatMap((child) => (
     range === "yearly"
       ? (child.years || []).map((year) => ({
@@ -5391,6 +5924,14 @@ function Reports({ user }) {
   const totalAttendanceRate = totalScheduled
     ? Math.round((totalPresent / totalScheduled) * 10000) / 100
     : null;
+  const reportCount = (value) => value == null ? "Not available" : formatCount(value);
+
+  useEffect(() => {
+    apiCall("/reports/export-counts")
+      .then(setCounts)
+      .catch((loadError) => setExportError(loadError.message))
+      .finally(() => setCountsLoading(false));
+  }, []);
 
   useEffect(() => {
     if (!canViewParticipation) return;
@@ -5400,22 +5941,65 @@ function Reports({ user }) {
       .finally(() => setLoadingParticipation(false));
   }, [canViewParticipation]);
 
-  const downloadAttendance = async (format) => {
-    const token = localStorage.getItem("token");
-    const response = await fetch(
-      `${api}/reports/attendance?range=${range}&format=${format}`,
-      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
-    );
-    if (!response.ok) {
-      const result = await response.json().catch(() => ({}));
-      throw new Error(result.error || "Could not export attendance.");
+  const downloadExport = async (key, endpoint, filters) => {
+    setExportBusy(key);
+    setExportError("");
+    setExportMessage("");
+    try {
+      const token = localStorage.getItem("token");
+      const query = new URLSearchParams(
+        Object.entries(filters).filter(([, value]) => value !== "" && value != null),
+      );
+      const queryString = query.toString();
+      const response = await fetch(`${api}${endpoint}${queryString ? `?${queryString}` : ""}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Could not export this report.");
+      }
+      const contentDisposition = response.headers.get("content-disposition") || "";
+      const filename = contentDisposition.match(/filename="?([^";]+)"?/i)?.[1] || `${key}.csv`;
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setExportMessage(`${filename} is ready to download.`);
+    } catch (downloadError) {
+      setExportError(downloadError.message);
+    } finally {
+      setExportBusy("");
     }
-    const url = URL.createObjectURL(await response.blob());
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `attendance-${range}.${format}`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+  };
+
+  const downloadAttendance = async (format) => {
+    setExportBusy(`legacy-${format}`);
+    setExportError("");
+    setExportMessage("");
+    try {
+      const token = localStorage.getItem("token");
+      const response = await fetch(
+        `${api}/reports/attendance?range=${range}&format=${format}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      );
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Could not export attendance.");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `attendance-${range}.${format}`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setExportMessage(`Attendance ${format.toUpperCase()} is ready to download.`);
+    } catch (downloadError) {
+      setExportError(downloadError.message);
+    } finally {
+      setExportBusy("");
+    }
   };
   const downloadParticipation = () => {
     const columns = range === "yearly"
@@ -5433,7 +6017,7 @@ function Reports({ user }) {
       ...(range === "yearly" ? [row.absent] : []),
       PARTICIPATION_STATUS_LABELS[row.child.status] || row.child.status,
     ]);
-    const csv = [columns, ...data].map((row) => row.map(escapeCsv).join(",")).join("\r\n");
+    const csv = `\uFEFF${[columns, ...data].map((row) => row.map(escapeCsv).join(",")).join("\r\n")}`;
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -5447,83 +6031,322 @@ function Reports({ user }) {
       <Title
         e="REPORTING"
         t="Turn activity into clarity."
-        d="Export attendance records and participation-based monthly and yearly sponsored child reports."
+        d="Download complete, permission-controlled CSV reports from current Field Care records."
       />
-      <div className="surface report-panel">
-        <label className="form-label">Reporting range</label>
-        <select className="form-select mb-3" value={range} onChange={(event) => setRange(event.target.value)}>
-          <option value="yearly">Yearly</option>
-          <option value="monthly">Monthly</option>
-        </select>
-        <button className="btn btn-dark me-2" onClick={() => downloadAttendance("pdf")}>Download PDF ↓</button>
-        <button className="btn btn-outline-dark" onClick={() => downloadAttendance("csv")}>Download CSV ↓</button>
-      </div>
-      {canViewParticipation && (
-        <div className="surface report-panel mt-4">
-          <h2>Sponsored Child Reports</h2>
-          <p>{range === "yearly"
-            ? "Yearly attendance by calendar year; previous years remain included."
-            : "Monthly attendance summaries across recorded calendar months."}</p>
-          {participationError && <div className="alert alert-danger" role="alert">{participationError}</div>}
-          <div className="sponsorship-summary-grid participation-summary-grid">
-            {[
-              [range === "yearly" ? "Calendar years" : "Calendar months", loadingParticipation ? "—" : reportingPeriods],
-              ["Scheduled events", loadingParticipation ? "—" : formatCount(totalScheduled)],
-              ["Present", loadingParticipation ? "—" : formatCount(totalPresent)],
-              [range === "yearly" ? "Yearly absences" : "Absent", loadingParticipation ? "—" : formatCount(totalAbsent)],
-              ["Attendance rate", loadingParticipation ? "—" : totalAttendanceRate == null ? "—" : `${totalAttendanceRate}%`],
-            ].map(([label, value]) => (
-              <article className="surface sponsorship-summary-card participation-summary-card" key={label}>
-                <span>{label}</span><strong>{value}</strong>
-              </article>
-            ))}
-          </div>
-          <div className="table-responsive mt-3">
-            <table className="table align-middle">
-              <thead><tr>
-                <th>Child</th>
-                <th>{range === "yearly" ? "Calendar year" : "Month"}</th>
-                <th>{range === "yearly" ? "Scheduled events" : "Required attendance"}</th>
-                <th>{range === "yearly" ? "Present" : "Attended"}</th>
-                <th>Absent</th>
-                <th>Attendance rate</th>
-                {range === "yearly" && <th>Yearly absences</th>}
-                <th>Current status</th>
-              </tr></thead>
-              <tbody>{reportRows.map((row) => (
-                <tr key={`${row.child.id}-${row.period}`}>
-                  <td>{row.child.name}<small className="d-block text-secondary">{row.child.participantCode}</small></td>
-                  <td>{row.period}</td><td>{formatCount(row.scheduled)}</td><td>{formatCount(row.present)}</td>
-                  <td>{formatCount(row.absent)}</td><td>{row.attendanceRate == null ? "—" : `${row.attendanceRate}%`}</td>
-                  {range === "yearly" && <td>{formatCount(row.absent)}</td>}
-                  <td>{PARTICIPATION_STATUS_LABELS[row.child.status] || row.child.status}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-            {!reportRows.length && !loadingParticipation && <p className="text-secondary mb-0">No attendance periods found for this reporting range.</p>}
-          </div>
-          <button className="btn btn-outline-dark" disabled={!children.length || loadingParticipation} onClick={downloadParticipation}>
-            Download participation CSV ↓
-          </button>
+      {(exportError || exportMessage) && (
+        <div className={`alert ${exportError ? "alert-danger" : "alert-success"}`} role={exportError ? "alert" : "status"}>
+          {exportError || exportMessage}
         </div>
       )}
+      <section className="report-export-grid" aria-label="CSV report categories">
+        <article className="surface report-export-card">
+          <div className="report-export-icon" aria-hidden="true">♧</div>
+          <div className="report-export-heading">
+            <span className="eyebrow">SPONSORED CHILD RECORDS</span>
+            <h2>All Sponsored Children</h2>
+            <p>Child and guardian details plus a separate export of complete education history.</p>
+            <span className="report-record-count">
+              {countsLoading ? "Loading available records…" : `${reportCount(counts.sponsoredChildren)} children · ${reportCount(counts.educationHistory)} education records`}
+            </span>
+          </div>
+          {canViewParticipation ? (
+            <>
+              <div className="report-filter-grid">
+                <label>Education level<select className="form-select" value={childFilters.educationLevel} onChange={(event) => setChildFilters({ ...childFilters, educationLevel: event.target.value })}>
+                  <option value="">All levels</option>{[...new Set(children.map((child) => child.educationLevel).filter(Boolean))].sort().map((level) => <option key={level}>{level}</option>)}
+                </select></label>
+                <label>Gender<select className="form-select" value={childFilters.gender} onChange={(event) => setChildFilters({ ...childFilters, gender: event.target.value })}>
+                  <option value="">All genders</option>{[...new Set(children.map((child) => child.gender).filter(Boolean))].sort().map((gender) => <option key={gender}>{gender}</option>)}
+                </select></label>
+                <label>Sponsorship status<select className="form-select" value={childFilters.status} onChange={(event) => setChildFilters({ ...childFilters, status: event.target.value })}>
+                  <option value="">All statuses</option>
+                  <option value="ACTIVE">Active</option><option value="WARNING">Warning</option><option value="GROUNDS_FOR_DEPARTURE">Grounds for Departure</option><option value="INACTIVE">Inactive</option>
+                </select></label>
+                <label>Registration year<input className="form-control" type="number" min="1900" max="9999" placeholder="All years" value={childFilters.registrationYear} onChange={(event) => setChildFilters({ ...childFilters, registrationYear: event.target.value })} /></label>
+              </div>
+              <div className="report-export-actions">
+                <button className="btn btn-dark" type="button" disabled={Boolean(exportBusy) || countsLoading} onClick={() => downloadExport("sponsored-children", "/reports/exports/sponsored-children", childFilters)}>
+                  {exportBusy === "sponsored-children" ? "Preparing…" : "Download Children CSV"}
+                </button>
+                <button className="btn btn-outline-dark" type="button" disabled={Boolean(exportBusy) || countsLoading} onClick={() => downloadExport("education-history", "/reports/exports/education-history", childFilters)}>
+                  {exportBusy === "education-history" ? "Preparing…" : "Download Education History CSV"}
+                </button>
+              </div>
+            </>
+          ) : <p className="report-access-note">Sponsored child exports require sponsored-care access.</p>}
+        </article>
+
+        <article className="surface report-export-card">
+          <div className="report-export-icon" aria-hidden="true">▦</div>
+          <div className="report-export-heading">
+            <span className="eyebrow">CHURCH ACTIVITIES</span>
+            <h2>Church Activities</h2>
+            <p>All scheduled, completed, cancelled, and other event records available in the system.</p>
+            <span className="report-record-count">{countsLoading ? "Loading available records…" : `${reportCount(counts.churchActivities)} activities`}</span>
+          </div>
+          {canViewActivities ? (
+            <>
+              <div className="report-filter-grid report-filter-grid-compact">
+                <label>Event status<input className="form-control" value={activityFilters.status} placeholder="All statuses" onChange={(event) => setActivityFilters({ ...activityFilters, status: event.target.value })} /></label>
+                <label>Year<input className="form-control" type="number" min="1900" max="9999" placeholder="All years" value={activityFilters.year} onChange={(event) => setActivityFilters({ ...activityFilters, year: event.target.value })} /></label>
+              </div>
+              <p className="report-schema-note">Activity type and education-group fields are not stored in the current event schema.</p>
+              <div className="report-export-actions">
+                <button className="btn btn-dark" type="button" disabled={Boolean(exportBusy) || countsLoading} onClick={() => downloadExport("church-activities", "/reports/exports/church-activities", activityFilters)}>
+                  {exportBusy === "church-activities" ? "Preparing…" : "Download CSV"}
+                </button>
+              </div>
+            </>
+          ) : <p className="report-access-note">Church activity exports require event-view access.</p>}
+        </article>
+
+        <article className="surface report-export-card">
+          <div className="report-export-icon" aria-hidden="true">◷</div>
+          <div className="report-export-heading">
+            <span className="eyebrow">SPONSORED CHILD ATTENDANCE</span>
+            <h2>Attendance Records</h2>
+            <p>Detailed present records and absences derived only from eligible completed scheduled events.</p>
+            <span className="report-record-count">{countsLoading ? "Loading available records…" : `${reportCount(counts.attendanceRecords)} attendance records`}</span>
+          </div>
+          {canViewParticipation ? (
+            <>
+              <div className="report-filter-grid">
+                <label>Sponsored child<select className="form-select" value={attendanceFilters.participantId} onChange={(event) => setAttendanceFilters({ ...attendanceFilters, participantId: event.target.value })}>
+                  <option value="">All sponsored children</option>{children.map((child) => <option key={child.id} value={child.id}>{child.name} · {child.participantCode || `ID ${child.id}`}</option>)}
+                </select></label>
+                <label>Education level<select className="form-select" value={attendanceFilters.educationLevel} onChange={(event) => setAttendanceFilters({ ...attendanceFilters, educationLevel: event.target.value })}>
+                  <option value="">All levels</option>{[...new Set(children.map((child) => child.educationLevel).filter(Boolean))].sort().map((level) => <option key={level}>{level}</option>)}
+                </select></label>
+                <label>Sponsored child status<select className="form-select" value={attendanceFilters.status} onChange={(event) => setAttendanceFilters({ ...attendanceFilters, status: event.target.value })}>
+                  <option value="">All statuses</option>
+                  <option value="ACTIVE">Active</option><option value="WARNING">Warning</option><option value="GROUNDS_FOR_DEPARTURE">Grounds for Departure</option><option value="INACTIVE">Inactive</option>
+                </select></label>
+                <label>Attendance status<select className="form-select" value={attendanceFilters.attendanceStatus} onChange={(event) => setAttendanceFilters({ ...attendanceFilters, attendanceStatus: event.target.value })}>
+                  <option value="">Present and absent</option><option value="present">Present</option><option value="absent">Absent</option>
+                </select></label>
+                <label>Month<input className="form-control" type="month" value={attendanceFilters.month} onChange={(event) => setAttendanceFilters({ ...attendanceFilters, month: event.target.value })} /></label>
+                <label>Year<input className="form-control" type="number" min="1900" max="9999" placeholder="All years" value={attendanceFilters.year} onChange={(event) => setAttendanceFilters({ ...attendanceFilters, year: event.target.value })} /></label>
+              </div>
+              <div className="report-export-actions">
+                <button className="btn btn-dark" type="button" disabled={Boolean(exportBusy) || countsLoading} onClick={() => downloadExport("attendance", "/reports/exports/attendance", attendanceFilters)}>
+                  {exportBusy === "attendance" ? "Preparing…" : "Download CSV"}
+                </button>
+              </div>
+            </>
+          ) : <p className="report-access-note">Attendance exports require sponsored-care access.</p>}
+        </article>
+      </section>
+
+      <section className="surface report-panel report-summary-panel">
+        <div className="report-summary-heading">
+          <div><span className="eyebrow">PARTICIPATION SUMMARY</span><h2>Monthly and yearly reporting</h2>
+            <p>Existing attendance summaries remain available for the selected reporting range.</p></div>
+          <label>Reporting range<select className="form-select" value={range} onChange={(event) => setRange(event.target.value)}>
+            <option value="yearly">Yearly</option><option value="monthly">Monthly</option>
+          </select></label>
+        </div>
+        <div className="report-export-actions mb-3">
+          <button className="btn btn-outline-dark" type="button" disabled={Boolean(exportBusy)} onClick={() => downloadAttendance("pdf")}>{exportBusy === "legacy-pdf" ? "Preparing…" : "Download PDF"}</button>
+          <button className="btn btn-outline-dark" type="button" disabled={Boolean(exportBusy)} onClick={() => downloadAttendance("csv")}>{exportBusy === "legacy-csv" ? "Preparing…" : "Download attendance CSV"}</button>
+        </div>
+        {canViewParticipation && (
+          <>
+            <p>{range === "yearly" ? "Yearly attendance by calendar year; previous years remain included." : "Monthly attendance summaries across recorded calendar months."}</p>
+            {participationError && <div className="alert alert-danger" role="alert">{participationError}</div>}
+            <div className="sponsorship-summary-grid participation-summary-grid">
+              {[
+                [range === "yearly" ? "Calendar years" : "Calendar months", loadingParticipation ? "—" : reportingPeriods],
+                ["Scheduled events", loadingParticipation ? "—" : formatCount(totalScheduled)],
+                ["Present", loadingParticipation ? "—" : formatCount(totalPresent)],
+                [range === "yearly" ? "Yearly absences" : "Absent", loadingParticipation ? "—" : formatCount(totalAbsent)],
+                ["Attendance rate", loadingParticipation ? "—" : totalAttendanceRate == null ? "—" : `${totalAttendanceRate}%`],
+              ].map(([label, value]) => <article className="surface sponsorship-summary-card participation-summary-card" key={label}><span>{label}</span><strong>{value}</strong></article>)}
+            </div>
+            <div className="table-responsive mt-3">
+              <table className="table align-middle">
+                <thead><tr><th>Child</th><th>{range === "yearly" ? "Calendar year" : "Month"}</th><th>Scheduled</th><th>Present</th><th>Absent</th><th>Attendance rate</th>{range === "yearly" && <th>Yearly absences</th>}<th>Current status</th></tr></thead>
+                <tbody>{reportRows.map((row) => <tr key={`${row.child.id}-${row.period}`}>
+                  <td>{row.child.name}<small className="d-block text-secondary">{row.child.participantCode}</small></td>
+                  <td>{row.period}</td><td>{formatCount(row.scheduled)}</td><td>{formatCount(row.present)}</td><td>{formatCount(row.absent)}</td>
+                  <td>{row.attendanceRate == null ? "—" : `${row.attendanceRate}%`}</td>{range === "yearly" && <td>{formatCount(row.absent)}</td>}
+                  <td>{PARTICIPATION_STATUS_LABELS[row.child.status] || row.child.status}</td>
+                </tr>)}</tbody>
+              </table>
+              {!reportRows.length && !loadingParticipation && <p className="text-secondary mb-0">No attendance periods found for this reporting range.</p>}
+            </div>
+            <button className="btn btn-outline-dark" disabled={!children.length || loadingParticipation} onClick={downloadParticipation}>Download participation summary CSV</button>
+          </>
+        )}
+      </section>
     </>
   );
 }
 function auditActionLabel(action) {
   const labels = {
-    "participant.created": "Sponsored Child created",
-    "participant.guardian_sms": "Sponsored Child guardian notification",
-    "participant.passcode.viewed": "Sponsored Child passcode viewed",
+    "event.created": "Church activity created",
+    "event.photos.uploaded": "Activity photos uploaded",
+    "event.data.imported": "Activity data imported",
+    "participant.data.imported": "Participant data imported",
+    "participant.education.created": "Education history added",
+    "participant.education.deleted": "Education history removed",
+    "participant.created": "Sponsored child registered",
+    "participant.guardian_sms": "Guardian notification attempt",
+    "participant.passcode.viewed": "Guardian passcode viewed",
+    "participant.updated": "Participant details updated",
+    "participant.deleted": "Participant record removed",
+    "checkin.recorded": "Attendance check-in recorded",
+    "checkout.recorded": "Attendance check-out recorded",
+    "goer.created": "Goer account created",
+    "goer.group.updated": "Goer education group changed",
+    "goer.active": "Goer account reactivated",
+    "goer.inactive": "Goer account deactivated",
+    "staff.created": "Church Staff account created",
+    "staff.permissions.updated": "Staff permissions updated",
+    "staff.active": "Church Staff account reactivated",
+    "staff.inactive": "Church Staff account deactivated",
+    "account.credentials.updated": "Account credentials updated",
+    "account.email.updated": "Account email updated",
+    "sponsor.created": "Sponsor created",
+    "sponsorship.child.sponsor.assigned": "Sponsor assigned to child",
+    "sponsorship.child.sponsor.unassigned": "Sponsor unassigned from child",
+    "sponsorship.second_chance.granted": "Second chance granted",
+    "sponsorship.child.set_inactive": "Child status set to inactive",
+    "sponsorship.child.removed": "Child removed from sponsorship",
+    "sponsorship.child.update.created": "Child care update recorded",
+    "sponsorship.gift.recorded": "Sponsorship gift recorded",
+    "sponsorship.care-record.received": "Care contribution recorded",
+    "report.downloaded": "Report downloaded",
+    "attendance.prediction.settings.updated": "Attendance risk settings updated",
   };
   const value = String(action || "");
-  return labels[value] || value.replace(/^participant\./, "record.");
+  return labels[value] || value.replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) || "Activity recorded";
 }
 function auditEntityLabel(entry) {
-  if (entry.entity_type !== "participant") return entry.entity_type;
-  return ["participant.created", "participant.guardian_sms", "participant.passcode.viewed"].includes(entry.action)
-    ? "Sponsored Child"
-    : "Record";
+  const entity = String(entry.entity_type || "").toLowerCase();
+  if (entity === "participant") {
+    const action = String(entry.action || "");
+    return action.startsWith("sponsorship.")
+      || ["participant.created", "participant.guardian_sms", "participant.passcode.viewed"].includes(action)
+      ? "Sponsored Child"
+      : "Participant";
+  }
+  const labels = {
+    user: "Account",
+    event: "Church Activity",
+    sponsor: "Sponsor",
+    report: "Report",
+    attendance_prediction: "Attendance Risk Settings",
+    request: "System Request",
+  };
+  return labels[entity] || (entity ? entity.replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "System");
+}
+function auditActionIcon(action) {
+  const value = String(action || "").toLowerCase();
+  if (value.includes("checkin") || value.includes("checkout")) return "scanner";
+  if (value.includes("staff") || value.includes("goer") || value.includes("account")) return "account";
+  if (value.includes("event")) return "events";
+  if (value.includes("report")) return "reports";
+  if (value.includes("participant") || value.includes("sponsorship") || value.includes("sponsor")) return "participants";
+  if (value.includes("attendance")) return "analytics";
+  return "audit";
+}
+function parseAuditDetails(value) {
+  if (!value) return {};
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : { raw: value };
+  } catch (error) {
+    if (error instanceof SyntaxError) return { raw: value };
+    throw error;
+  }
+}
+function auditStatusLabel(value) {
+  const status = String(value || "").toUpperCase();
+  const labels = {
+    ACTIVE: "Active",
+    WARNING: "Warning",
+    GROUNDS_FOR_DEPARTURE: "Grounds for Departure",
+    INACTIVE: "Inactive",
+    REMOVED_FROM_SPONSORSHIP: "Inactive",
+    SECOND_CHANCE: "Second Chance",
+  };
+  return labels[status] || String(value || "—").replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+function auditDetailsText(entry) {
+  const details = parseAuditDetails(entry.details);
+  const parts = [];
+  const summary = details.summary && typeof details.summary === "object" ? details.summary : details;
+  if (summary.fileName) parts.push(`File: ${summary.fileName}`);
+  if (summary.importType) parts.push(`Import type: ${summary.importType}`);
+  const importCounts = [
+    ["participantsImported", "participants imported"],
+    ["participantsUpdated", "participants updated"],
+    ["attendanceImported", "attendance records"],
+    ["attendanceSummariesImported", "attendance summaries"],
+    ["educationImported", "education records"],
+    ["eventsImported", "activities imported"],
+    ["skipped", "skipped"],
+    ["failed", "failed"],
+  ].filter(([key]) => Number(summary[key]) > 0)
+    .map(([key, label]) => `${summary[key]} ${label}`);
+  if (importCounts.length) parts.push(importCounts.join(", "));
+  if (Array.isArray(details.changedFields) && details.changedFields.length) {
+    const fields = details.changedFields
+      .map((field) => String(field).replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()))
+      .join(", ");
+    parts.push(`Changed: ${fields}`);
+  }
+  if (details.fullName) parts.push(`Account: ${details.fullName}`);
+  if (details.eventName) parts.push(`Activity: ${details.eventName}`);
+  if (details.educationLevel) parts.push(`Education group: ${details.educationLevel}`);
+  if (details.sponsorType) parts.push(`Sponsor type: ${details.sponsorType}`);
+  if (details.sex) parts.push(`Sex: ${details.sex}`);
+  if (details.careType) parts.push(`Care type: ${details.careType}`);
+  if (details.photoCount !== undefined) parts.push(`${details.photoCount} photo${Number(details.photoCount) === 1 ? "" : "s"}`);
+  if (details.permissions && Array.isArray(details.permissions)) {
+    parts.push(`${details.permissions.length} permission${details.permissions.length === 1 ? "" : "s"}`);
+  }
+  if (details.previousStatus || details.newStatus) {
+    parts.push(`Status: ${auditStatusLabel(details.previousStatus)} → ${auditStatusLabel(details.newStatus)}`);
+  }
+  if (details.reason) parts.push(`Reason: ${details.reason}`);
+  if (details.notes) parts.push(`Notes: ${details.notes}`);
+  if (details.absenceCount !== undefined) parts.push(`${details.absenceCount} absences`);
+  if (details.evaluationYear) parts.push(`Year: ${details.evaluationYear}`);
+  if (details.updateType) parts.push(`Update: ${details.updateType}`);
+  if (details.recordedOn) parts.push(`Recorded: ${details.recordedOn}`);
+  if (details.amount !== undefined) parts.push(`Amount: ${details.amount}`);
+  if (details.sponsorId) parts.push(`Sponsor ID: ${details.sponsorId}`);
+  if (details.previousSponsorId) parts.push(`Previous sponsor ID: ${details.previousSponsorId}`);
+  if (details.providerStatus) parts.push(`Provider: ${details.providerStatus}`);
+  if (details.status && String(entry.action || "").includes("guardian_sms")) parts.push(`Notification: ${details.status}`);
+  if (details.deletionType) parts.push(`Removal type: ${details.deletionType}`);
+  if (details.historyPreserved) parts.push("History preserved");
+  if (details.hasReceipt !== undefined) parts.push(details.hasReceipt ? "Receipt attached" : "No receipt attached");
+  if (details.reportType && !parts.length) parts.push(`Report type: ${details.reportType}`);
+  if (details.frequencyWeight !== undefined || details.regularityWeight !== undefined || details.recencyWeight !== undefined) {
+    parts.push(`Weights: Frequency ${details.frequencyWeight ?? "—"}%, Regularity ${details.regularityWeight ?? "—"}%, Recency ${details.recencyWeight ?? "—"}%`);
+  }
+  if (details.mediumThreshold !== undefined || details.highThreshold !== undefined) {
+    parts.push(`Thresholds: Medium ${details.mediumThreshold ?? "—"}, High ${details.highThreshold ?? "—"}`);
+  }
+  if (details.raw && !parts.length) parts.push(details.raw);
+  return parts.join(" · ") || "No additional details recorded";
+}
+function auditDateTime(value) {
+  if (!value) return "Time unavailable";
+  const date = value instanceof Date
+    ? value
+    : new Date(typeof value === "string" ? value.replace(" ", "T") : value);
+  return Number.isNaN(date.getTime()) ? "Time unavailable" : date.toLocaleString();
+}
+function auditRoleLabel(role) {
+  const value = String(role || "");
+  return value.toLowerCase() === "church administrator" ? "Church Staff" : value || "Role unavailable";
 }
 function AuditHistory() {
   const [entries, setEntries] = useState([]);
@@ -5556,76 +6379,101 @@ function AuditHistory() {
     setError("");
     loadEntries(entries.length > 0);
   };
+  const accountEntries = entries.filter((entry) => entry.entity_type === "user").length;
+  const participantEntries = entries.filter((entry) => entry.entity_type === "participant").length;
+  const otherEntries = entries.length - accountEntries - participantEntries;
+  const summaryCards = [
+    { label: "Records loaded", value: entries.length, icon: "audit", tone: "all" },
+    { label: "Account actions", value: accountEntries, icon: "account", tone: "accounts" },
+    { label: "Participant actions", value: participantEntries, icon: "participants", tone: "participants" },
+    { label: "Other system actions", value: otherEntries, icon: "analytics", tone: "system" },
+  ];
 
   return (
     <>
       <Title
         e="ADMINISTRATION"
         t="Audit history."
-        d="Review account, sponsored child, event, and check-in changes."
+        d="Review recorded account, participant, activity, attendance, and reporting actions."
       />
-      <div className="surface table-surface">
-        <div className="panel-title">
-          <h2>Recent activity</h2>
-          <span>{entries.length} records loaded</span>
-        </div>
+      <section className="audit-summary-grid" aria-label="Loaded audit activity summary">
+        {summaryCards.map((card) => (
+          <article className={`audit-summary-card ${card.tone}`} key={card.label}>
+            <span className="audit-summary-icon"><NavigationIcon name={card.icon} /></span>
+            <div><small>{card.label}</small><strong>{loading && !entries.length ? "—" : formatCount(card.value)}</strong></div>
+          </article>
+        ))}
+      </section>
+      <section className="surface table-surface audit-history-panel">
+        <header className="audit-history-heading">
+          <div className="audit-heading-title">
+            <span className="audit-heading-icon"><NavigationIcon name="audit" /></span>
+            <div><h2>Recent activity</h2><p>Newest recorded events appear first.</p></div>
+          </div>
+          <span className="audit-loaded-count">{entries.length} loaded</span>
+        </header>
         {error && (
-          <div className="alert alert-danger" role="alert">
-            {error}
-            <button className="btn btn-sm btn-outline-danger ms-3" onClick={retryLoading}>
-              Retry
+          <div className="alert alert-danger audit-error" role="alert">
+            <span>{error}</span>
+            <button className="btn btn-sm btn-outline-danger" onClick={retryLoading}>
+              <NavigationIcon name="audit" /> Retry
             </button>
           </div>
         )}
-        <div className="table-responsive">
-          <table className="table align-middle">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>User</th>
-                <th>Role</th>
-                <th>Action</th>
-                <th>Record</th>
-                <th>Details</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((entry) => {
-                const details = entry.details && typeof entry.details === "object"
-                  ? entry.details
-                  : {};
-                const detailText = details.changedFields?.join(", ")
-                  || details.eventName
-                  || (details.reason ? `${details.reason}${details.absenceCount === undefined ? "" : ` · ${details.absenceCount} absences`}` : "")
-                  || (details.absenceCount === undefined ? "—" : `${details.absenceCount} absences`);
-                return (
-                  <tr key={entry.id}>
-                    <td>{new Date(entry.created_at).toLocaleString()}</td>
-                    <td>{entry.username}</td>
-                    <td>{entry.role}</td>
-                    <td>{auditActionLabel(entry.action)}</td>
-                    <td>{auditEntityLabel(entry)}{entry.entity_id ? ` #${entry.entity_id}` : ""}</td>
-                    <td>{detailText}</td>
-                  </tr>
-                );
-              })}
-              {!entries.length && !loading && (
-                <tr><td colSpan="6" className="text-secondary">No audit activity recorded yet.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        {loading && <p role="status" className="text-secondary">Loading audit history...</p>}
+        {loading && !entries.length ? (
+          <p role="status" className="audit-loading"><span className="audit-loading-orbit" />Loading audit history…</p>
+        ) : (
+          <div className="table-responsive audit-table-wrap">
+            <table className="table align-middle audit-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>User</th>
+                  <th>Role</th>
+                  <th>Action</th>
+                  <th>Record</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map((entry) => {
+                  const entityId = entry.entity_id
+                    ? (/^\d+$/.test(String(entry.entity_id)) ? ` #${entry.entity_id}` : ` · ${entry.entity_id}`)
+                    : "";
+                  return (
+                    <tr key={entry.id}>
+                      <td><time>{auditDateTime(entry.created_at)}</time></td>
+                      <td><span className="audit-user-cell"><span className="audit-user-icon"><NavigationIcon name="account" /></span>{entry.username || "Unknown user"}</span></td>
+                      <td><span className="audit-role-badge">{auditRoleLabel(entry.role)}</span></td>
+                      <td>
+                        <span className="audit-action-cell">
+                          <span className="audit-action-icon"><NavigationIcon name={auditActionIcon(entry.action)} /></span>
+                          {auditActionLabel(entry.action)}
+                        </span>
+                      </td>
+                      <td><span className="audit-record-badge">{auditEntityLabel(entry)}{entityId}</span></td>
+                      <td className="audit-details-cell">{auditDetailsText(entry)}</td>
+                    </tr>
+                  );
+                })}
+                {!entries.length && !loading && (
+                  <tr><td colSpan="6"><div className="audit-empty-state"><span><NavigationIcon name="audit" /></span><strong>No audit activity yet</strong><small>Recorded account and system actions will appear here.</small></div></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {loading && entries.length > 0 && <p role="status" className="audit-loading-more">Loading more records…</p>}
         {hasMore && !loading && (
-          <button className="btn btn-outline-dark" onClick={() => {
+          <button className="btn btn-outline-primary audit-load-more" onClick={() => {
             setLoading(true);
             setError("");
             loadEntries(true);
           }}>
-            Load more
+            <NavigationIcon name="events" /> Load more records
           </button>
         )}
-      </div>
+      </section>
     </>
   );
 }
@@ -5633,13 +6481,12 @@ const PARTICIPATION_STATUS_LABELS = {
   ACTIVE: "Active",
   WARNING: "Warning",
   GROUNDS_FOR_DEPARTURE: "Grounds for Departure",
-  SECOND_CHANCE: "Second Chance",
   REMOVED_FROM_SPONSORSHIP: "Inactive",
 };
 
 function SponsoredCare({ user, onViewHistory }) {
   const canManage = canAccessPermission("sponsorship:manage", user);
-  const canSetInactive = String(user?.role || "").toLowerCase() === "church administrator";
+  const canSetInactive = String(user?.role || "").toLowerCase() === "system administrator";
   const isGoer = String(user?.role || "").toLowerCase() === GOER_ROLE;
   const canRecordCare = isGoer
     ? Array.isArray(user?.permissions) && user.permissions.includes("goer-care:record")
@@ -5671,10 +6518,18 @@ function SponsoredCare({ user, onViewHistory }) {
   const [inactiveReason, setInactiveReason] = useState("");
   const [inactiveNotes, setInactiveNotes] = useState("");
   const [confirmInactive, setConfirmInactive] = useState(false);
+  const [confirmSecondChance, setConfirmSecondChance] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    if (!selectedId) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [selectedId]);
 
   const refresh = async () => {
     const rows = await apiCall("/sponsorship/children");
@@ -5708,7 +6563,7 @@ function SponsoredCare({ user, onViewHistory }) {
       if (sortBy === "name") return first.name.localeCompare(second.name);
       if (sortBy === "attendance") return second.monthly.attendanceRate - first.monthly.attendanceRate
         || first.name.localeCompare(second.name);
-      const priority = { GROUNDS_FOR_DEPARTURE: 0, WARNING: 1, SECOND_CHANCE: 2, ACTIVE: 3 };
+      const priority = { GROUNDS_FOR_DEPARTURE: 0, WARNING: 1, ACTIVE: 2, INACTIVE: 3 };
       return (priority[first.status] ?? 4) - (priority[second.status] ?? 4)
         || first.name.localeCompare(second.name);
     });
@@ -5785,7 +6640,7 @@ function SponsoredCare({ user, onViewHistory }) {
     }
   };
   const grantSecondChance = async (event) => {
-    event.preventDefault();
+    event?.preventDefault();
     if (!selectedChild) return;
     setSaving(true);
     setError("");
@@ -5796,6 +6651,7 @@ function SponsoredCare({ user, onViewHistory }) {
       });
       setDetails((current) => ({ ...current, ...updatedChild }));
       await refresh();
+      setConfirmSecondChance(false);
       setSecondChanceReason("");
       setMessage("Second chance granted and recorded in audit history.");
     } catch (requestError) {
@@ -5862,13 +6718,14 @@ function SponsoredCare({ user, onViewHistory }) {
       date: entry.createdAt,
       status: ({
         grounds_for_departure: "Grounds for Departure",
-        second_chance: "Warning (Second Chance)",
+        second_chance: "Active",
         removed: "Inactive",
         set_inactive: "Inactive",
       })[entry.type] || entry.currentStatus,
       administrator: entry.administrator || "System",
       reason: entry.reason,
       notes: entry.notes,
+      action: entry.type === "second_chance" ? "Second Chance Granted" : undefined,
     })),
   ].sort((first, second) => new Date(second.date).getTime() - new Date(first.date).getTime());
 
@@ -5892,7 +6749,6 @@ function SponsoredCare({ user, onViewHistory }) {
           ["Meeting monthly requirements", children.filter((entry) => entry.monthly.required > 0 && entry.monthly.attended >= entry.monthly.required).length],
           ["Attendance warnings", children.filter((entry) => entry.status === "WARNING").length],
           ["Grounds for departure", children.filter((entry) => entry.status === "GROUNDS_FOR_DEPARTURE").length],
-          ["Second chance", children.filter((entry) => entry.status === "SECOND_CHANCE").length],
           ["Inactive", children.filter((entry) => entry.status === "REMOVED_FROM_SPONSORSHIP").length],
         ].map(([label, count]) => (
           <article className="surface sponsorship-summary-card participation-summary-card" key={label}>
@@ -5918,7 +6774,6 @@ function SponsoredCare({ user, onViewHistory }) {
                   <option value="ACTIVE">Active</option>
                   <option value="WARNING">Warning</option>
                   <option value="GROUNDS_FOR_DEPARTURE">Ground for Departure</option>
-                  <option value="SECOND_CHANCE">Second Chance</option>
                   <option value="REMOVED_FROM_SPONSORSHIP">Inactive</option>
                 </select>
               </label>
@@ -5947,7 +6802,7 @@ function SponsoredCare({ user, onViewHistory }) {
       </div>
       {child && createPortal((
         <div className="participant-modal-backdrop child-profile-backdrop" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !confirmRemoval && !confirmInactive) closeChild();
+          if (event.target === event.currentTarget && !confirmRemoval && !confirmInactive && !confirmSecondChance) closeChild();
         }}>
           <section className="participant-modal child-profile-modal participation-profile-modal" role="dialog" aria-modal="true" aria-labelledby="participation-profile-title">
             <header className="participant-modal-header">
@@ -6014,9 +6869,10 @@ function SponsoredCare({ user, onViewHistory }) {
             {child.status === "GROUNDS_FOR_DEPARTURE" && (
               <section className="participation-action-panel grounds-action-panel">
                 <h3>Grounds for Departure</h3>
-                <p>Current-year absences: <strong>{child.currentYear.absent}</strong>. This child is not automatically set to Inactive.</p>
+                <p>Current-year absences: <strong>{child.currentYear.absent}</strong> · Scheduled events: <strong>{child.currentYear.required}</strong> · Attendance rate: <strong>{child.currentYear.required ? `${child.currentYear.attendanceRate}%` : "N/A"}</strong>.</p>
+                <p>Grounds for Departure does not automatically make this child Inactive.</p>
                 {canManage && (
-                  <form onSubmit={grantSecondChance}>
+                  <form onSubmit={(event) => { event.preventDefault(); setConfirmSecondChance(true); }}>
                     <label className="form-label" htmlFor="second-chance-reason">Reason or notes (optional)</label>
                     <textarea id="second-chance-reason" className="form-control" rows="2" maxLength="1000" value={secondChanceReason} onChange={(event) => setSecondChanceReason(event.target.value)} />
                     <div className="grounds-action-buttons">
@@ -6046,24 +6902,16 @@ function SponsoredCare({ user, onViewHistory }) {
                 <h3>Inactive sponsored child</h3>
                 <p>Reason: <strong>{child.inactiveReason || "Not recorded"}</strong></p>
                 {child.inactiveNotes && <p>Notes: {child.inactiveNotes}</p>}
-                {child.inactiveAt && <p>Changed {formatParticipantHistoryDate(child.inactiveAt)} by {child.inactiveAdministrator || "Church Administrator"}.</p>}
+                {child.inactiveAt && <p>Changed {formatParticipantHistoryDate(child.inactiveAt)} by {child.inactiveAdministrator || "System Administrator"}.</p>}
               </section>
             )}
-            {profileTab === "followup" && child.secondChance && (
-              <>
-            {child.secondChance && (
+            {profileTab === "followup" && child.status === "ACTIVE" && child.secondChance && (
               <section className="participation-action-panel second-chance-action-panel">
-                <h3>Second Chance Monitoring</h3>
-                <p>Granted {formatParticipantHistoryDate(child.secondChance.createdAt)} by {child.secondChance.administrator}.</p>
-                <p>Absences at grant: {child.secondChance.absenceCount} · Post-second-chance absences: {child.postSecondChanceAbsences} / 2</p>
-                <p>Removal becomes available after two missed monthly requirements following a second chance.</p>
-                {child.secondChance.reason && <p>Notes: {child.secondChance.reason}</p>}
-                {canManage && child.status === "SECOND_CHANCE" && child.removalEligible && (
-                  <button type="button" className="btn btn-outline-danger" onClick={() => setConfirmRemoval(true)}>Remove from program</button>
-                )}
+                <h3>Active Status Confirmed</h3>
+                <p>Second chance granted {formatParticipantHistoryDate(child.secondChance.createdAt)} by {child.secondChance.administrator}.</p>
+                {child.secondChance.reason && <p>Reason: {child.secondChance.reason}</p>}
+                <p>The child remains Active until a future attendance evaluation or authorized administrative action changes the status.</p>
               </section>
-            )}
-              </>
             )}
             {profileTab === "followup" && (
               <section className="surface participation-history-section">
@@ -6074,6 +6922,7 @@ function SponsoredCare({ user, onViewHistory }) {
                       <li key={entry.key}>
                         <time>{formatParticipantHistoryDate(entry.date)}</time>
                         <strong>{entry.status}</strong>
+                        {entry.action && <span>Action: {entry.action}</span>}
                         <span>Changed by: {entry.administrator}</span>
                         {entry.reason && <span>Reason: {entry.reason}</span>}
                         {entry.notes && <span>Notes: {entry.notes}</span>}
@@ -6252,6 +7101,45 @@ function SponsoredCare({ user, onViewHistory }) {
                 <button type="submit" className="btn btn-primary" disabled={growthSaving}>{growthSaving ? "Saving..." : "Save Update"}</button>
               </div>
             </form>
+          </section>
+        </div>
+      ), document.body)}
+      {confirmSecondChance && child && createPortal((
+        <div
+          className="participant-modal-backdrop inactive-confirm-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !saving) setConfirmSecondChance(false);
+          }}
+        >
+          <section className="participant-modal participation-removal-modal inactive-confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="second-chance-title">
+            <header className="inactive-confirm-header">
+              <span>STATUS CHANGE CONFIRMATION</span>
+              <h2 id="second-chance-title">Give this child a second chance?</h2>
+              <p>The child's current status will immediately change from Grounds for Departure to Active.</p>
+            </header>
+            <dl className="participation-removal-details">
+              <div><dt>Sponsored Child</dt><dd>{child.name}</dd></div>
+              <div><dt>Sponsored Child ID</dt><dd>{child.id}</dd></div>
+              <div><dt>Current status</dt><dd>Grounds for Departure</dd></div>
+              <div><dt>New status</dt><dd>Active</dd></div>
+            </dl>
+            <label className="form-label" htmlFor="second-chance-confirm-note">Reason or notes (optional)</label>
+            <textarea
+              id="second-chance-confirm-note"
+              className="form-control"
+              rows="3"
+              maxLength="1000"
+              value={secondChanceReason}
+              onChange={(event) => setSecondChanceReason(event.target.value)}
+            />
+            {error && <div className="alert alert-danger mt-3" role="alert">{error}</div>}
+            <div className="participation-removal-actions">
+              <button type="button" className="btn btn-outline-secondary" disabled={saving} onClick={() => setConfirmSecondChance(false)}>Cancel</button>
+              <button type="button" className="btn btn-primary" disabled={saving} onClick={grantSecondChance}>
+                {saving ? "Saving..." : "Confirm Second Chance"}
+              </button>
+            </div>
           </section>
         </div>
       ), document.body)}
@@ -6701,7 +7589,7 @@ function StaffAccounts({ user }) {
       setError("You cannot deactivate the account you are currently using.");
       return;
     }
-    const accountType = type === "goer" ? "Goer" : "Church Administrator";
+    const accountType = type === "goer" ? "Goer" : "Church Staff";
     setConfirmation({
       title: `${activating ? "Reactivate" : "Deactivate"} this ${accountType} account?`,
       message: activating ? "" : "This account will no longer be able to sign in.",
@@ -6736,15 +7624,23 @@ function StaffAccounts({ user }) {
       {message && <div className="alert alert-success" role="status">{message}</div>}
       {!loading && (
         <section className="staff-account-summary" aria-label="Account summary">
-          <article><span>Total accounts</span><strong>{staff.length + goers.length}</strong></article>
-          <article><span>Active accounts</span><strong>{staff.filter((account) => account.status === "active").length + goers.filter((account) => account.status === "active").length}</strong></article>
-          <article><span>Goer accounts</span><strong>{goers.length}</strong></article>
-          <article><span>Church Staff</span><strong>{staff.length}</strong></article>
+          {[
+            { label: "Total accounts", value: staff.length + goers.length, icon: "account", tone: "total" },
+            { label: "Active accounts", value: staff.filter((account) => account.status === "active").length + goers.filter((account) => account.status === "active").length, icon: "check", tone: "active" },
+            { label: "Goer accounts", value: goers.length, icon: "participants", tone: "goer" },
+            { label: "Church Staff", value: staff.length, icon: "staff", tone: "staff" },
+          ].map(({ label, value, icon, tone }) => (
+            <article className={`staff-summary-card ${tone}`} key={label}>
+              <span className="staff-summary-icon"><NavigationIcon name={icon} /></span>
+              <div><span>{label}</span><strong>{value}</strong></div>
+            </article>
+          ))}
         </section>
       )}
       <section className="surface staff-account-filters" aria-label="Filter accounts">
-        <label>
+        <label className="staff-account-search">
           <span className="visually-hidden">Search accounts</span>
+          <NavigationIcon name="search" />
           <input
             className="form-control"
             type="search"
@@ -6771,11 +7667,13 @@ function StaffAccounts({ user }) {
         </label>
       </section>
       <section className="surface form-surface staff-create-panel">
-        <div className="panel-title"><h2>Register account</h2></div>
-        <p className="text-secondary">Choose the account type to open its registration form.</p>
+        <div className="staff-create-heading">
+          <span className="staff-create-icon"><NavigationIcon name="addAccount" /></span>
+          <div><h2>Register account</h2><p>Choose an account type to get started.</p></div>
+        </div>
         <div className="d-flex flex-wrap gap-2">
-          <button className="btn btn-dark" type="button" onClick={() => openRegistrationModal("staff")}>Register Church Staff</button>
-          <button className="btn btn-outline-primary" type="button" onClick={() => openRegistrationModal("goer")}>Register Goer</button>
+          <button className="btn btn-dark" type="button" onClick={() => openRegistrationModal("staff")}><NavigationIcon name="staff" />Register Church Staff</button>
+          <button className="btn btn-outline-primary" type="button" onClick={() => openRegistrationModal("goer")}><NavigationIcon name="addAccount" />Register Goer</button>
         </div>
       </section>
       {loading && <p className="staff-account-loading" role="status">Loading accounts...</p>}
@@ -6783,14 +7681,20 @@ function StaffAccounts({ user }) {
         <p className="alert alert-info" role="status">No accounts match your search.</p>
       )}
       <section className="surface table-surface staff-list-panel">
-        <div className="panel-title"><h2>Church Goer accounts</h2><span>{filteredGoers.length} accounts</span></div>
+        <div className="staff-list-heading">
+          <div><span className="staff-list-icon goer"><NavigationIcon name="participants" /></span><h2>Church Goer accounts</h2></div>
+          <span className="staff-account-count">{filteredGoers.length} accounts</span>
+        </div>
         {!loading && filteredGoers.length ? (
           <div className="staff-account-list">
             {filteredGoers.map((account) => (
               <article className="staff-account-card" key={account.id}>
                 <div className="staff-account-heading">
-                  <div><h3>{account.fullName}</h3><p>{account.email} · Church Goer</p></div>
-                  <span className={`staff-account-status ${account.status}`}>● {account.status === "active" ? "Active" : "Inactive"}</span>
+                  <div className="staff-account-person">
+                    <span className="staff-account-avatar" aria-hidden="true">{String(account.fullName || "?").trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
+                    <div><h3>{account.fullName}</h3><p>{account.email} · Church Goer</p></div>
+                  </div>
+                  <span className={`staff-account-status ${account.status}`}><span className="visually-hidden">Account status: </span>{account.status === "active" ? "Active" : "Inactive"}</span>
                 </div>
                 <div className="row g-2 align-items-end">
                   <div className="col-12 col-sm-7">
@@ -6815,13 +7719,14 @@ function StaffAccounts({ user }) {
                       disabled={saving || goerGroups[account.id] === account.goerEducationLevel}
                       onClick={() => requestGroupSave(account)}
                     >
-                      Save group
+                      <NavigationIcon name="check" />Save group
                     </button>
                   </div>
                 </div>
                 <div className="staff-account-actions">
-                  <button className="btn btn-sm btn-outline-primary" type="button" onClick={() => openAccountDetails(account, "Goer")}>View Details</button>
+                  <button className="btn btn-sm btn-outline-primary" type="button" onClick={() => openAccountDetails(account, "Goer")}><NavigationIcon name="view" />View Details</button>
                   <button className={`btn btn-sm ${account.status === "active" ? "btn-outline-danger" : "btn-outline-success"}`} disabled={saving} onClick={() => requestStatusChange(account, "goer")}>
+                    <NavigationIcon name={account.status === "active" ? "close" : "check"} />
                     {account.status === "active" ? "Deactivate account" : "Reactivate account"}
                   </button>
                 </div>
@@ -6833,27 +7738,33 @@ function StaffAccounts({ user }) {
         )}
       </section>
       <section className="surface table-surface staff-list-panel">
-        <div className="panel-title"><h2>Church Staff accounts</h2><span>{filteredStaff.length} accounts</span></div>
+        <div className="staff-list-heading">
+          <div><span className="staff-list-icon staff"><NavigationIcon name="staff" /></span><h2>Church Staff accounts</h2></div>
+          <span className="staff-account-count">{filteredStaff.length} accounts</span>
+        </div>
         {!loading && filteredStaff.length ? (
           <div className="staff-account-list">
             {filteredStaff.map((account) => (
               <article className="staff-account-card" key={account.id}>
                 <div className="staff-account-heading">
-                  <div>
-                    <h3>{account.fullName}</h3>
-                    <p>{account.email} · {account.role}</p>
+                  <div className="staff-account-person">
+                    <span className="staff-account-avatar" aria-hidden="true">{String(account.fullName || "?").trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
+                    <div>
+                      <h3>{account.fullName}</h3>
+                      <p>{account.email} · {account.role}</p>
+                    </div>
                   </div>
-                  <span className={`staff-account-status ${account.status}`}>● {account.status === "active" ? "Active" : "Inactive"}</span>
+                  <span className={`staff-account-status ${account.status}`}><span className="visually-hidden">Account status: </span>{account.status === "active" ? "Active" : "Inactive"}</span>
                 </div>
                 <div className="staff-account-permissions">
                   <div>
-                    <strong>{(permissionsById[account.id] || []).length} permissions assigned</strong>
+                    <strong><NavigationIcon name="audit" />{(permissionsById[account.id] || []).length} permissions assigned</strong>
                     <div className="staff-permission-badges">
                       {selectedPermissionLabels(permissionsById[account.id] || []).slice(0, 3).map((label) => (
                         <span className="staff-permission-badge" key={label}>{label}</span>
                       ))}
                       {(permissionsById[account.id] || []).length > 3 && (
-                        <button type="button" className="staff-more-permissions" onClick={() => openAccountDetails(account, "Church Administrator")}>
+                        <button type="button" className="staff-more-permissions" onClick={() => openAccountDetails(account, "Church Staff")}>
                           +{(permissionsById[account.id] || []).length - 3} more
                         </button>
                       )}
@@ -6865,12 +7776,13 @@ function StaffAccounts({ user }) {
                     type="button"
                     onClick={() => openStaffPermissionEditor(account)}
                   >
-                    Edit permissions
+                    <NavigationIcon name="audit" />Edit permissions
                   </button>
                 </div>
                 <div className="staff-account-actions">
-                  <button className="btn btn-sm btn-outline-primary" type="button" onClick={() => openAccountDetails(account, "Church Administrator")}>View Details</button>
+                  <button className="btn btn-sm btn-outline-primary" type="button" onClick={() => openAccountDetails(account, "Church Staff")}><NavigationIcon name="view" />View Details</button>
                   <button className={`btn btn-sm ${account.status === "active" ? "btn-outline-danger" : "btn-outline-success"}`} disabled={saving} onClick={() => requestStatusChange(account, "staff")}>
+                    <NavigationIcon name={account.status === "active" ? "close" : "check"} />
                     {account.status === "active" ? "Deactivate account" : "Reactivate account"}
                   </button>
                 </div>
@@ -6878,7 +7790,7 @@ function StaffAccounts({ user }) {
             ))}
           </div>
         ) : !loading && (
-          <p className="text-secondary">{staff.length ? "No Church Administrator accounts match the current filters." : "No Church Administrator accounts found."}</p>
+          <p className="text-secondary">{staff.length ? "No Church Staff accounts match the current filters." : "No Church Staff accounts found."}</p>
         )}
       </section>
       {registrationType && createPortal(
@@ -6898,12 +7810,12 @@ function StaffAccounts({ user }) {
               <div>
                 <span className="eyebrow">NEW ACCOUNT</span>
                 <h2 id="account-registration-title">
-                  Register {registrationType === "goer" ? "Goer" : "Church Administrator"}
+                  Register {registrationType === "goer" ? "Goer" : "Church Staff"}
                 </h2>
                 <p>
                   {registrationType === "goer"
                     ? "Goer accounts can record attendance only for their assigned education group."
-                    : "Choose the pages and actions this Church Administrator can access."}
+                    : "Choose the pages and actions this Church Staff can access."}
                 </p>
               </div>
               <button
@@ -7000,7 +7912,7 @@ function StaffAccounts({ user }) {
             </header>
             <dl className="staff-account-detail-grid">
               <div><dt>Name</dt><dd>{detailsAccount.fullName || "—"}</dd></div>
-              {detailsAccount.accountType === "Church Administrator" && (
+              {detailsAccount.accountType === "Church Staff" && (
                 <div><dt>Username</dt><dd>{detailsAccount.username || "Not available"}</dd></div>
               )}
               <div><dt>Email</dt><dd>{detailsAccount.email || "—"}</dd></div>
@@ -7012,7 +7924,7 @@ function StaffAccounts({ user }) {
                 <div><dt>Assigned education group</dt><dd>{detailsAccount.goerEducationLevel || "Not assigned"}</dd></div>
               )}
             </dl>
-            {detailsAccount.accountType === "Church Administrator" && (
+            {detailsAccount.accountType === "Church Staff" && (
               <section className="staff-detail-permissions">
                 <h3>Permissions</h3>
                 <div className="staff-permission-badges">
@@ -7102,7 +8014,7 @@ function StaffAccounts({ user }) {
                 <h2 id="staff-permission-modal-title">
                   Permissions for {permissionEditor.account.fullName}
                 </h2>
-                <p>Select the pages and actions this Church Administrator can access.</p>
+                <p>Select the pages and actions this Church Staff account can access.</p>
               </div>
               <button
                 type="button"
@@ -7239,11 +8151,16 @@ function App() {
     );
   }
   const isAdmin = String(user.role || "").toLowerCase() === "system administrator";
+  const isChurchAdmin = String(user.role || "").toLowerCase() === "church administrator";
+  const canImportData = isAdmin || isChurchAdmin ||
+    canAccessPermission("events:manage", user) ||
+    canAccessPermission("sponsorship:manage", user);
   let pages = {
     dashboard: <Dashboard go={navigateToPage} user={user} />,
     participants: (
       <Participants
         canCreateImport={isAdmin}
+        canImportData={canImportData}
         canEdit={canAccessPermission("participants:edit", user)}
         canDelete={canAccessPermission("participants:delete", user)}
         isGoer={String(user.role).toLowerCase() === GOER_ROLE}
@@ -7252,7 +8169,7 @@ function App() {
       />
     ),
     participantHistory: <ParticipantHistoryPage key={participantHistoryId} participantId={participantHistoryId} onBack={backToParticipants} />,
-    events: <Events canManage={canAccessPermission("events:manage", user)} canImport={isAdmin} />,
+    events: <Events canManage={canAccessPermission("events:manage", user)} canImport={canAccessPermission("events:manage", user)} user={user} />,
     scanner: <Scanner user={user} />,
     sponsorship: <SponsoredCare user={user} onViewHistory={openParticipantHistory} />,
     analytics: <Analytics user={user} />,

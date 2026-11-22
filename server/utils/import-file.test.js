@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const XLSX = require('@e965/xlsx');
-const { inspectImportFile, safeImportFileName } = require('./import-file');
+const { MAX_IMPORT_ROWS, inspectImportFile, safeImportFileName } = require('./import-file');
 
 function makeWorkbook(type, rows) {
   const workbook = XLSX.utils.book_new();
@@ -26,6 +26,18 @@ test('accepts both supported Excel workbook formats', () => {
     const result = inspectImportFile(`participants.${type}`, bytes.toString('base64'));
     assert.deepEqual(result.rows, [['FMC-001']]);
   }
+});
+
+test('accepts attendance imports larger than 5,000 rows within the configured limit', () => {
+  const rows = ['Sponsored Child ID', ...Array(13_441).fill('1')].join('\n');
+  const result = inspectImportFile('attendance.csv', Buffer.from(rows).toString('base64'));
+  assert.equal(result.rows.length, 13_441);
+
+  const tooManyRows = ['Sponsored Child ID', ...Array(MAX_IMPORT_ROWS + 1).fill('1')].join('\n');
+  assert.throws(
+    () => inspectImportFile('attendance.csv', Buffer.from(tooManyRows).toString('base64')),
+    /20,000 data rows/,
+  );
 });
 
 test('rejects unsupported, mismatched, oversized, and formula-bearing files', () => {

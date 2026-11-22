@@ -1,7 +1,7 @@
 const XLSX = require('@e965/xlsx');
 
 const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
-const MAX_IMPORT_ROWS = 5000;
+const MAX_IMPORT_ROWS = 20000;
 const MAX_IMPORT_COLUMNS = 100;
 
 function safeImportFileName(value) {
@@ -78,7 +78,7 @@ function inspectImportFile(fileNameValue, fileDataValue) {
   });
   const dataRows = grid.slice(1);
   if (headers.length > MAX_IMPORT_COLUMNS || dataRows.length > MAX_IMPORT_ROWS) {
-    throw importFileError('Files may contain at most 100 columns and 5,000 data rows');
+    throw importFileError(`Files may contain at most ${MAX_IMPORT_COLUMNS} columns and ${MAX_IMPORT_ROWS.toLocaleString('en-US')} data rows`);
   }
   return {
     fileName,
@@ -90,6 +90,7 @@ function inspectImportFile(fileNameValue, fileDataValue) {
 
 module.exports = {
   MAX_IMPORT_BYTES,
+  MAX_IMPORT_ROWS,
   inspectImportFile,
   safeImportFileName,
 };

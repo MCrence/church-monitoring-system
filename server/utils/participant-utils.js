@@ -90,8 +90,6 @@ function participantRegistrationErrors(body, educationLevels, gradeLevelsByEduca
   const guardianPhone = text('emergencyContactPhone');
   if (!guardianPhone) {
     errors.emergencyContactPhone = 'Guardian contact number is required.';
-  } else if (!/^09[0-9]{9}$/.test(guardianPhone)) {
-    errors.emergencyContactPhone = 'Guardian contact number must be 11 digits and start with 09.';
   }
 
   const dateOfBirth = text('dateOfBirth');

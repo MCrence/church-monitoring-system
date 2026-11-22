@@ -6,7 +6,7 @@ const { summarizeAtRiskParticipants } = require('./at-risk-summary');
 test('counts unique at-risk sponsored participants across status and predictive categories', () => {
   const result = summarizeAtRiskParticipants([
     { id: 1, participationStatus: 'WARNING' },
-    { id: 2, participationStatus: 'SECOND_CHANCE' },
+    { id: 2, participationStatus: 'ACTIVE' },
     { id: 3, participationStatus: 'GROUNDS_FOR_DEPARTURE' },
     { id: 4, participationStatus: 'ACTIVE' },
     { id: 5, participationStatus: 'REMOVED_FROM_SPONSORSHIP' },
@@ -19,11 +19,11 @@ test('counts unique at-risk sponsored participants across status and predictive 
   ]);
 
   assert.deepEqual(result, {
-    warning: 2,
+    warning: 1,
     groundsForDeparture: 1,
     mediumPredictiveRisk: 2,
     highPredictiveRisk: 1,
-    total: 4,
+    total: 3,
     predictiveDataAvailable: true,
   });
 });

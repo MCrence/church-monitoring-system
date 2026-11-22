@@ -119,33 +119,25 @@ test('requires all registration fields and applies education-dependent requireme
   );
 });
 
-test('requires strict 09-prefixed 11-digit guardian phone numbers', () => {
-  const validNumbers = ['09123456789', '09051234567'];
-  for (const emergencyContactPhone of validNumbers) {
+test('requires a guardian contact but accepts different number formats', () => {
+  const acceptedNumbers = [
+    '09123456789',
+    '+639123456789',
+    '02 8123 4567',
+    '123',
+    'contact@example.org',
+  ];
+  for (const emergencyContactPhone of acceptedNumbers) {
     assert.equal(
       participantRegistrationErrors({ ...validRegistration, emergencyContactPhone }, educationLevels, grades, registrationToday).emergencyContactPhone,
       undefined,
-      `${emergencyContactPhone} should be accepted`,
+      `${emergencyContactPhone} should be accepted without format validation`,
     );
   }
-  const invalidNumbers = [
-    '0912345678',
-    '091234567890',
-    '+639123456789',
-    '639123456789',
-    '09-1234-56789',
-    '09ABC456789',
-    '09 123456789',
-    '12345678901',
-    '88123456789',
-  ];
-  for (const emergencyContactPhone of invalidNumbers) {
-    assert.equal(
-      participantRegistrationErrors({ ...validRegistration, emergencyContactPhone }, educationLevels, grades, registrationToday).emergencyContactPhone,
-      'Guardian contact number must be 11 digits and start with 09.',
-      `${emergencyContactPhone} should be rejected`,
-    );
-  }
+  assert.equal(
+    participantRegistrationErrors({ ...validRegistration, emergencyContactPhone: '' }, educationLevels, grades, registrationToday).emergencyContactPhone,
+    'Guardian contact number is required.',
+  );
 });
 
 test('validates names, dates of birth, addresses, school, and health values', () => {
