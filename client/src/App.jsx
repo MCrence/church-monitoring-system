@@ -6522,6 +6522,7 @@ function SponsoredCare({ user, onViewHistory }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [closingProfile, setClosingProfile] = useState(false);
 
   useEffect(() => {
     if (!selectedId) return undefined;
@@ -6569,6 +6570,7 @@ function SponsoredCare({ user, onViewHistory }) {
   const statusClass = (status) => String(status || "WARNING").toLowerCase().replaceAll("_", "-");
   const openChild = async (entry) => {
     const requestId = ++childDetailsRequest.current;
+    setClosingProfile(false);
     setSelectedId(entry.id);
     setDetails(null);
     setGrowthUpdates([]);
@@ -6606,10 +6608,19 @@ function SponsoredCare({ user, onViewHistory }) {
       if (requestId === childDetailsRequest.current) setGrowthUpdatesLoading(false);
     }
   };
-  const closeChild = () => {
-    childDetailsRequest.current += 1;
+  const finishClosingChild = () => {
     setSelectedId(null);
     setGrowthFormOpen(false);
+    setClosingProfile(false);
+  };
+  const closeChild = () => {
+    if (closingProfile) return;
+    childDetailsRequest.current += 1;
+    if (!window.matchMedia || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      finishClosingChild();
+      return;
+    }
+    setClosingProfile(true);
   };
   const addGrowthUpdate = async (event) => {
     event.preventDefault();
@@ -6730,44 +6741,53 @@ function SponsoredCare({ user, onViewHistory }) {
 
   return (
     <>
+      <div className="sponsorship-dashboard">
       <section className="sponsorship-page-hero">
         <div className="sponsorship-page-hero-copy">
-          <span className="sponsorship-page-eyebrow">SPONSORED CHILD CARE</span>
+          <span className="sponsorship-page-eyebrow"><NavigationIcon name="sparkle" /> SPONSORED CHILD CARE</span>
           <h1>Every child, thoughtfully cared for.</h1>
           <p>Track attendance, growth, care notes, education, and participation follow-up in one place.</p>
         </div>
         <div className="sponsorship-hero-art" aria-hidden="true">
-          <span className="sponsorship-hero-note">2<small>activities each month</small></span>
+          <span className="sponsorship-hero-orbit sponsorship-hero-orbit-one" />
+          <span className="sponsorship-hero-orbit sponsorship-hero-orbit-two" />
+          <span className="sponsorship-hero-heart"><NavigationIcon name="sponsorship" /></span>
+          <span className="sponsorship-hero-note"><NavigationIcon name="events" />2<small>activities each month</small></span>
         </div>
       </section>
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
       {message && <div className="alert alert-success" role="status">{message}</div>}
       <section className="sponsorship-summary-grid participation-summary-grid" aria-label="Participation overview">
         {[
-          ["Active children", children.filter((entry) => entry.status === "ACTIVE").length],
-          ["Meeting monthly requirements", children.filter((entry) => entry.monthly.required > 0 && entry.monthly.attended >= entry.monthly.required).length],
-          ["Attendance warnings", children.filter((entry) => entry.status === "WARNING").length],
-          ["Grounds for departure", children.filter((entry) => entry.status === "GROUNDS_FOR_DEPARTURE").length],
-          ["Inactive", children.filter((entry) => entry.status === "REMOVED_FROM_SPONSORSHIP").length],
-        ].map(([label, count]) => (
-          <article className="surface sponsorship-summary-card participation-summary-card" key={label}>
-            <span>{label}</span><strong>{loading ? "—" : formatCount(count)}</strong>
+          ["Active children", children.filter((entry) => entry.status === "ACTIVE").length, "participants", "summary-active", "In care now"],
+          ["Meeting monthly requirements", children.filter((entry) => entry.monthly.required > 0 && entry.monthly.attended >= entry.monthly.required).length, "check", "summary-meeting", "Monthly goal met"],
+          ["Attendance warnings", children.filter((entry) => entry.status === "WARNING").length, "warning", "summary-warning", "Needs follow-up"],
+          ["Grounds for departure", children.filter((entry) => entry.status === "GROUNDS_FOR_DEPARTURE").length, "shield", "summary-grounds", "Review attendance"],
+          ["Inactive", children.filter((entry) => entry.status === "REMOVED_FROM_SPONSORSHIP").length, "lock", "summary-inactive", "Records retained"],
+        ].map(([label, count, icon, tone, detail]) => (
+          <article className={`surface sponsorship-summary-card participation-summary-card ${tone}`} key={label}>
+            <span><i aria-hidden="true"><NavigationIcon name={icon} /></i>{label}</span>
+            <strong>{loading ? "—" : formatCount(count)}</strong>
+            <small>{detail}</small>
           </article>
         ))}
       </section>
       <div className="sponsorship-workspace participation-workspace">
         <section className="surface sponsorship-child-list">
           <div className="sponsorship-list-heading">
-            <div><span className="sponsorship-section-eyebrow">{isGoer ? "YOUR GROUP" : "SPONSORED CHILD MONITORING"}</span><h2>Sponsored Children</h2></div>
+            <div className="sponsorship-list-title">
+              <span className="sponsorship-list-icon" aria-hidden="true"><NavigationIcon name="participants" /></span>
+              <div><span className="sponsorship-section-eyebrow">{isGoer ? "YOUR GROUP" : "SPONSORED CHILD MONITORING"}</span><h2>Sponsored Children</h2></div>
+            </div>
             <span className="sponsorship-list-count">{visibleChildren.length} <small>children</small></span>
           </div>
           <div className="sponsorship-search-wrap">
-            <span aria-hidden="true">⌕</span>
+            <span aria-hidden="true"><NavigationIcon name="search" /></span>
             <input className="form-control" aria-label="Search children" placeholder="Find a child by name or ID" value={query} onChange={(event) => setQuery(event.target.value)} />
           </div>
             <div className="participation-list-controls">
               <label>
-                <span>Participation</span>
+                <span><NavigationIcon name="shield" /> Participation</span>
                 <select className="form-select" aria-label="Filter by participation status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
                   <option value="all">All statuses</option>
                   <option value="ACTIVE">Active</option>
@@ -6777,7 +6797,7 @@ function SponsoredCare({ user, onViewHistory }) {
                 </select>
               </label>
               <label>
-                <span>Sort by</span>
+                <span><NavigationIcon name="analytics" /> Sort by</span>
                 <select className="form-select" aria-label="Sort children" value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
                   <option value="attention">Needs attention</option>
                   <option value="name">Name</option>
@@ -6794,16 +6814,20 @@ function SponsoredCare({ user, onViewHistory }) {
                 <small>{entry.monthly.key}: Required {entry.monthly.required} · Attended {entry.monthly.attended} · Absent {entry.monthly.absent} · {entry.monthly.required ? `${entry.monthly.attendanceRate}%` : "—"}</small>
               </span>
               <span className={`participation-status-badge ${statusClass(entry.status)}`}>{PARTICIPATION_STATUS_LABELS[entry.status] || entry.status}</span>
+              <span className="sponsorship-child-arrow" aria-hidden="true"><NavigationIcon name="arrowRight" /></span>
             </button>
           ))}
           {!loading && !visibleChildren.length && <div className="sponsorship-no-results"><strong>No children match these filters</strong><p>Try another name, ID, or participation status.</p></div>}
         </section>
       </div>
+      </div>
       {child && createPortal((
-        <div className="participant-modal-backdrop child-profile-backdrop" onMouseDown={(event) => {
+        <div className={`participant-modal-backdrop child-profile-backdrop ${closingProfile ? "is-closing" : ""}`} onMouseDown={(event) => {
           if (event.target === event.currentTarget && !confirmRemoval && !confirmInactive && !confirmSecondChance) closeChild();
+        }} onAnimationEnd={(event) => {
+          if (event.target === event.currentTarget && closingProfile) finishClosingChild();
         }}>
-          <section className="participant-modal child-profile-modal participation-profile-modal" role="dialog" aria-modal="true" aria-labelledby="participation-profile-title">
+          <section className={`participant-modal child-profile-modal participation-profile-modal ${closingProfile ? "is-closing" : ""}`} role="dialog" aria-modal="true" aria-labelledby="participation-profile-title">
             <header className="participant-modal-header">
               <div className="sponsorship-profile-summary">
                 <span className="sponsorship-profile-avatar">{initials}</span>
@@ -6817,17 +6841,17 @@ function SponsoredCare({ user, onViewHistory }) {
             </header>
             <div className="participation-detail-status">
               <span className={`participation-status-badge ${statusClass(child.status)}`}>{PARTICIPATION_STATUS_LABELS[child.status] || child.status}</span>
-              <span>Registered {formatParticipantHistoryDate(child.registrationDate)}</span>
+              <span className="participation-registration-date"><NavigationIcon name="clock" /> Registered {formatParticipantHistoryDate(child.registrationDate)}</span>
             </div>
             {error && <div className="alert alert-danger" role="alert">{error}</div>}
             {message && <div className="alert alert-success" role="status">{message}</div>}
             <nav className="participation-profile-tabs" aria-label="Child care record sections">
               {[
-                ["attendance", "Attendance"],
-                ["care", "Growth & care"],
-                ["education", "Education"],
-                ["followup", "Follow-up"],
-              ].map(([tab, label]) => (
+                ["attendance", "Attendance", "events"],
+                ["care", "Growth & care", "sponsorship"],
+                ["education", "Education", "reports"],
+                ["followup", "Follow-up", "warning"],
+              ].map(([tab, label, icon]) => (
                 <button
                   type="button"
                   className={profileTab === tab ? "active" : ""}
@@ -6835,6 +6859,7 @@ function SponsoredCare({ user, onViewHistory }) {
                   key={tab}
                   onClick={() => setProfileTab(tab)}
                 >
+                  <NavigationIcon name={icon} />
                   {label}
                 </button>
               ))}
@@ -6847,16 +6872,16 @@ function SponsoredCare({ user, onViewHistory }) {
                 <span className={`participation-status-badge ${statusClass(monthly.status)}`}>{monthly.required === 0 ? "No events scheduled" : monthly.status === "ACTIVE" ? "Compliant" : "Warning"}</span>
               </div>
               <div className="participation-number-grid">
-                {[["Required activities", monthly.required], ["Attended", monthly.attended], ["Absent", monthly.absent], ["Attendance", monthly.required ? `${monthly.attendanceRate}%` : "—"]].map(([label, value]) => (
-                  <div key={label}><small>{label}</small><strong>{value}</strong></div>
+                {[["Required activities", monthly.required, "events"], ["Attended", monthly.attended, "check"], ["Absent", monthly.absent, "warning"], ["Attendance", monthly.required ? `${monthly.attendanceRate}%` : "—", "analytics"]].map(([label, value, icon]) => (
+                  <div key={label}><small><NavigationIcon name={icon} />{label}</small><strong>{value}</strong></div>
                 ))}
               </div>
             </section>
             <section className="surface participation-month-card">
-              <div className="participant-history-section-heading"><h3>Current-year attendance</h3><strong>{child.currentYear.year}</strong></div>
+              <div className="participant-history-section-heading"><h3><NavigationIcon name="analytics" />Current-year attendance</h3><strong>{child.currentYear.year}</strong></div>
               <div className="participation-number-grid">
-                {[["Scheduled events", child.currentYear.required], ["Present", child.currentYear.attended], ["Absences", child.currentYear.absent], ["Attendance", child.currentYear.required ? `${child.currentYear.attendanceRate}%` : "—"], ["Absence rate", child.currentYear.required ? `${child.currentYear.absenceRate}%` : "—"]].map(([label, value]) => (
-                  <div key={label}><small>{label}</small><strong>{value}</strong></div>
+                {[["Scheduled events", child.currentYear.required, "events"], ["Present", child.currentYear.attended, "check"], ["Absences", child.currentYear.absent, "warning"], ["Attendance", child.currentYear.required ? `${child.currentYear.attendanceRate}%` : "—", "analytics"], ["Absence rate", child.currentYear.required ? `${child.currentYear.absenceRate}%` : "—", "clock"]].map(([label, value, icon]) => (
+                  <div key={label}><small><NavigationIcon name={icon} />{label}</small><strong>{value}</strong></div>
                 ))}
               </div>
               <p className="participation-lifetime">Lifetime absences: <strong>{child.lifetime.absent}</strong></p>
@@ -6867,7 +6892,7 @@ function SponsoredCare({ user, onViewHistory }) {
               <>
             {child.status === "GROUNDS_FOR_DEPARTURE" && (
               <section className="participation-action-panel grounds-action-panel">
-                <h3>Grounds for Departure</h3>
+                <h3><NavigationIcon name="warning" />Grounds for Departure</h3>
                 <p>Current-year absences: <strong>{child.currentYear.absent}</strong> · Scheduled events: <strong>{child.currentYear.required}</strong> · Attendance rate: <strong>{child.currentYear.required ? `${child.currentYear.attendanceRate}%` : "N/A"}</strong>.</p>
                 <p>Grounds for Departure does not automatically make this child Inactive.</p>
                 {canManage && (
@@ -6875,7 +6900,7 @@ function SponsoredCare({ user, onViewHistory }) {
                     <label className="form-label" htmlFor="second-chance-reason">Reason or notes (optional)</label>
                     <textarea id="second-chance-reason" className="form-control" rows="2" maxLength="1000" value={secondChanceReason} onChange={(event) => setSecondChanceReason(event.target.value)} />
                     <div className="grounds-action-buttons">
-                      <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? "Saving..." : "Give Second Chance"}</button>
+                      <button type="submit" className="btn btn-primary" disabled={saving}><NavigationIcon name={saving ? "clock" : "sparkle"} />{saving ? "Saving..." : "Give Second Chance"}</button>
                       {canSetInactive && <button
                         type="button"
                         className="btn btn-outline-danger"
@@ -6887,7 +6912,7 @@ function SponsoredCare({ user, onViewHistory }) {
                           setConfirmInactive(true);
                         }}
                       >
-                        Set to Inactive
+                        <NavigationIcon name="lock" />Set to Inactive
                       </button>}
                     </div>
                   </form>
@@ -6898,7 +6923,7 @@ function SponsoredCare({ user, onViewHistory }) {
             )}
             {profileTab === "followup" && child.status === "REMOVED_FROM_SPONSORSHIP" && (
               <section className="participation-action-panel">
-                <h3>Inactive sponsored child</h3>
+                <h3><NavigationIcon name="lock" />Inactive sponsored child</h3>
                 <p>Reason: <strong>{child.inactiveReason || "Not recorded"}</strong></p>
                 {child.inactiveNotes && <p>Notes: {child.inactiveNotes}</p>}
                 {child.inactiveAt && <p>Changed {formatParticipantHistoryDate(child.inactiveAt)} by {child.inactiveAdministrator || "System Administrator"}.</p>}
@@ -6906,7 +6931,7 @@ function SponsoredCare({ user, onViewHistory }) {
             )}
             {profileTab === "followup" && child.status === "ACTIVE" && child.secondChance && (
               <section className="participation-action-panel second-chance-action-panel">
-                <h3>Active Status Confirmed</h3>
+                <h3><NavigationIcon name="check" />Active Status Confirmed</h3>
                 <p>Second chance granted {formatParticipantHistoryDate(child.secondChance.createdAt)} by {child.secondChance.administrator}.</p>
                 {child.secondChance.reason && <p>Reason: {child.secondChance.reason}</p>}
                 <p>The child remains Active until a future attendance evaluation or authorized administrative action changes the status.</p>
@@ -6914,7 +6939,7 @@ function SponsoredCare({ user, onViewHistory }) {
             )}
             {profileTab === "followup" && (
               <section className="surface participation-history-section">
-                <div className="participant-history-section-heading"><h3>Status History</h3></div>
+                <div className="participant-history-section-heading"><h3><NavigationIcon name="clock" />Status History</h3></div>
                 {childStatusHistory.length ? (
                   <ul className="participant-history-timeline">
                     {childStatusHistory.map((entry) => (
@@ -6935,7 +6960,7 @@ function SponsoredCare({ user, onViewHistory }) {
             <section className="surface participation-history-section growth-activity-section">
               <div className="participant-history-section-heading">
                 <div>
-                  <h3>Growth &amp; Activity</h3>
+                <h3><NavigationIcon name="sponsorship" />Growth &amp; Activity</h3>
                   <p>Record growth measurements and care notes. Event attendance is tracked from Check-in.</p>
                 </div>
                 {canRecordCare && (
@@ -6943,7 +6968,7 @@ function SponsoredCare({ user, onViewHistory }) {
                     setGrowthFormError("");
                     setGrowthFormOpen(true);
                   }}>
-                    + Add Update
+                    <NavigationIcon name="plus" />Add Update
                   </button>
                 )}
               </div>
@@ -7022,7 +7047,7 @@ function SponsoredCare({ user, onViewHistory }) {
             {profileTab === "education" && (
               <section className="surface participation-history-section">
                 <div className="participant-history-section-heading">
-                  <div><h3>Education history</h3><p className="text-secondary mb-0">Education records associated with this child.</p></div>
+                  <div><h3><NavigationIcon name="reports" />Education history</h3><p className="text-secondary mb-0">Education records associated with this child.</p></div>
                   {onViewHistory && <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => { closeChild(); onViewHistory(child.id); }}>View full sponsored child history</button>}
                 </div>
                 <div className="participation-education-current">
@@ -7043,20 +7068,6 @@ function SponsoredCare({ user, onViewHistory }) {
                   </ul>
                 ) : <p className="text-secondary mt-3 mb-0">No education history records found.</p>}
               </section>
-            )}
-            {profileTab === "followup" && (
-              <>
-            {child.history.length > 0 && (
-              <section className="surface participation-history-section">
-                <h3>Status history</h3>
-                <ul className="participation-event-history">
-                  {child.history.map((entry) => (
-                    <li key={entry.id}><span className="attendance-check">✓</span><div><strong>{PARTICIPATION_STATUS_LABELS[entry.currentStatus] || entry.currentStatus}</strong><small>{formatParticipantHistoryDate(entry.createdAt)} · {entry.administrator}{entry.reason ? ` · ${entry.reason}` : ""}</small></div></li>
-                  ))}
-                </ul>
-              </section>
-            )}
-              </>
             )}
           </section>
         </div>

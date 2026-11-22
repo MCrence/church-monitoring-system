@@ -2234,3 +2234,163 @@ label.form-label:has(+ textarea[required])::after{
  .checkin-settings-card:hover,.checkin-settings-heading:hover .checkin-settings-icon,.checkin-location:hover,.checkin-submit-button:hover:not(:disabled),.checkin-submit-button:hover:not(:disabled) .checkin-submit-arrow{transform:none}
  .checkin-submit-button::before{display:none}
 }
+
+.sponsorship-dashboard{position:relative;isolation:isolate}
+.sponsorship-dashboard::before{position:absolute;z-index:-1;inset:-22px -24px 0;border-radius:32px;background:radial-gradient(ellipse at 4% 18%,rgba(53,150,206,.08),transparent 30%),radial-gradient(ellipse at 96% 58%,rgba(168,232,79,.075),transparent 27%),linear-gradient(180deg,rgba(233,243,251,.55),rgba(243,247,251,0));content:"";pointer-events:none;animation:sponsorship-background-drift 12s ease-in-out infinite alternate}
+.sponsorship-page-hero{background-size:190% 150%,220% 100%;background-position:100% 0,0 50%;animation:sponsorship-hero-flow 10s ease-in-out infinite alternate}
+.sponsorship-page-hero-copy{animation:sponsorship-copy-enter .42s cubic-bezier(.2,.75,.25,1) both}
+.sponsorship-page-eyebrow{display:flex;align-items:center;gap:7px}
+.sponsorship-page-eyebrow .navigation-icon{width:13px;height:13px;color:#c6ff83}
+.sponsorship-hero-art{perspective:500px}
+.sponsorship-hero-orbit{animation:sponsorship-orbit-float 5s ease-in-out infinite alternate}
+.sponsorship-hero-orbit-two{animation-delay:-2.2s}
+.sponsorship-hero-heart{transform-style:preserve-3d;animation:sponsorship-heart-float 4s ease-in-out infinite}
+.sponsorship-hero-heart .navigation-icon{width:43px;height:43px;stroke-width:1.35}
+.sponsorship-hero-note{display:grid;grid-template-columns:15px auto;align-items:center;column-gap:5px;animation:sponsorship-chip-float 3.5s ease-in-out infinite}
+.sponsorship-hero-note>.navigation-icon{width:14px;height:14px;color:#caff83}
+.sponsorship-hero-note small{grid-column:1/-1}
+.sponsorship-dashboard .participation-summary-card{position:relative;display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-areas:"label label" "value detail";align-items:center;gap:8px 10px;min-height:112px;overflow:hidden;padding:14px 15px;border:1px solid #e0e9f2;border-radius:16px;background:linear-gradient(145deg,#fff,#f8fbfe);box-shadow:0 7px 20px rgba(13,54,93,.05);text-align:left;text-transform:none;cursor:default;animation:sponsorship-card-enter .4s cubic-bezier(.2,.75,.25,1) both;transition:transform .22s ease,border-color .22s ease,box-shadow .22s ease}
+.sponsorship-dashboard .participation-summary-card:nth-child(2){animation-delay:.045s}
+.sponsorship-dashboard .participation-summary-card:nth-child(3){animation-delay:.09s}
+.sponsorship-dashboard .participation-summary-card:nth-child(4){animation-delay:.135s}
+.sponsorship-dashboard .participation-summary-card:nth-child(5){animation-delay:.18s}
+.sponsorship-dashboard .participation-summary-card::before{position:absolute;top:0;left:0;width:100%;height:3px;background:linear-gradient(90deg,#258c4c,#a4d886);content:""}
+.sponsorship-dashboard .participation-summary-card.summary-meeting::before{background:linear-gradient(90deg,#2581b5,#8ccde4)}
+.sponsorship-dashboard .participation-summary-card.summary-warning::before{background:linear-gradient(90deg,#d9a728,#f0d075)}
+.sponsorship-dashboard .participation-summary-card.summary-grounds::before{background:linear-gradient(90deg,#cf343c,#efa29e)}
+.sponsorship-dashboard .participation-summary-card.summary-inactive::before{background:linear-gradient(90deg,#454d57,#a6adb5)}
+.sponsorship-dashboard .participation-summary-card:hover{transform:translateY(-3px);border-color:#b9d4e7;box-shadow:0 14px 28px rgba(14,53,91,.1)}
+.sponsorship-dashboard .participation-summary-card::after{position:absolute;right:-29px;bottom:-38px;width:94px;height:94px;border:1px solid rgba(32,112,166,.08);border-radius:50%;box-shadow:0 0 0 13px rgba(32,112,166,.025),0 0 0 27px rgba(32,112,166,.02);content:"";pointer-events:none}
+.sponsorship-dashboard .participation-summary-card>span{position:relative;z-index:1;grid-area:label;display:flex;min-width:0;align-items:center;gap:8px;color:#526980;font-size:11px;font-weight:650;line-height:1.35}
+.sponsorship-dashboard .participation-summary-card>span::before{display:none}
+.sponsorship-dashboard .participation-summary-card>span i{display:grid;width:29px;height:29px;flex:0 0 29px;place-items:center;border:1px solid #dceaf4;border-radius:10px;background:linear-gradient(145deg,#edf7fd,#e2f0f8);color:#1d6aa4;transition:transform .22s ease,box-shadow .22s ease}
+.sponsorship-dashboard .participation-summary-card>span i .navigation-icon{width:15px;height:15px}
+.sponsorship-dashboard .participation-summary-card>strong{position:relative;z-index:1;grid-area:value;margin:0;color:#092c62;font:600 30px/1 'Space Grotesk'}
+.sponsorship-dashboard .participation-summary-card>small{position:relative;z-index:1;grid-area:detail;align-self:center;color:#71849a;font-size:9.5px;line-height:1.35;text-align:right}
+.sponsorship-dashboard .participation-summary-card.summary-active>span i{border-color:#d5ebd8;background:linear-gradient(145deg,#f0f9ee,#e0f2df);color:#34834a}
+.sponsorship-dashboard .participation-summary-card.summary-meeting>span i{border-color:#d2e8f4;background:linear-gradient(145deg,#edf8ff,#dceff9);color:#1c74a7}
+.sponsorship-dashboard .participation-summary-card.summary-warning>span i{border-color:#f1e0b7;background:linear-gradient(145deg,#fff9e8,#fff0cf);color:#a46b10}
+.sponsorship-dashboard .participation-summary-card.summary-grounds>span i{border-color:#f0d4d1;background:linear-gradient(145deg,#fff3f1,#fde4e1);color:#bd4541}
+.sponsorship-dashboard .participation-summary-card.summary-inactive>span i{border-color:#dfe3e8;background:linear-gradient(145deg,#f5f6f7,#e9ecef);color:#4d5865}
+.sponsorship-dashboard .participation-summary-card:hover>span i{box-shadow:0 5px 12px rgba(20,73,114,.12);transform:rotate(-5deg) scale(1.08)}
+.sponsorship-list-title{display:flex;align-items:center;gap:10px}
+.sponsorship-list-title>div{min-width:0}
+.sponsorship-list-heading .sponsorship-list-icon{display:grid;width:36px;height:36px;flex:0 0 36px;place-items:center;margin:0;border:1px solid #d9eaf5;border-radius:12px;background:linear-gradient(145deg,#eef8ff,#dceefa);color:#17699d}
+.sponsorship-list-icon .navigation-icon{width:19px;height:19px}
+.sponsorship-list-title .sponsorship-section-eyebrow{margin:0;color:#758ba1;font-size:8px;letter-spacing:1.5px}
+.sponsorship-search-wrap{padding:2px;border-radius:12px;background:linear-gradient(110deg,rgba(31,118,173,.14),rgba(168,232,79,.13));transition:box-shadow .2s ease,background .2s ease}
+.sponsorship-search-wrap:focus-within{background:linear-gradient(110deg,rgba(31,118,173,.34),rgba(168,232,79,.3));box-shadow:0 0 0 3px rgba(55,139,197,.09)}
+.sponsorship-search-wrap>span{left:13px;display:grid;place-items:center}
+.sponsorship-search-wrap>span .navigation-icon{width:16px;height:16px}
+.sponsorship-search-wrap .form-control{border:0;background:#fff;box-shadow:inset 0 1px rgba(255,255,255,.9)}
+.sponsorship-search-wrap .form-control:focus{box-shadow:none}
+.participation-list-controls label>span{display:flex;align-items:center;gap:6px}
+.participation-list-controls label>span .navigation-icon{width:13px;height:13px;color:#4384a8}
+.participation-workspace .sponsorship-child-list{border-color:#dce7f0;background:linear-gradient(160deg,rgba(255,255,255,.98),rgba(249,252,255,.97));box-shadow:0 12px 32px rgba(14,53,91,.06)}
+.participation-workspace .sponsorship-child-row{min-height:68px;border-color:transparent;animation:sponsorship-row-enter .34s cubic-bezier(.2,.75,.25,1) both}
+.participation-workspace .sponsorship-child-row:nth-of-type(2){animation-delay:.035s}
+.participation-workspace .sponsorship-child-row:nth-of-type(3){animation-delay:.07s}
+.participation-workspace .sponsorship-child-row:nth-of-type(4){animation-delay:.105s}
+.participation-workspace .sponsorship-child-row:nth-of-type(5){animation-delay:.14s}
+.participation-workspace .sponsorship-child-row:hover,.participation-workspace .sponsorship-child-row.selected{border-color:#cfe2ef;background:linear-gradient(110deg,#f0f8ff,#fff);box-shadow:0 8px 18px rgba(24,84,132,.07);transform:translateY(-1px)}
+.participation-workspace .sponsorship-child-copy>strong{font-size:13px;line-height:1.4}
+.participation-workspace .sponsorship-child-copy>small{color:#607991;font-size:10px;line-height:1.5}
+.participation-workspace .sponsorship-child-avatar{border:1px solid #d2e6f4;box-shadow:inset 0 1px rgba(255,255,255,.85);transition:transform .2s ease,box-shadow .2s ease}
+.participation-workspace .sponsorship-child-row:hover .sponsorship-child-avatar,.participation-workspace .sponsorship-child-row.selected .sponsorship-child-avatar{box-shadow:0 6px 13px rgba(25,92,139,.14);transform:rotate(-3deg) scale(1.05)}
+.sponsorship-child-arrow{display:grid;width:28px;height:28px;flex:0 0 28px;place-items:center;border:1px solid #e0eaf2;border-radius:9px;background:#f7fafc;color:#6b91ab;transition:transform .2s ease,background .2s ease,color .2s ease}
+.sponsorship-child-arrow .navigation-icon{width:15px;height:15px}
+.sponsorship-child-row:hover .sponsorship-child-arrow,.sponsorship-child-row.selected .sponsorship-child-arrow{border-color:#cfe4f2;background:#e8f5fc;color:#17699d;transform:translateX(3px)}
+.participation-profile-modal{overflow-x:hidden;border-color:rgba(255,255,255,.86);border-radius:20px;background:linear-gradient(145deg,#fff,#f9fbfe);box-shadow:0 30px 90px rgba(3,23,54,.38)}
+.participation-profile-modal .participant-modal-header{position:relative;isolation:isolate;overflow:hidden;align-items:center;margin:-26px -30px 17px;padding:23px 30px 20px;border:0;border-radius:19px 19px 0 0;background:radial-gradient(circle at 88% 18%,rgba(102,188,241,.3),transparent 33%),linear-gradient(118deg,#062554 0%,#0a4d85 58%,#0879c9 100%);box-shadow:inset 0 -1px rgba(255,255,255,.13)}
+.participation-profile-modal .participant-modal-header::before{position:absolute;z-index:-1;top:-85px;right:-24px;width:205px;height:205px;border:1px solid rgba(255,255,255,.14);border-radius:50%;box-shadow:0 0 0 20px rgba(255,255,255,.035),0 0 0 43px rgba(255,255,255,.025);content:"";animation:sponsorship-modal-orbit 7s ease-in-out infinite alternate}
+.participation-profile-modal .participant-modal-header::after{position:absolute;z-index:-1;top:-60%;left:-70%;width:35%;height:220%;background:linear-gradient(90deg,transparent,rgba(255,255,255,.1),transparent);content:"";pointer-events:none;transform:rotate(18deg);animation:sponsorship-modal-sheen 8s ease-in-out .5s infinite}
+.participation-profile-modal .participant-modal-header .sponsorship-profile-summary,.participation-profile-modal .participant-modal-header>.btn-close{position:relative;z-index:1}
+.participation-profile-modal .participant-modal-header .sponsorship-profile-summary{min-width:0}
+.participation-profile-modal .participant-modal-header .sponsorship-profile-avatar{border:1px solid rgba(255,255,255,.7);box-shadow:0 8px 20px rgba(2,20,47,.2),inset 0 1px rgba(255,255,255,.9);transition:transform .22s ease,box-shadow .22s ease}
+.participation-profile-modal .participant-modal-header .sponsorship-profile-avatar:hover{box-shadow:0 11px 24px rgba(2,20,47,.24);transform:rotate(-4deg) scale(1.04)}
+.participation-profile-modal .participant-modal-header h2{color:#fff;font-size:25px;letter-spacing:-.4px}
+.participation-profile-modal .participant-modal-header .btn-close{filter:brightness(0) invert(1);opacity:.85}
+.participation-profile-modal .participant-modal-header .btn-close:hover{opacity:1;transform:rotate(90deg)}
+.participation-detail-status{min-height:42px;padding:8px 10px;border:1px solid #e3edf5;border-radius:11px;background:linear-gradient(110deg,#f7fbfe,#fff)}
+.participation-registration-date{display:inline-flex;align-items:center;gap:6px}
+.participation-registration-date .navigation-icon{width:14px;height:14px;color:#6a8da8}
+.participation-profile-tabs{position:sticky;z-index:2;top:-1px;padding:6px;border:1px solid #e1eaf2;border-radius:13px;background:rgba(250,252,254,.94);box-shadow:0 5px 14px rgba(16,54,88,.045);backdrop-filter:blur(10px)}
+.participation-profile-tabs button{display:inline-flex;align-items:center;gap:7px;border:1px solid transparent;border-radius:9px;transition:background .2s ease,color .2s ease,box-shadow .2s ease,transform .2s ease}
+.participation-profile-tabs button .navigation-icon{width:15px;height:15px;opacity:.72}
+.participation-profile-tabs button:hover,.participation-profile-tabs button.active{border-color:#d6e7f2;background:linear-gradient(145deg,#eaf5fc,#f5faff);box-shadow:0 3px 8px rgba(19,80,122,.07);color:#0c5d98}
+.participation-profile-tabs button.active .navigation-icon{color:#1876a8;opacity:1}
+.participation-profile-modal>.participation-month-card,.participation-profile-modal>.participation-history-section,.participation-profile-modal>.participation-action-panel{animation:sponsorship-panel-enter .24s cubic-bezier(.2,.75,.25,1) both}
+.participation-profile-modal .participant-history-section-heading h3{display:flex;align-items:center;gap:8px}
+.participation-profile-modal .participant-history-section-heading h3 .navigation-icon,.participation-profile-modal .participant-history-section-heading>h3 .navigation-icon{width:17px;height:17px;color:#287ca5}
+.participation-profile-modal .participation-number-grid>div{position:relative;overflow:hidden;border:1px solid #e6eef4;background:linear-gradient(145deg,#f7fbfe,#eef5fa);transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease}
+.participation-profile-modal .participation-number-grid>div:hover{border-color:#cddfea;box-shadow:0 7px 15px rgba(24,76,112,.07);transform:translateY(-2px)}
+.participation-profile-modal .participation-number-grid small{display:flex;align-items:center;gap:5px}
+.participation-profile-modal .participation-number-grid small .navigation-icon{width:12px;height:12px;color:#5e8eaa}
+.participation-profile-modal .participation-number-grid strong{font-size:21px}
+.participation-profile-modal .participation-action-panel{position:relative;overflow:hidden;border-radius:15px;box-shadow:0 8px 20px rgba(20,54,87,.045)}
+.participation-profile-modal .participation-action-panel::after{position:absolute;top:-42px;right:-36px;width:112px;height:112px;border:1px solid rgba(27,95,142,.1);border-radius:50%;box-shadow:0 0 0 15px rgba(27,95,142,.025);content:"";pointer-events:none}
+.participation-profile-modal .participation-action-panel h3{display:flex;align-items:center;gap:8px}
+.participation-profile-modal .participation-action-panel h3 .navigation-icon{width:19px;height:19px}
+.participation-profile-modal .grounds-action-panel h3 .navigation-icon{color:#a86a09}
+.participation-profile-modal .second-chance-action-panel h3 .navigation-icon{color:#287747}
+.participation-profile-modal .grounds-action-buttons .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;transition:transform .18s ease,box-shadow .18s ease}
+.participation-profile-modal .grounds-action-buttons .btn:hover:not(:disabled){box-shadow:0 7px 16px rgba(16,54,88,.14);transform:translateY(-2px)}
+.participation-profile-modal .grounds-action-buttons .navigation-icon{width:16px;height:16px}
+.participation-profile-modal .participant-history-timeline li{animation:sponsorship-timeline-enter .28s ease-out both}
+.participation-profile-modal .participant-history-timeline li:nth-child(2){animation-delay:.04s}
+.participation-profile-modal .participant-history-timeline li:nth-child(3){animation-delay:.08s}
+.participation-profile-modal .participant-history-timeline li:nth-child(4){animation-delay:.12s}
+.participation-profile-modal .participation-history-section,.participation-profile-modal .participation-month-card{border:1px solid #e1eaf2;border-radius:15px;background:linear-gradient(145deg,#fff,#fbfdff);box-shadow:0 6px 18px rgba(15,54,91,.035)}
+.participation-profile-modal .participant-history-timeline li::before{background:#1480bd;box-shadow:0 0 0 3px rgba(20,128,189,.12)}
+.participation-profile-modal:focus-visible{outline:2px solid #79b9dd;outline-offset:3px}
+.participation-profile-modal .btn:focus-visible,.participation-profile-modal .participation-profile-tabs button:focus-visible{outline:2px solid #5ea5cf;outline-offset:3px}
+.participation-profile-modal .btn-close:focus-visible{outline:2px solid #caff83;outline-offset:3px}
+.child-profile-backdrop.is-closing{animation:sponsorship-modal-backdrop-out .22s ease-in both}
+.participation-profile-modal:not(.is-closing){animation:sponsorship-modal-enter .28s cubic-bezier(.2,.75,.25,1) both}
+.participation-profile-modal.is-closing{animation:sponsorship-modal-exit .22s ease-in both}
+@keyframes sponsorship-background-drift{from{transform:translate3d(0,0,0)}to{transform:translate3d(0,-7px,0)}}
+@keyframes sponsorship-hero-flow{from{background-position:100% 0,0 50%}to{background-position:0 100%,100% 50%}}
+@keyframes sponsorship-copy-enter{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes sponsorship-orbit-float{from{transform:translate3d(-4px,2px,0) rotate(-25deg)}to{transform:translate3d(5px,-5px,0) rotate(-18deg)}}
+@keyframes sponsorship-heart-float{0%,100%{transform:rotate(-7deg) translateY(0)}50%{transform:rotate(-4deg) translateY(-5px)}}
+@keyframes sponsorship-chip-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+@keyframes sponsorship-card-enter{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:translateY(0)}}
+@keyframes sponsorship-row-enter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes sponsorship-panel-enter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes sponsorship-modal-backdrop-out{to{opacity:0}}
+@keyframes sponsorship-modal-enter{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes sponsorship-modal-exit{to{opacity:0;transform:translateY(7px) scale(.985)}}
+@keyframes sponsorship-modal-orbit{from{transform:translate3d(0,0,0) scale(.97)}to{transform:translate3d(-9px,7px,0) scale(1.04)}}
+@keyframes sponsorship-modal-sheen{0%,58%{left:-70%;opacity:0}70%{opacity:1}92%,100%{left:140%;opacity:0}}
+@keyframes sponsorship-timeline-enter{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:900px){
+ .sponsorship-dashboard .participation-summary-card{min-height:104px;padding:13px}
+}
+@media(max-width:640px){
+ .sponsorship-dashboard::before{inset:-12px -8px 0;border-radius:21px}
+ .sponsorship-hero-art{opacity:.55}
+ .sponsorship-dashboard .participation-summary-card{grid-template-columns:auto minmax(0,1fr);grid-template-areas:"label label" "value detail";min-height:94px;padding:11px}
+ .sponsorship-dashboard .participation-summary-card>span{gap:6px;font-size:9.5px}
+ .sponsorship-dashboard .participation-summary-card>span i{width:25px;height:25px;flex-basis:25px;border-radius:8px}
+ .sponsorship-dashboard .participation-summary-card>span i .navigation-icon{width:13px;height:13px}
+ .sponsorship-dashboard .participation-summary-card>strong{font-size:24px}
+ .sponsorship-dashboard .participation-summary-card>small{font-size:8.5px}
+ .sponsorship-list-title{gap:7px}
+ .sponsorship-list-heading .sponsorship-list-icon{width:30px;height:30px;flex-basis:30px;border-radius:10px}
+ .sponsorship-list-icon .navigation-icon{width:16px;height:16px}
+ .participation-workspace .sponsorship-child-row{gap:7px}
+ .participation-workspace .sponsorship-child-copy small{line-height:1.4}
+ .sponsorship-child-arrow{width:24px;height:24px;flex-basis:24px}
+ .participation-profile-modal .participant-modal-header{margin:-20px -17px 15px;padding:17px 17px 15px}
+ .participation-profile-modal .participant-modal-header .sponsorship-profile-avatar{width:43px;height:43px;border-radius:14px;font-size:14px}
+ .participation-profile-modal .participant-modal-header h2{font-size:19px}
+ .participation-profile-modal .participant-modal-header .sponsorship-profile-caption{font-size:8px;line-height:1.45}
+ .participation-profile-modal .participation-profile-tabs{top:-1px;gap:3px;padding:4px}
+ .participation-profile-modal .participation-profile-tabs button{gap:5px;padding:8px;font-size:10px}
+ .participation-profile-modal .participation-profile-tabs button .navigation-icon{width:13px;height:13px}
+}
+@media(prefers-reduced-motion:reduce){
+ .sponsorship-dashboard::before,.sponsorship-page-hero,.sponsorship-page-hero-copy,.sponsorship-hero-orbit,.sponsorship-hero-heart,.sponsorship-hero-note,.sponsorship-dashboard .participation-summary-card,.participation-workspace .sponsorship-child-row,.participation-profile-modal .participant-modal-header::before,.participation-profile-modal .participant-modal-header::after,.participation-profile-modal:not(.is-closing),.participation-profile-modal.is-closing,.child-profile-backdrop.is-closing,.participation-profile-modal>.participation-month-card,.participation-profile-modal>.participation-history-section,.participation-profile-modal>.participation-action-panel,.participation-profile-modal .participant-history-timeline li{animation:none!important}
+ .sponsorship-dashboard .participation-summary-card,.sponsorship-dashboard .participation-summary-card>span i,.sponsorship-search-wrap,.sponsorship-search-wrap .form-control,.participation-workspace .sponsorship-child-row,.participation-workspace .sponsorship-child-avatar,.sponsorship-child-arrow,.participation-profile-modal .participant-modal-header .sponsorship-profile-avatar,.participation-profile-modal .participation-number-grid>div,.participation-profile-modal .participation-profile-tabs button,.participation-profile-modal .grounds-action-buttons .btn{transition:none!important}
+ .sponsorship-dashboard .participation-summary-card:hover,.sponsorship-dashboard .participation-summary-card:hover>span i,.participation-workspace .sponsorship-child-row:hover,.participation-workspace .sponsorship-child-row.selected,.participation-workspace .sponsorship-child-row:hover .sponsorship-child-avatar,.participation-workspace .sponsorship-child-row.selected .sponsorship-child-avatar,.sponsorship-child-row:hover .sponsorship-child-arrow,.sponsorship-child-row.selected .sponsorship-child-arrow,.participation-profile-modal .participation-number-grid>div:hover{transform:none}
+}
