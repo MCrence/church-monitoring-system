@@ -4387,7 +4387,7 @@ app.get('/api/sponsorship/children/:id/history', authenticate, checkSponsorshipV
   } catch (error) { next(error); }
 });
 
-app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkRole(['Church Administrator']), checkPermission('sponsorship:manage'), async (req, res, next) => {
+app.post('/api/sponsorship/children/:id/second-chance', authenticate, checkRole(staffRoles), checkPermission('sponsorship:manage'), async (req, res, next) => {
   let connection;
   try {
     const participantId = Number(req.params.id);
@@ -4453,7 +4453,7 @@ const INACTIVE_REASONS = new Set([
   "Deceased",
 ]);
 
-app.post('/api/sponsorship/children/:id/set-inactive', authenticate, checkRole(['Church Administrator']), checkPermission('sponsorship:manage'), async (req, res, next) => {
+app.post('/api/sponsorship/children/:id/set-inactive', authenticate, checkRole(staffRoles), checkPermission('sponsorship:manage'), async (req, res, next) => {
   let connection;
   let transactionActive = false;
   try {
