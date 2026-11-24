@@ -64,7 +64,10 @@ const {
   canGoerUsePermission,
   isGoerRole,
 } = require('./utils/goer-access');
-const { getProductionSecurityErrors } = require('./utils/security-config');
+const {
+  getAllowedClientOrigins,
+  getProductionSecurityErrors,
+} = require('./utils/security-config');
 const {
   AUTH_SESSION_ABSOLUTE_SECONDS,
   AUTH_SESSION_IDLE_SECONDS,
@@ -101,6 +104,10 @@ if (!['Strict', 'Lax', 'None'].includes(authCookieSameSite)) {
 }
 const authCookieSecure = isProduction || authCookieSameSite === 'None';
 const clientOrigin = process.env.CLIENT_ORIGIN || 'https://localhost:5173';
+const clientOrigins = getAllowedClientOrigins({
+  ...process.env,
+  CLIENT_ORIGIN: clientOrigin,
+});
 const trustProxyHops = process.env.TRUST_PROXY_HOPS === undefined
   ? 0
   : Number(process.env.TRUST_PROXY_HOPS);
@@ -588,10 +595,16 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 app.use(helmet(isProduction
   ? { hsts: { maxAge: 31_536_000, includeSubDomains: true, preload: false } }
   : {}));
-app.use(cors({ origin: clientOrigin, credentials: true }));
+app.use(cors({
+  origin: (origin, callback) => callback(
+    null,
+    Boolean(origin && clientOrigins.has(origin)),
+  ),
+  credentials: true,
+}));
 app.use('/api', (req, res, next) => {
   const origin = req.get('origin');
-  if (origin && origin !== clientOrigin) {
+  if (origin && !clientOrigins.has(origin)) {
     return res.status(403).json({ error: 'Request origin is not allowed' });
   }
   next();
