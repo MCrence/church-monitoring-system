@@ -187,10 +187,15 @@ function summarizeParticipation({ registrationDate, events = [], checkIns = [], 
 
 function getParticipationStatus({
   currentYearAbsences = 0,
+  secondChanceAbsenceCount = null,
   removed = false,
 } = {}) {
-  if (removed) return "REMOVED_FROM_SPONSORSHIP";
-  const absences = Number(currentYearAbsences) || 0;
+  if (removed) return "INACTIVE";
+  const totalAbsences = Number(currentYearAbsences) || 0;
+  const absenceCheckpoint = Number(secondChanceAbsenceCount);
+  const absences = secondChanceAbsenceCount !== null && Number.isFinite(absenceCheckpoint)
+    ? Math.max(0, totalAbsences - absenceCheckpoint)
+    : totalAbsences;
   if (absences >= GROUNDS_FOR_DEPARTURE_ABSENCES) return "GROUNDS_FOR_DEPARTURE";
   if (absences >= 4) return "WARNING";
   return "ACTIVE";

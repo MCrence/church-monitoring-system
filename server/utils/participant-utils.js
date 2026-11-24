@@ -1,3 +1,24 @@
+function normalizePhilippineDateOnly(value) {
+  const offsetMilliseconds = 8 * 60 * 60 * 1000;
+  const isValidDateOnly = (date) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+    const parsed = new Date(`${date}T00:00:00.000Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
+  };
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime())
+      ? null
+      : new Date(value.getTime() + offsetMilliseconds).toISOString().slice(0, 10);
+  }
+  const input = String(value ?? '').trim();
+  if (isValidDateOnly(input)) return input;
+  const timestamp = input.match(/^(\d{4}-\d{2}-\d{2})T.+(?:Z|[+-]\d{2}:?\d{2})$/i);
+  if (!timestamp || !isValidDateOnly(timestamp[1])) return null;
+  const parsed = new Date(input);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return new Date(parsed.getTime() + offsetMilliseconds).toISOString().slice(0, 10);
+}
+
 function calculateAge(dateOfBirth, today = new Date()) {
   const date = String(dateOfBirth || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
@@ -168,6 +189,7 @@ function participantRegistrationErrors(body, educationLevels, gradeLevelsByEduca
 module.exports = {
   calculateAge,
   findPotentialParticipantDuplicates,
+  normalizePhilippineDateOnly,
   normalizeParticipantName,
   normalizePhilippineMobile,
   participantRegistrationErrors,

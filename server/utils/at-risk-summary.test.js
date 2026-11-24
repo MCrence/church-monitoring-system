@@ -9,7 +9,7 @@ test('counts unique at-risk sponsored participants across status and predictive 
     { id: 2, participationStatus: 'ACTIVE' },
     { id: 3, participationStatus: 'GROUNDS_FOR_DEPARTURE' },
     { id: 4, participationStatus: 'ACTIVE' },
-    { id: 5, participationStatus: 'REMOVED_FROM_SPONSORSHIP' },
+    { id: 5, participationStatus: 'INACTIVE' },
     { id: 6, participationStatus: 'INACTIVE' },
   ], [
     { participantId: 1, riskLevel: 'Medium' },

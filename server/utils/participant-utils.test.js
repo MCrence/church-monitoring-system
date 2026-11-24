@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   calculateAge,
   findPotentialParticipantDuplicates,
+  normalizePhilippineDateOnly,
   normalizeParticipantName,
   normalizePhilippineMobile,
   participantRegistrationErrors,
@@ -14,6 +15,14 @@ test('calculates age by calendar date and rejects invalid or future dates', () =
   assert.equal(calculateAge('2010-06-16', today), 14);
   assert.equal(calculateAge('2026-01-01', today), null);
   assert.equal(calculateAge('2010-02-30', today), null);
+});
+
+test('normalizes database date values and ISO timestamps to Philippine date-only values', () => {
+  assert.equal(normalizePhilippineDateOnly('2023-11-01'), '2023-11-01');
+  assert.equal(normalizePhilippineDateOnly('2023-10-31T16:00:00.000Z'), '2023-11-01');
+  assert.equal(normalizePhilippineDateOnly(new Date('2023-10-31T16:00:00.000Z')), '2023-11-01');
+  assert.equal(normalizePhilippineDateOnly('2023-02-30'), null);
+  assert.equal(normalizePhilippineDateOnly('not-a-date'), null);
 });
 
 test('normalizes Philippine mobile numbers to E.164', () => {

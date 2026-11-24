@@ -2,35 +2,98 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Html5Qrcode } from "html5-qrcode";
 import { Chart, registerables } from "chart.js";
-import { queueCheckin, syncQueuedCheckins } from "./offlineCheckinQueue";
+import { clearPendingCheckins } from "./clearLegacyCheckinQueue";
 import "./App.css";
 Chart.register(...registerables);
 
-// Robust API call helper that includes Authorization when available
+const api = "/api";
+const SESSION_IDLE_MILLISECONDS = 10 * 60 * 1000;
+const SESSION_WARNING_MILLISECONDS = 9 * 60 * 1000;
+const SESSION_ACTIVITY_STORAGE_KEY = "fmc_session_last_activity";
+const SESSION_EXPIRED_MESSAGE = "Your session has expired due to 10 minutes of inactivity. Please sign in again.";
+const refreshExcludedPaths = new Set([
+  "/api/auth/login",
+  "/api/auth/logout",
+  "/api/auth/session",
+  "/api/auth/refresh",
+]);
+let authSessionRequest = null;
+const dispatchAuthExpired = async (response) => {
+  const detail = await response.clone().json().catch(() => ({}));
+  window.dispatchEvent(new CustomEvent("auth-expired", { detail }));
+};
+const requestWithSession = async (url, options = {}, allowRefresh = true) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (navigator.onLine === false && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const error = new Error("You're offline. This action wasn't completed.");
+    error.isNetworkError = true;
+    throw error;
+  }
+  let response;
+  try {
+    response = await fetch(url, { ...options, credentials: "include" });
+  } catch (cause) {
+    const error = new Error(
+      navigator.onLine === false
+        ? "You're offline. This action wasn't completed."
+        : "The server could not be reached. This action wasn't completed.",
+    );
+    error.isNetworkError = true;
+    error.cause = cause;
+    throw error;
+  }
+  const requestPath = new URL(url, window.location.href).pathname;
+  if (response.status !== 401 || refreshExcludedPaths.has(requestPath)) return response;
+  if (!allowRefresh) {
+    await dispatchAuthExpired(response);
+    return response;
+  }
+  let refreshResponse;
+  try {
+    refreshResponse = await fetch(`${api}/auth/refresh`, {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch (cause) {
+    const error = new Error(
+      navigator.onLine === false
+        ? "You're offline. This action wasn't completed."
+        : "The server could not be reached. This action wasn't completed.",
+    );
+    error.isNetworkError = true;
+    error.cause = cause;
+    throw error;
+  }
+  if (refreshResponse.ok) return requestWithSession(url, options, false);
+  if (refreshResponse.status === 401) await dispatchAuthExpired(refreshResponse);
+  return refreshResponse;
+};
 const apiCall = async (p, o = {}) => {
   const existingHeaders = (o && o.headers) || {};
   const headers = {
     "Content-Type": "application/json",
     ...existingHeaders,
-    ...(localStorage.token ? { Authorization: `Bearer ${localStorage.token}` } : {}),
   };
-  const r = await fetch(api + p, { ...o, headers });
+  const r = await requestWithSession(api + p, { ...o, headers });
   const d = await r.json().catch(() => ({}));
-  if (r.status === 401) {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    window.dispatchEvent(new Event("auth-expired"));
-  }
   if (!r.ok) {
     const error = new Error(d.error || "Request failed");
     error.errors = d.errors || {};
     error.code = d.code || "";
     error.duplicates = Array.isArray(d.duplicates) ? d.duplicates : [];
+    error.status = r.status;
     throw error;
   }
   return d;
 };
-const api = "/api";
+const getAuthSession = () => {
+  if (!authSessionRequest) {
+    authSessionRequest = apiCall("/auth/session").finally(() => {
+      authSessionRequest = null;
+    });
+  }
+  return authSessionRequest;
+};
 const formatCount = (value) => {
   const num = Number(value);
   return Number.isFinite(num) ? num.toLocaleString() : "0";
@@ -117,11 +180,12 @@ const canAccessPage = (page, user) => {
 const PARTICIPATION_STATUSES = [
   { value: "ACTIVE", label: "Active" },
   { value: "WARNING", label: "Warning" },
-  { value: "GROUNDS_FOR_DEPARTURE", label: "Grounds for Departure" },
-  { value: "REMOVED_FROM_SPONSORSHIP", label: "Inactive" },
+  { value: "GROUNDS_FOR_DEPARTURE", label: "Ground for Departure" },
+  { value: "INACTIVE", label: "Inactive" },
 ];
 const normalizeParticipationStatus = (value) => {
-  const status = String(value || "ACTIVE").toUpperCase().replaceAll(" ", "_");
+  const rawStatus = String(value || "ACTIVE").toUpperCase().replaceAll(" ", "_");
+  const status = rawStatus === "REMOVED_FROM_SPONSORSHIP" ? "INACTIVE" : rawStatus;
   return PARTICIPATION_STATUSES.some((item) => item.value === status) ? status : "ACTIVE";
 };
 const participationStatusLabel = (value) =>
@@ -316,7 +380,7 @@ const Title = ({ e, t, d }) => (
 const Badge = ({ level }) => (
   <span className={`risk-badge ${level}`}>{level}</span>
 );
-function Login({ done, onBack }) {
+function Login({ done, onBack, sessionExpiredMessage }) {
   const [f, setF] = useState({ email: "", password: "" });
   const [err, setErr] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -329,9 +393,9 @@ function Login({ done, onBack }) {
         method: "POST",
         body: JSON.stringify(f),
       });
-      localStorage.token = d.token;
       localStorage.user = JSON.stringify(d.user);
-      done(d.user);
+      localStorage.removeItem("pendingLogout");
+      done(d.user, d.lastActivityAt);
     } catch (x) {
       setErr(x.message === "Invalid credentials"
         ? "Email or password is incorrect. Please try again."
@@ -360,6 +424,9 @@ function Login({ done, onBack }) {
           </div>
           <h1>Welcome back</h1>
           <p className="login-intro text-secondary mb-4"><span><NavigationIcon name="shield" /></span>Secure sponsored child monitoring</p>
+          {sessionExpiredMessage && (
+            <div className="alert alert-warning" role="status">{sessionExpiredMessage}</div>
+          )}
           <form onSubmit={submit} className="vstack gap-3">
             <label className="login-input-wrap">
               <NavigationIcon name="mail" />
@@ -639,9 +706,8 @@ function AccountSettings({ onUserUpdated }) {
         method: "PUT",
         body: JSON.stringify({ ...name, currentPassword, newPassword }),
       });
-      localStorage.token = result.token;
       localStorage.user = JSON.stringify(result.user);
-      onUserUpdated(result.user);
+      onUserUpdated(result.user, result.lastActivityAt);
       setAccount(result.user);
       setName({
         firstName: result.user.firstName || "",
@@ -1090,7 +1156,7 @@ function Dashboard({ go, user }) {
           )}
           {(isAdmin || canViewCare) && (
             <div className="row g-4 mb-4">
-              {isAdmin && <section className="col-12 col-lg-5"><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Sponsored Care</h2><p>Participation status summary</p></div><button className="btn btn-sm dashboard-action-button" onClick={() => go("sponsorship")}><span className="dashboard-action-icon"><NavigationIcon name="sponsorship" /></span><span>View Sponsored Care</span><span className="dashboard-action-arrow"><NavigationIcon name="arrowRight" /></span></button></div><div className="dashboard-overview-stats">{[["Active", d.sponsoredCare.active], ["Warning", d.sponsoredCare.warning], ["Grounds for Departure", d.sponsoredCare.groundsForDeparture], ["Inactive", d.sponsoredCare.removed]].map(([label, value]) => <div key={label}><DashboardMetricIcon label={label} /><small>{label}</small><strong>{formatCount(value)}</strong></div>)}</div></article></section>}
+              {isAdmin && <section className="col-12 col-lg-5"><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Sponsored Care</h2><p>Participation status summary</p></div><button className="btn btn-sm dashboard-action-button" onClick={() => go("sponsorship")}><span className="dashboard-action-icon"><NavigationIcon name="sponsorship" /></span><span>View Sponsored Care</span><span className="dashboard-action-arrow"><NavigationIcon name="arrowRight" /></span></button></div><div className="dashboard-overview-stats">{[["Active", d.sponsoredCare.active], ["Warning", d.sponsoredCare.warning], ["Ground for Departure", d.sponsoredCare.groundsForDeparture], ["Inactive", d.sponsoredCare.removed]].map(([label, value]) => <div key={label}><DashboardMetricIcon label={label} /><small>{label}</small><strong>{formatCount(value)}</strong></div>)}</div></article></section>}
               <section className={isAdmin ? "col-12 col-lg-7" : "col-12"}><article className="surface dashboard-section h-100"><div className="dashboard-section-heading"><div><h2>Attendance Follow-up</h2><p>Sponsored children who may need a conversation or support</p></div></div>{renderFollowups()}</article></section>
             </div>
           )}
@@ -1262,12 +1328,6 @@ function Register({ onClose, onCreated }) {
                 <p>Share this passcode securely with the child’s guardian. It is shown only during registration.</p>
               </div>
             )}
-            <div className={`alert ${result.notification?.status === "accepted" || result.notification?.status === "sent" ? "alert-success" : result.notification?.status === "not_configured" ? "alert-warning" : "alert-danger"}`} role="status">
-              {result.notification?.status === "accepted" && "Semaphore accepted the guardian SMS for processing; this does not confirm receipt."}
-              {result.notification?.status === "sent" && "Semaphore reports the SMS sent to the carrier network; this does not confirm receipt by the guardian."}
-              {result.notification?.status === "not_configured" && "The sponsored child was registered, but SMS is not configured. Add the Semaphore credentials to the server environment."}
-              {result.notification?.status === "failed" && "The sponsored child was registered, but Semaphore did not confirm the SMS. Contact the guardian directly."}
-            </div>
             <div className="d-flex flex-wrap justify-content-center gap-2">
               <button type="button" className="btn btn-outline-dark" onClick={() => window.print()}>Print card</button>
               <button type="button" className="btn btn-dark" onClick={onClose}>Done</button>
@@ -1560,7 +1620,7 @@ const IMPORT_FIELDS = {
     ["phone", "Contact Information"],
     ["address", "Address or Location"],
     ["registrationDate", "Registration Date"],
-    ["currentStatus", "Current Sponsorship Status"],
+    ["currentStatus", "Participation Status"],
     ["guardianName", "Guardian Name"],
     ["guardianRelationship", "Guardian Relationship"],
     ["guardianContact", "Guardian Contact Number"],
@@ -2713,9 +2773,6 @@ function Participants({ canCreateImport, canImportData, canEdit, canDelete, isGo
     }
     try {
       const changes = { ...form, fullName: composeFullName(form) };
-      delete changes.sponsorName;
-      delete changes.sponsorContact;
-      delete changes.sponsorshipType;
       delete changes.lifecycle;
       const data = await apiCall(`/participants/${selected}`, {
         method: "PUT",
@@ -2766,9 +2823,9 @@ function Participants({ canCreateImport, canImportData, canEdit, canDelete, isGo
           return recordStatus === "active"
             && (!isSponsoredChild || normalizeParticipationStatus(item.participation_status) === "ACTIVE");
         }
-        if (statusFilter === "REMOVED_FROM_SPONSORSHIP") {
+        if (statusFilter === "INACTIVE") {
           return recordStatus === "inactive"
-            || (isSponsoredChild && normalizeParticipationStatus(item.participation_status) === "REMOVED_FROM_SPONSORSHIP");
+            || (isSponsoredChild && normalizeParticipationStatus(item.participation_status) === "INACTIVE");
         }
         return isSponsoredChild
           && normalizeParticipationStatus(item.participation_status) === statusFilter;
@@ -2885,12 +2942,12 @@ function Participants({ canCreateImport, canImportData, canEdit, canDelete, isGo
                       <option value="ACTIVE">Active</option>
                       <option value="WARNING">Warning</option>
                       <option value="GROUNDS_FOR_DEPARTURE">Ground for Departure</option>
-                      <option value="REMOVED_FROM_SPONSORSHIP">Inactive</option>
+                      <option value="INACTIVE">Inactive</option>
                     </>
                   ) : (
                     <>
                       <option value="ACTIVE">Active</option>
-                      <option value="REMOVED_FROM_SPONSORSHIP">Inactive</option>
+                      <option value="INACTIVE">Inactive</option>
                     </>
                   )}
                 </select>
@@ -2941,7 +2998,7 @@ function Participants({ canCreateImport, canImportData, canEdit, canDelete, isGo
                   </span>
                   {canViewSponsorship && item.participant_type === "sponsored_child" && (
                     <span className={`participation-status-badge ${String(item.participation_status || "ACTIVE").toLowerCase().replaceAll("_", "-")}`}>
-                      {normalizeParticipationStatus(item.participation_status) === "REMOVED_FROM_SPONSORSHIP"
+                      {normalizeParticipationStatus(item.participation_status) === "INACTIVE"
                         ? "Inactive"
                         : normalizeParticipationStatus(item.participation_status) === "GROUNDS_FOR_DEPARTURE"
                           ? "Ground for Departure"
@@ -3528,40 +3585,63 @@ function Camera({ id, onScan, errorMessage = "Camera unavailable. Grant permissi
     </>
   );
 }
-function PublicHome({ onLogin }) {
-  const [screen, setScreen] = useState("home");
+function PublicHome({ onLogin, sessionExpiredMessage, onExpiredNoticeDismiss }) {
+  const [selectedScreen, setSelectedScreen] = useState("home");
+  const screen = sessionExpiredMessage ? "staff" : selectedScreen;
+  useEffect(() => {
+    if (screen !== "home" || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return undefined;
+    const revealTargets = document.querySelectorAll(".public-home [data-reveal]");
+    if (!("IntersectionObserver" in window)) {
+      revealTargets.forEach((element) => element.classList.add("is-visible"));
+      return undefined;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("is-visible");
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.14 });
+    revealTargets.forEach((element) => observer.observe(element));
+    return () => observer.disconnect();
+  }, [screen]);
   if (screen === "staff") {
     return (
       <Login
         done={onLogin}
-        onBack={() => setScreen("home")}
+        onBack={() => {
+          setSelectedScreen("home");
+          onExpiredNoticeDismiss?.();
+        }}
+        sessionExpiredMessage={sessionExpiredMessage}
       />
     );
   }
   if (screen === "sponsor") {
-    return <PublicLookup onBack={() => setScreen("home")} />;
+    return <PublicLookup onBack={() => setSelectedScreen("home")} />;
   }
   return (
     <main className="public-home">
       <header className="public-home-header">
         <div className="public-home-brand">
           <img src="/church-logo.png" alt="FMC Field Care logo" />
-          <span>FMC FIELD CARE</span>
+          <span className="public-home-brand-copy"><strong>FMC FIELD CARE</strong><small>Sponsored Children &amp; Community Care</small></span>
         </div>
-        <span className="public-home-header-note"><span className="public-home-header-icon"><NavigationIcon name="sponsorship" /></span>A community that cares</span>
+        <span className="public-home-header-note"><span className="public-home-header-icon"><NavigationIcon name="sponsorship" /></span>A community that cares.</span>
       </header>
       <section className="public-home-hero">
         <div className="public-home-intro">
           <span className="public-home-kicker"><NavigationIcon name="sparkle" />COMMUNITY FIRST</span>
-          <h1>Care that<br />makes a difference</h1>
+          <h1>Care that makes<br />a difference.</h1>
           <p>One caring community. Every child supported, every milestone celebrated, and every story connected.</p>
           <div className="public-home-actions">
-            <button type="button" className="public-home-primary-action" onClick={() => setScreen("sponsor")}>
+            <button type="button" className="public-home-primary-action" onClick={() => setSelectedScreen("sponsor")} aria-label="Scan a child's QR code to open Guardian Space">
               <span className="public-home-action-icon" aria-hidden="true"><NavigationIcon name="scanner" /></span>
               <span>Scan QR Code</span>
               <span className="public-home-action-arrow" aria-hidden="true"><NavigationIcon name="arrowRight" /></span>
             </button>
-            <button type="button" className="public-home-secondary-action" onClick={() => setScreen("staff")}>
+            <button type="button" className="public-home-secondary-action"             onClick={() => setSelectedScreen("staff")} aria-label="Sign in to the staff and admin workspace">
               <span className="public-home-action-icon" aria-hidden="true"><NavigationIcon name="staff" /></span>
               <span>Sign in</span>
               <span className="public-home-action-arrow" aria-hidden="true"><NavigationIcon name="arrowRight" /></span>
@@ -3585,30 +3665,65 @@ function PublicHome({ onLogin }) {
             <span className="eyebrow public-home-help-kicker"><NavigationIcon name="sparkle" />HOW CAN WE HELP?</span>
             <h2 id="public-home-portals-title">Choose your way in</h2>
           </div>
-          <span className="public-home-section-caption">Choose a secure space to continue</span>
+          <span className="public-home-section-caption">Choose a secure space to continue.</span>
         </div>
         <div className="public-access-grid">
-        <button className="public-access-card public-access-staff" onClick={() => setScreen("staff")}>
+        <button type="button" className="public-access-card public-access-staff" onClick={() => setSelectedScreen("staff")} aria-label="Continue to Staff and Admin sign in">
           <span className="public-access-card-top"><span className="public-access-icon" aria-hidden="true">
             <NavigationIcon name="staff" />
           </span><span className="public-access-number">01 / STAFF</span></span>
           <strong>Staff &amp; Admin</strong>
-          <span>Sign in to manage sponsored children, view attendance, and track child progress.</span>
-          <b>Continue to sign in <span aria-hidden="true"><NavigationIcon name="arrowRight" /></span></b>
+          <span>Sign in to manage sponsored children, record attendance, review child progress, and access community care records.</span>
+          <b>Continue to Sign In <span aria-hidden="true"><NavigationIcon name="arrowRight" /></span></b>
         </button>
-        <button className="public-access-card public-access-guardian" onClick={() => setScreen("sponsor")}>
+        <button type="button" className="public-access-card public-access-guardian"         onClick={() => setSelectedScreen("sponsor")} aria-label="Open Guardian Space to view child progress">
           <span className="public-access-card-top"><span className="public-access-icon" aria-hidden="true">
             <NavigationIcon name="sponsorship" />
           </span><span className="public-access-number">02 / GUARDIAN</span></span>
           <strong>Guardian Space</strong>
-          <span>Scan your child’s QR code and enter the 6-digit passcode to view their progress and participation.</span>
-          <b>View child progress <span aria-hidden="true"><NavigationIcon name="arrowRight" /></span></b>
+          <span>Scan your child’s QR code and enter your secure passcode to view their attendance, growth, and sponsorship journey.</span>
+          <b>View Child Progress <span aria-hidden="true"><NavigationIcon name="arrowRight" /></span></b>
         </button>
         </div>
       </section>
+      <section className="public-home-trust" aria-label="Our care commitments">
+        <article className="public-home-trust-card" data-reveal>
+          <span className="public-home-trust-icon trust-blue" aria-hidden="true"><NavigationIcon name="shield" /></span>
+          <div><h3>Secure Records</h3><p>Secure access helps protect child information and care records.</p></div>
+        </article>
+        <article className="public-home-trust-card" data-reveal>
+          <span className="public-home-trust-icon trust-green" aria-hidden="true"><NavigationIcon name="staff" /></span>
+          <div><h3>Connected Community</h3><p>Church staff and community members work together to support every child.</p></div>
+        </article>
+        <article className="public-home-trust-card" data-reveal>
+          <span className="public-home-trust-icon trust-blue" aria-hidden="true"><NavigationIcon name="analytics" /></span>
+          <div><h3>Child Development</h3><p>Follow attendance, growth, education, and important milestones.</p></div>
+        </article>
+      </section>
+      <section className="public-home-impact" aria-labelledby="public-home-impact-title" data-reveal>
+        <div className="public-home-impact-copy">
+          <span className="public-home-impact-kicker"><NavigationIcon name="sparkle" />CARE THAT CONNECTS</span>
+          <h2 id="public-home-impact-title">Every child deserves care, support, and a brighter future.</h2>
+          <p>FMC Field Care helps our church community stay connected with sponsored children through attendance monitoring, growth updates, education records, and meaningful care.</p>
+        </div>
+        <div className="public-home-impact-journey" aria-label="Areas of care supported by FMC Field Care">
+          <div><span className="impact-step-icon"><NavigationIcon name="events" /></span><span><strong>Attendance</strong><small>Be present along the way</small></span></div>
+          <div><span className="impact-step-icon"><NavigationIcon name="analytics" /></span><span><strong>Growth &amp; learning</strong><small>Celebrate every milestone</small></span></div>
+          <div><span className="impact-step-icon"><NavigationIcon name="sponsorship" /></span><span><strong>Community care</strong><small>Keep each journey connected</small></span></div>
+        </div>
+      </section>
       <footer className="public-home-footer">
-        <span><span className="public-home-lock" aria-hidden="true"><NavigationIcon name="shield" /></span> Your information is handled with care.</span>
-        <span>Guardian access requires the child’s active QR code and passcode.</span>
+        <div className="public-home-footer-main">
+          <div className="public-home-footer-brand">
+            <img src="/church-logo.png" alt="" />
+            <div><strong>FMC FIELD CARE</strong><span>A community that cares.</span></div>
+          </div>
+          <p>A shared space for our church community to support sponsored children and follow each child’s journey.</p>
+        </div>
+        <div className="public-home-footer-bottom">
+          <span>© {new Date().getFullYear()} FMC Field Care</span>
+          <span><NavigationIcon name="shield" /> Child and guardian information should only be accessed by authorized users for care-related purposes.</span>
+        </div>
       </footer>
     </main>
   );
@@ -3617,6 +3732,8 @@ function PublicLookup({ onBack }) {
   const [payload, setPayload] = useState("");
   const [passcode, setPasscode] = useState("");
   const [result, setResult] = useState(null);
+  const [guardianSessionStartedAt, setGuardianSessionStartedAt] = useState(0);
+  const [guardianSessionExpired, setGuardianSessionExpired] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [passcodeOpen, setPasscodeOpen] = useState(false);
@@ -3664,6 +3781,8 @@ function PublicLookup({ onBack }) {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "Unable to verify this QR code.");
       setResult(data);
+      setGuardianSessionStartedAt(Date.now());
+      setGuardianSessionExpired(false);
       setPasscodeOpen(false);
     } catch (requestError) {
       setError(requestError.message);
@@ -3676,8 +3795,35 @@ function PublicLookup({ onBack }) {
     setError("");
     setPasscodeOpen(true);
   };
+  const verifyCurrentGuardianSession = async () => {
+    const response = await fetch(`${api}/public/sponsor-status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ qrPayload: payload.trim(), passcode }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Unable to verify this QR code.");
+    setResult(data);
+    return { lastActivityAt: Date.now() };
+  };
   return (
     <>
+    {result && (
+      <SessionInactivityGuard
+        key={`guardian-${result.child.id}`}
+        user={{ id: `guardian-${result.child.id}` }}
+        lastActivityAt={guardianSessionStartedAt}
+        activityStorageKey={null}
+        syncActivity={false}
+        onContinueSession={verifyCurrentGuardianSession}
+        onExpire={() => {
+          setResult(null);
+          setPasscode("");
+          setPayload("");
+          setGuardianSessionExpired(true);
+        }}
+      />
+    )}
     <main className="public-home public-lookup">
       <button type="button" className="public-lookup-back-button" onClick={onBack}>
         <span aria-hidden="true">←</span>
@@ -3699,6 +3845,9 @@ function PublicLookup({ onBack }) {
               errorMessage="Camera unavailable. Grant camera permission to scan the child’s QR code."
             />
           )}
+          {guardianSessionExpired && (
+            <div className="alert alert-warning" role="status">{SESSION_EXPIRED_MESSAGE}</div>
+          )}
           {error && <div className="alert alert-danger" role="alert">{error}</div>}
         </form>
       ) : (
@@ -3718,7 +3867,7 @@ function PublicLookup({ onBack }) {
             qrPayload={payload}
             passcode={passcode}
           />
-          <button className="btn btn-outline-dark mt-4 guardian-look-up-button" onClick={() => { setResult(null); setPasscode(""); setPayload(""); setPasscodeOpen(false); lastScannedPayload.current = ""; lastScannedAt.current = 0; }}>Look up another child</button>
+          <button className="btn btn-outline-dark mt-4 guardian-look-up-button" onClick={() => { setResult(null); setGuardianSessionStartedAt(0); setPasscode(""); setPayload(""); setPasscodeOpen(false); lastScannedPayload.current = ""; lastScannedAt.current = 0; }}>Look up another child</button>
         </section>
       )}
     </main>
@@ -3846,15 +3995,15 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
       icon: "⚠",
     },
     GROUNDS_FOR_DEPARTURE: {
-      label: "Grounds for departure",
+      label: "Ground for departure",
       badge: "! GROUNDS FOR DEPARTURE",
       message: `Your child has six or more absences in ${currentYear?.year || new Date().getFullYear()}. Please contact the Church Administrator for review.`,
       icon: "!",
     },
-    REMOVED_FROM_SPONSORSHIP: {
-      label: "Program status ended",
-      badge: "PROGRAM STATUS ENDED",
-      message: "Please contact the program administrator if you have questions about your child's current program status.",
+    INACTIVE: {
+      label: "Inactive",
+      badge: "INACTIVE",
+      message: "Please contact the Church Administrator if you have questions about your child's status.",
       icon: "!",
     },
   }[status] || {
@@ -3909,7 +4058,7 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
       .map((entry, index) => {
         const typeInfo = {
           grounds_for_departure: {
-            label: "Grounds for departure",
+            label: "Ground for departure",
             icon: "!",
             className: "grounds-for-departure",
             description: entry.reason || `${entry.absenceCount} total absences reached the program threshold.`,
@@ -4094,7 +4243,7 @@ function GuardianSponsoredDetails({ child, qrPayload, passcode }) {
                 ["Overall attendance rate", participation?.lifetime?.required ? `${participation.lifetime.attendanceRate}%` : "—"],
               ].map(([label, value]) => <article key={label}><span>{label}</span><strong>{value}</strong></article>)}
             </div>
-            <p className="guardian-threshold-note">Four or five absences in the current calendar year result in Warning; six or more result in Grounds for Departure. Status thresholds reset each calendar year. Final Inactive decisions are made only by the Church Administrator. Previous years remain in attendance history but do not count toward this year’s thresholds.</p>
+            <p className="guardian-threshold-note">Four or five absences in the current calendar year result in Warning; six or more result in Ground for Departure. Status thresholds reset each calendar year. Final Inactive decisions are made only by the Church Administrator. Previous years remain in attendance history but do not count toward this year’s thresholds.</p>
           </section>
 
           <section className="guardian-dashboard-card">
@@ -4256,18 +4405,12 @@ function Scanner({ portal = false, user = null }) {
     setProfile({ ...portalData.participant, attendance: portalData.attendance });
   };
   const postAttendance = async (value) => {
-    const headers = { "Content-Type": "application/json", ...(localStorage.token ? { Authorization: `Bearer ${localStorage.token}` } : {}) };
-    const resp = await fetch(api + "/checkin", {
+    const resp = await requestWithSession(api + "/checkin", {
       method: "POST",
-      headers,
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ qrPayload: value, eventName, location: eventLocation, action: attendanceAction }),
     });
     const result = await resp.json().catch(() => ({}));
-    if (resp.status === 401) {
-      localStorage.removeItem("token");
-      localStorage.removeItem("user");
-      window.dispatchEvent(new Event("auth-expired"));
-    }
     if (!resp.ok) {
       const error = new Error(result.error || "Could not record attendance.");
       error.status = resp.status;
@@ -4289,23 +4432,6 @@ function Scanner({ portal = false, user = null }) {
     try {
       await postAttendance(value);
     } catch (error) {
-      if (attendanceAction === "check_in" && (!error.status || error.status >= 500)) {
-        try {
-          const queued = await queueCheckin({
-            qrPayload: value,
-            eventName,
-            location: eventLocation,
-            action: "check_in",
-          });
-          showToast(
-            queued ? "Offline: check-in queued for sync." : "Check-in already queued for today.",
-            queued ? "info" : "warning",
-          );
-        } catch {
-          showToast(error.message || "Could not record attendance.", "danger");
-        }
-        return;
-      }
       if (attendanceAction === "check_out" && !error.status) {
         showToast("Could not confirm check-out. Check the event attendance record before retrying.", "warning", 5000);
         return;
@@ -4315,6 +4441,7 @@ function Scanner({ portal = false, user = null }) {
   };
   const scan = async (v) => {
     if (!portal && attendanceResultOpen.current) return;
+    window.dispatchEvent(new Event("fmc-user-activity"));
     // Always update payload input so it can be pasted/seen
     setPayload(v);
 
@@ -4358,19 +4485,6 @@ function Scanner({ portal = false, user = null }) {
       showToast(x.message, x.message === "Sponsored Child passcode required" ? "warning" : "danger");
     }
   };
-  useEffect(() => {
-    if (!portal) {
-      let sync = () =>
-        syncQueuedCheckins((x) =>
-          apiCall("/checkin", {
-            method: "POST",
-            body: JSON.stringify({ ...x, action: "check_in" }),
-          }),
-        );
-      window.addEventListener("online", sync);
-      return () => window.removeEventListener("online", sync);
-    }
-  }, [portal]);
   if (profile)
     return (
       <>
@@ -4414,16 +4528,12 @@ function Scanner({ portal = false, user = null }) {
               <div><small>Guardian contact</small><strong>{profile.parentContact || "Not Provided"}</strong></div>
               <div><small>Emergency contact name</small><strong>{profile.emergencyContactName || "Not Provided"}</strong></div>
               <div><small>Emergency phone</small><strong>{profile.emergencyContactPhone || "Not Provided"}</strong></div>
-              <div><small>Sponsor</small><strong>{profile.sponsorName || "Not Provided"}</strong></div>
-              <div><small>Sponsor contact</small><strong>{profile.sponsorContact || "Not Provided"}</strong></div>
-              <div><small>Sponsorship type</small><strong>{profile.sponsorshipType || "Not Provided"}</strong></div>
               <div><small>Education</small><strong>{profile.educationLevel || "Not Provided"}</strong></div>
               <div><small>Grade/year</small><strong>{profile.gradeLevel || "Not Provided"}</strong></div>
               {profile.educationLevel === "College" && <div><small>College course</small><strong>{profile.programCourse || "Not Provided"}</strong></div>}
               <div><small>School</small><strong>{profile.schoolName || "Not Provided"}</strong></div>
               <div><small>School address</small><strong>{profile.schoolAddress || "Not Provided"}</strong></div>
               <div><small>Enrollment date</small><strong>{profile.enrollmentDate || "Not Provided"}</strong></div>
-              <div><small>Program affiliation</small><strong>{profile.programAffiliation || "Not Provided"}</strong></div>
             </div>
           </div>}
           <h3 className="mt-4">Recent attendance</h3>
@@ -5247,7 +5357,7 @@ function Analytics({ user }) {
         if (to) params.set("to", to);
         path = "audit-trail";
       }
-      const response = await fetch(`${api}/reports/${path}?${params.toString()}`, { headers: { Authorization: `Bearer ${localStorage.token}` } });
+      const response = await requestWithSession(`${api}/reports/${path}?${params.toString()}`);
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
         throw new Error(result.error || "Could not generate the report.");
@@ -5316,8 +5426,8 @@ function Analytics({ user }) {
     ["", "All statuses"],
     ["ACTIVE", "Active"],
     ["WARNING", "Warning"],
-    ["GROUNDS_FOR_DEPARTURE", "Grounds for Departure"],
-    ["REMOVED_FROM_SPONSORSHIP", "Inactive"],
+    ["GROUNDS_FOR_DEPARTURE", "Ground for Departure"],
+    ["INACTIVE", "Inactive"],
   ];
   return (
     <>
@@ -5398,7 +5508,7 @@ function Analytics({ user }) {
             <strong className="analytics-stat-value">{overviewLoading ? "—" : (overview ? formatCount(overview.atRiskChildren) : "0")}</strong>
             <div className="analytics-stat-sub analytics-risk-breakdown">
               <span>Attendance Warning: {formatCount(overview?.atRiskBreakdown?.warning)}</span>
-              <span>Grounds for Departure: {formatCount(overview?.atRiskBreakdown?.groundsForDeparture)}</span>
+              <span>Ground for Departure: {formatCount(overview?.atRiskBreakdown?.groundsForDeparture)}</span>
               <span>Medium Predictive Risk: {formatCount(overview?.atRiskBreakdown?.mediumPredictiveRisk)}</span>
               <span>High Predictive Risk: {formatCount(overview?.atRiskBreakdown?.highPredictiveRisk)}</span>
               {!overviewLoading && !overview?.atRiskBreakdown?.predictiveDataAvailable && (
@@ -5945,14 +6055,13 @@ function Reports({ user }) {
     setExportError("");
     setExportMessage("");
     try {
-      const token = localStorage.getItem("token");
       const query = new URLSearchParams(
         Object.entries(filters).filter(([, value]) => value !== "" && value != null),
       );
       const queryString = query.toString();
-      const response = await fetch(`${api}${endpoint}${queryString ? `?${queryString}` : ""}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
+      const response = await requestWithSession(
+        `${api}${endpoint}${queryString ? `?${queryString}` : ""}`,
+      );
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
         throw new Error(result.error || "Could not export this report.");
@@ -5978,10 +6087,8 @@ function Reports({ user }) {
     setExportError("");
     setExportMessage("");
     try {
-      const token = localStorage.getItem("token");
-      const response = await fetch(
+      const response = await requestWithSession(
         `${api}/reports/attendance?range=${range}&format=${format}`,
-        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
       );
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
@@ -6059,7 +6166,7 @@ function Reports({ user }) {
                 </select></label>
                 <label>Sponsorship status<select className="form-select" value={childFilters.status} onChange={(event) => setChildFilters({ ...childFilters, status: event.target.value })}>
                   <option value="">All statuses</option>
-                  <option value="ACTIVE">Active</option><option value="WARNING">Warning</option><option value="GROUNDS_FOR_DEPARTURE">Grounds for Departure</option><option value="INACTIVE">Inactive</option>
+                  <option value="ACTIVE">Active</option><option value="WARNING">Warning</option><option value="GROUNDS_FOR_DEPARTURE">Ground for Departure</option><option value="INACTIVE">Inactive</option>
                 </select></label>
                 <label>Registration year<input className="form-control" type="number" min="1900" max="9999" placeholder="All years" value={childFilters.registrationYear} onChange={(event) => setChildFilters({ ...childFilters, registrationYear: event.target.value })} /></label>
               </div>
@@ -6118,7 +6225,7 @@ function Reports({ user }) {
                 </select></label>
                 <label>Sponsored child status<select className="form-select" value={attendanceFilters.status} onChange={(event) => setAttendanceFilters({ ...attendanceFilters, status: event.target.value })}>
                   <option value="">All statuses</option>
-                  <option value="ACTIVE">Active</option><option value="WARNING">Warning</option><option value="GROUNDS_FOR_DEPARTURE">Grounds for Departure</option><option value="INACTIVE">Inactive</option>
+                  <option value="ACTIVE">Active</option><option value="WARNING">Warning</option><option value="GROUNDS_FOR_DEPARTURE">Ground for Departure</option><option value="INACTIVE">Inactive</option>
                 </select></label>
                 <label>Attendance status<select className="form-select" value={attendanceFilters.attendanceStatus} onChange={(event) => setAttendanceFilters({ ...attendanceFilters, attendanceStatus: event.target.value })}>
                   <option value="">Present and absent</option><option value="present">Present</option><option value="absent">Absent</option>
@@ -6268,10 +6375,8 @@ function auditStatusLabel(value) {
   const labels = {
     ACTIVE: "Active",
     WARNING: "Warning",
-    GROUNDS_FOR_DEPARTURE: "Grounds for Departure",
+    GROUNDS_FOR_DEPARTURE: "Ground for Departure",
     INACTIVE: "Inactive",
-    REMOVED_FROM_SPONSORSHIP: "Inactive",
-    SECOND_CHANCE: "Second Chance",
   };
   return labels[status] || String(value || "—").replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
@@ -6302,7 +6407,6 @@ function auditDetailsText(entry) {
   if (details.fullName) parts.push(`Account: ${details.fullName}`);
   if (details.eventName) parts.push(`Activity: ${details.eventName}`);
   if (details.educationLevel) parts.push(`Education group: ${details.educationLevel}`);
-  if (details.sponsorType) parts.push(`Sponsor type: ${details.sponsorType}`);
   if (details.sex) parts.push(`Sex: ${details.sex}`);
   if (details.careType) parts.push(`Care type: ${details.careType}`);
   if (details.photoCount !== undefined) parts.push(`${details.photoCount} photo${Number(details.photoCount) === 1 ? "" : "s"}`);
@@ -6319,8 +6423,6 @@ function auditDetailsText(entry) {
   if (details.updateType) parts.push(`Update: ${details.updateType}`);
   if (details.recordedOn) parts.push(`Recorded: ${details.recordedOn}`);
   if (details.amount !== undefined) parts.push(`Amount: ${details.amount}`);
-  if (details.sponsorId) parts.push(`Sponsor ID: ${details.sponsorId}`);
-  if (details.previousSponsorId) parts.push(`Previous sponsor ID: ${details.previousSponsorId}`);
   if (details.providerStatus) parts.push(`Provider: ${details.providerStatus}`);
   if (details.status && String(entry.action || "").includes("guardian_sms")) parts.push(`Notification: ${details.status}`);
   if (details.deletionType) parts.push(`Removal type: ${details.deletionType}`);
@@ -6479,8 +6581,8 @@ function AuditHistory() {
 const PARTICIPATION_STATUS_LABELS = {
   ACTIVE: "Active",
   WARNING: "Warning",
-  GROUNDS_FOR_DEPARTURE: "Grounds for Departure",
-  REMOVED_FROM_SPONSORSHIP: "Inactive",
+  GROUNDS_FOR_DEPARTURE: "Ground for Departure",
+  INACTIVE: "Inactive",
 };
 
 function SponsoredCare({ user, onViewHistory }) {
@@ -6727,7 +6829,7 @@ function SponsoredCare({ user, onViewHistory }) {
       key: `action-${entry.type}-${entry.id}`,
       date: entry.createdAt,
       status: ({
-        grounds_for_departure: "Grounds for Departure",
+        grounds_for_departure: "Ground for Departure",
         second_chance: "Active",
         removed: "Inactive",
         set_inactive: "Inactive",
@@ -6762,8 +6864,8 @@ function SponsoredCare({ user, onViewHistory }) {
           ["Active children", children.filter((entry) => entry.status === "ACTIVE").length, "participants", "summary-active", "In care now"],
           ["Meeting monthly requirements", children.filter((entry) => entry.monthly.required > 0 && entry.monthly.attended >= entry.monthly.required).length, "check", "summary-meeting", "Monthly goal met"],
           ["Attendance warnings", children.filter((entry) => entry.status === "WARNING").length, "warning", "summary-warning", "Needs follow-up"],
-          ["Grounds for departure", children.filter((entry) => entry.status === "GROUNDS_FOR_DEPARTURE").length, "shield", "summary-grounds", "Review attendance"],
-          ["Inactive", children.filter((entry) => entry.status === "REMOVED_FROM_SPONSORSHIP").length, "lock", "summary-inactive", "Records retained"],
+          ["Ground for departure", children.filter((entry) => entry.status === "GROUNDS_FOR_DEPARTURE").length, "shield", "summary-grounds", "Review attendance"],
+          ["Inactive", children.filter((entry) => entry.status === "INACTIVE").length, "lock", "summary-inactive", "Records retained"],
         ].map(([label, count, icon, tone, detail]) => (
           <article className={`surface sponsorship-summary-card participation-summary-card ${tone}`} key={label}>
             <span><i aria-hidden="true"><NavigationIcon name={icon} /></i>{label}</span>
@@ -6793,7 +6895,7 @@ function SponsoredCare({ user, onViewHistory }) {
                   <option value="ACTIVE">Active</option>
                   <option value="WARNING">Warning</option>
                   <option value="GROUNDS_FOR_DEPARTURE">Ground for Departure</option>
-                  <option value="REMOVED_FROM_SPONSORSHIP">Inactive</option>
+                  <option value="INACTIVE">Inactive</option>
                 </select>
               </label>
               <label>
@@ -6892,9 +6994,9 @@ function SponsoredCare({ user, onViewHistory }) {
               <>
             {child.status === "GROUNDS_FOR_DEPARTURE" && (
               <section className="participation-action-panel grounds-action-panel">
-                <h3><NavigationIcon name="warning" />Grounds for Departure</h3>
+                <h3><NavigationIcon name="warning" />Ground for Departure</h3>
                 <p>Current-year absences: <strong>{child.currentYear.absent}</strong> · Scheduled events: <strong>{child.currentYear.required}</strong> · Attendance rate: <strong>{child.currentYear.required ? `${child.currentYear.attendanceRate}%` : "N/A"}</strong>.</p>
-                <p>Grounds for Departure does not automatically make this child Inactive.</p>
+                <p>Ground for Departure does not automatically make this child Inactive.</p>
                 {canManage && (
                   <form onSubmit={(event) => { event.preventDefault(); setConfirmSecondChance(true); }}>
                     <label className="form-label" htmlFor="second-chance-reason">Reason or notes (optional)</label>
@@ -6921,7 +7023,7 @@ function SponsoredCare({ user, onViewHistory }) {
             )}
               </>
             )}
-            {profileTab === "followup" && child.status === "REMOVED_FROM_SPONSORSHIP" && (
+            {profileTab === "followup" && child.status === "INACTIVE" && (
               <section className="participation-action-panel">
                 <h3><NavigationIcon name="lock" />Inactive sponsored child</h3>
                 <p>Reason: <strong>{child.inactiveReason || "Not recorded"}</strong></p>
@@ -7126,12 +7228,12 @@ function SponsoredCare({ user, onViewHistory }) {
             <header className="inactive-confirm-header">
               <span>STATUS CHANGE CONFIRMATION</span>
               <h2 id="second-chance-title">Give this child a second chance?</h2>
-              <p>The child's current status will immediately change from Grounds for Departure to Active.</p>
+              <p>The child's current status will immediately change from Ground for Departure to Active.</p>
             </header>
             <dl className="participation-removal-details">
               <div><dt>Sponsored Child</dt><dd>{child.name}</dd></div>
               <div><dt>Sponsored Child ID</dt><dd>{child.id}</dd></div>
-              <div><dt>Current status</dt><dd>Grounds for Departure</dd></div>
+              <div><dt>Current status</dt><dd>Ground for Departure</dd></div>
               <div><dt>New status</dt><dd>Active</dd></div>
             </dl>
             <label className="form-label" htmlFor="second-chance-confirm-note">Reason or notes (optional)</label>
@@ -7193,7 +7295,7 @@ function SponsoredCare({ user, onViewHistory }) {
             <dl className="participation-removal-details">
               <div><dt>Sponsored Child</dt><dd>{child.name}</dd></div>
               <div><dt>Sponsored Child ID</dt><dd>{child.id}</dd></div>
-              <div><dt>Current status</dt><dd>Grounds for Departure</dd></div>
+              <div><dt>Current status</dt><dd>Ground for Departure</dd></div>
               <div><dt>Current-year absences</dt><dd>{child.currentYear.absent}</dd></div>
               <div><dt>Current-year attendance rate</dt><dd>{child.currentYear.required ? `${child.currentYear.attendanceRate}%` : "N/A"}</dd></div>
             </dl>
@@ -8064,8 +8166,305 @@ function StaffAccounts({ user }) {
     </>
   );
 }
+function SessionInactivityGuard({
+  user,
+  lastActivityAt,
+  onExpire,
+  onServerActivity,
+  onContinueSession,
+  activityStorageKey = SESSION_ACTIVITY_STORAGE_KEY,
+  syncActivity = true,
+}) {
+  const [warningOpen, setWarningOpen] = useState(false);
+  const [continuing, setContinuing] = useState(false);
+  const [continueError, setContinueError] = useState("");
+  const continueButtonRef = useRef(null);
+  const warningOpenRef = useRef(warningOpen);
+  const lastActivityRef = useRef(0);
+  const scheduleRef = useRef(() => {});
+  const channelRef = useRef(null);
+  const mountedRef = useRef(false);
+  const onExpireRef = useRef(onExpire);
+  const onServerActivityRef = useRef(onServerActivity);
+  const onContinueSessionRef = useRef(onContinueSession);
+  const lastActivityAtRef = useRef(lastActivityAt);
+  const userId = String(user?.id || "");
+
+  useEffect(() => {
+    warningOpenRef.current = warningOpen;
+  }, [warningOpen]);
+  useEffect(() => {
+    if (!warningOpen) return undefined;
+    const previousFocus = document.activeElement;
+    continueButtonRef.current?.focus();
+    const keepFocusInDialog = (event) => {
+      if (event.key !== "Tab") return;
+      event.preventDefault();
+      continueButtonRef.current?.focus();
+    };
+    document.addEventListener("keydown", keepFocusInDialog);
+    return () => {
+      document.removeEventListener("keydown", keepFocusInDialog);
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) {
+        previousFocus.focus();
+      }
+    };
+  }, [warningOpen]);
+  useEffect(() => {
+    onExpireRef.current = onExpire;
+    onServerActivityRef.current = onServerActivity;
+    onContinueSessionRef.current = onContinueSession;
+  }, [onContinueSession, onExpire, onServerActivity]);
+
+  useEffect(() => {
+    lastActivityAtRef.current = lastActivityAt;
+    const activityAt = Math.min(Number(lastActivityAt), Date.now());
+    if (activityAt > lastActivityRef.current) {
+      lastActivityRef.current = activityAt;
+      scheduleRef.current();
+    }
+  }, [lastActivityAt]);
+
+  useEffect(() => {
+    if (!userId) return undefined;
+    const storedActivityAt = activityStorageKey
+      ? Number(localStorage.getItem(activityStorageKey)) || 0
+      : 0;
+    const initialActivityAt = Math.max(Number(lastActivityAtRef.current) || 0, storedActivityAt);
+    lastActivityRef.current = Math.min(initialActivityAt || Date.now(), Date.now());
+    if (activityStorageKey) {
+      localStorage.setItem(activityStorageKey, String(lastActivityRef.current));
+    }
+
+    let active = true;
+    let warningTimer;
+    let expirationTimer;
+    let debounceTimer;
+    let maximumSyncTimer;
+    let lastActivityBroadcastAt = 0;
+    let expirationStarted = false;
+    let lastTimerRefreshAt = 0;
+    let lastMouseMoveAt = 0;
+    let channel = null;
+    mountedRef.current = true;
+    const clearActivitySyncTimers = () => {
+      clearTimeout(debounceTimer);
+      clearTimeout(maximumSyncTimer);
+      debounceTimer = null;
+      maximumSyncTimer = null;
+    };
+    const expire = () => {
+      if (expirationStarted) return;
+      expirationStarted = true;
+      onExpireRef.current();
+    };
+    const scheduleDeadlines = () => {
+      clearTimeout(warningTimer);
+      clearTimeout(expirationTimer);
+      const elapsed = Date.now() - lastActivityRef.current;
+      lastTimerRefreshAt = Date.now();
+      const warningDelay = SESSION_WARNING_MILLISECONDS - elapsed;
+      const expirationDelay = SESSION_IDLE_MILLISECONDS - elapsed;
+      if (warningDelay <= 0) setWarningOpen(true);
+      else {
+        warningTimer = window.setTimeout(() => {
+          if (Date.now() - lastActivityRef.current >= SESSION_WARNING_MILLISECONDS) {
+            setWarningOpen(true);
+          } else {
+            scheduleDeadlines();
+          }
+        }, warningDelay);
+      }
+      if (expirationDelay <= 0) expire();
+      else {
+        expirationTimer = window.setTimeout(() => {
+          if (Date.now() - lastActivityRef.current >= SESSION_IDLE_MILLISECONDS) expire();
+          else scheduleDeadlines();
+        }, expirationDelay);
+      }
+    };
+    scheduleRef.current = scheduleDeadlines;
+
+    const recordActivity = (timestamp, { broadcast = true } = {}) => {
+      const activityAt = Math.min(Number(timestamp), Date.now());
+      if (!Number.isFinite(activityAt) || activityAt < lastActivityRef.current) return;
+      lastActivityRef.current = activityAt;
+      setWarningOpen(false);
+      setContinueError("");
+      if (activityAt - lastActivityBroadcastAt >= 500) {
+        lastActivityBroadcastAt = activityAt;
+        if (activityStorageKey) localStorage.setItem(activityStorageKey, String(activityAt));
+        if (broadcast && channel) channel.postMessage(activityAt);
+      }
+      if (activityAt - lastTimerRefreshAt >= 250) scheduleDeadlines();
+    };
+    const sendActivity = async () => {
+      clearActivitySyncTimers();
+      if (!active || navigator.onLine === false) return;
+      try {
+        const result = await apiCall("/auth/activity", { method: "POST" });
+        if (!active) return;
+        const timestamp = Number(result.lastActivityAt);
+        if (!Number.isFinite(timestamp) || timestamp <= 0) return;
+        onServerActivityRef.current(timestamp);
+        recordActivity(timestamp);
+      } catch (error) {
+        if (!error.isNetworkError && error.status !== 401) {
+          console.error("Could not renew the active session.", error);
+        }
+      }
+    };
+    const queueActivitySync = () => {
+      if (!syncActivity || navigator.onLine === false) return;
+      clearTimeout(debounceTimer);
+      if (!maximumSyncTimer) {
+        maximumSyncTimer = window.setTimeout(sendActivity, 15_000);
+      }
+      debounceTimer = window.setTimeout(sendActivity, 250);
+    };
+    const handleUserActivity = (event) => {
+      if (
+        warningOpenRef.current &&
+        event.target instanceof Element &&
+        event.target.closest(".session-timeout-dialog")
+      ) return;
+      const timestamp = Date.now();
+      if (event.type === "mousemove" && timestamp - lastMouseMoveAt < 250) {
+        lastActivityRef.current = timestamp;
+        return;
+      }
+      if (event.type === "mousemove") lastMouseMoveAt = timestamp;
+      recordActivity(timestamp);
+      queueActivitySync();
+    };
+    const handleRemoteActivity = (timestamp) => {
+      const receivedActivityAt = Number(timestamp);
+      if (!Number.isFinite(receivedActivityAt) || receivedActivityAt > Date.now() + 1000) return;
+      const activityAt = Math.min(receivedActivityAt, Date.now());
+      if (activityAt > lastActivityRef.current) {
+        lastActivityRef.current = activityAt;
+        setWarningOpen(false);
+        setContinueError("");
+        scheduleDeadlines();
+      }
+    };
+    const handleStorage = (event) => {
+      if (activityStorageKey && event.key === activityStorageKey && event.newValue) {
+        handleRemoteActivity(event.newValue);
+      }
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") scheduleDeadlines();
+    };
+    if (activityStorageKey && "BroadcastChannel" in window) {
+      channel = new BroadcastChannel("fmc-session-activity");
+      channel.onmessage = (event) => handleRemoteActivity(event.data);
+      channelRef.current = channel;
+    }
+    const activityEvents = ["click", "keydown", "mousedown", "mousemove", "pointerdown", "touchstart", "input", "change", "popstate", "fmc-user-activity"];
+    activityEvents.forEach((name) => window.addEventListener(name, handleUserActivity, { passive: name === "touchstart" }));
+    document.addEventListener("scroll", handleUserActivity, { capture: true, passive: true });
+    window.addEventListener("storage", handleStorage);
+    document.addEventListener("visibilitychange", handleVisibility);
+    scheduleDeadlines();
+
+    return () => {
+      active = false;
+      mountedRef.current = false;
+      clearTimeout(warningTimer);
+      clearTimeout(expirationTimer);
+      clearActivitySyncTimers();
+      activityEvents.forEach((name) => window.removeEventListener(name, handleUserActivity));
+      document.removeEventListener("scroll", handleUserActivity, true);
+      window.removeEventListener("storage", handleStorage);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      if (channel) channel.close();
+      channelRef.current = null;
+      scheduleRef.current = () => {};
+    };
+  }, [activityStorageKey, syncActivity, userId]);
+
+  const continueSession = async () => {
+    if (continuing || !mountedRef.current) return;
+    setContinuing(true);
+    setContinueError("");
+    try {
+      const result = onContinueSessionRef.current
+        ? await onContinueSessionRef.current()
+        : await apiCall("/auth/activity", { method: "POST" });
+      if (!mountedRef.current) return;
+      const suppliedTimestamp = Number(result?.lastActivityAt);
+      if (result === false || (Number.isFinite(suppliedTimestamp) && suppliedTimestamp <= 0)) {
+        throw new Error("The session could not be verified. Please try again.");
+      }
+      const timestamp = Number.isFinite(suppliedTimestamp) ? suppliedTimestamp : Date.now();
+      onServerActivityRef.current?.(timestamp);
+      lastActivityRef.current = Math.max(lastActivityRef.current, Math.min(timestamp, Date.now()));
+      if (activityStorageKey) {
+        localStorage.setItem(activityStorageKey, String(lastActivityRef.current));
+      }
+      if (channelRef.current) channelRef.current.postMessage(lastActivityRef.current);
+      setWarningOpen(false);
+      setContinueError("");
+      scheduleRef.current();
+    } catch (error) {
+      if (mountedRef.current) {
+        setContinueError(error.message || "The session could not be verified. Please try again.");
+      }
+    } finally {
+      if (mountedRef.current) setContinuing(false);
+    }
+  };
+
+  if (!user || !warningOpen) return null;
+  return (
+    <div className="session-timeout-backdrop">
+      <section
+        className="session-timeout-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="session-timeout-title"
+        aria-describedby="session-timeout-description"
+      >
+        <span className="session-timeout-icon" aria-hidden="true"><NavigationIcon name="warning" /></span>
+        <h2 id="session-timeout-title">Your session is about to expire.</h2>
+        <p id="session-timeout-description">You will be automatically signed out in 1 minute due to inactivity.</p>
+        {continueError && <div className="alert alert-warning" role="alert">{continueError}</div>}
+        <button ref={continueButtonRef} type="button" className="btn btn-primary" onClick={continueSession} disabled={continuing}>
+          {continuing ? "Checking session…" : "Continue Session"}
+        </button>
+      </section>
+    </div>
+  );
+}
+
+function ConnectionNotice({ status, sessionRestored }) {
+  if (status === "online" && !sessionRestored) return null;
+  const message = sessionRestored
+    ? "Online — Session Restored"
+    : status === "offline"
+      ? "You're offline. Your current session is preserved; changes requiring the server are unavailable."
+      : status === "reconnecting"
+        ? "Connection restored. Reconnecting to your session…"
+        : "The server is unavailable. Your current session is preserved.";
+  return (
+    <div className={`connection-notice connection-notice-${status}`} role="status" aria-live="polite">
+      <span className="connection-notice-indicator" aria-hidden="true" />
+      {message}
+    </div>
+  );
+}
+
 function storedUser() {
-  const user = JSON.parse(localStorage.user || "null");
+  localStorage.removeItem("token");
+  if (localStorage.getItem("pendingLogout") === "true") return null;
+  let user;
+  try {
+    user = JSON.parse(localStorage.getItem("user") || "null");
+  } catch {
+    localStorage.removeItem("user");
+    return null;
+  }
   if (String(user?.role).toLowerCase() === "admin") {
     user.role = "System Administrator";
     localStorage.user = JSON.stringify(user);
@@ -8084,6 +8483,17 @@ function storedUser() {
 function App() {
   const [user, setUser] = useState(storedUser);
   const [authTransition, setAuthTransition] = useState("");
+  const [sessionActivityAt, setSessionActivityAt] = useState(
+    () => Number(localStorage.getItem(SESSION_ACTIVITY_STORAGE_KEY)) || 0,
+  );
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState(
+    () => localStorage.getItem("sessionExpiredNotice") || "",
+  );
+  const [connectionStatus, setConnectionStatus] = useState(
+    navigator.onLine === false ? "offline" : "online",
+  );
+  const [sessionRestoredNotice, setSessionRestoredNotice] = useState(false);
+  const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0);
   const [page, setPage] = useState(() => {
     const route = window.location.pathname.match(/^\/participants(?:\/(\d+))?\/?$/);
     return route ? (route[1] ? "participantHistory" : "participants") : "dashboard";
@@ -8096,11 +8506,193 @@ function App() {
   const [pageTransitionId, setPageTransitionId] = useState(0);
   const pageTransitionTimer = useRef(null);
   const authTransitionTimer = useRef(null);
-  useEffect(() => {
-    const expire = () => setUser(null);
-    window.addEventListener("auth-expired", expire);
-    return () => window.removeEventListener("auth-expired", expire);
+  const persistSessionActivity = useCallback((timestamp, replace = false) => {
+    const parsedTimestamp = Number(timestamp);
+    if (!Number.isFinite(parsedTimestamp) || parsedTimestamp <= 0) return 0;
+    const storedTimestamp = replace
+      ? 0
+      : Number(localStorage.getItem(SESSION_ACTIVITY_STORAGE_KEY)) || 0;
+    const effectiveTimestamp = Math.min(
+      Math.max(parsedTimestamp, storedTimestamp),
+      Date.now(),
+    );
+    localStorage.setItem(SESSION_ACTIVITY_STORAGE_KEY, String(effectiveTimestamp));
+    setSessionActivityAt(effectiveTimestamp);
+    return effectiveTimestamp;
   }, []);
+  const setExpiredNotice = useCallback((message) => {
+    if (message) localStorage.setItem("sessionExpiredNotice", message);
+    else localStorage.removeItem("sessionExpiredNotice");
+    setSessionExpiredNotice(message || "");
+  }, []);
+  useEffect(() => {
+    const expire = (event) => {
+      const localActivityAt = Number(localStorage.getItem(SESSION_ACTIVITY_STORAGE_KEY)) || 0;
+      const expiredForInactivity = event.detail?.code === "SESSION_INACTIVE" ||
+        (localActivityAt > 0 && Date.now() - localActivityAt >= SESSION_IDLE_MILLISECONDS);
+      if (expiredForInactivity) setExpiredNotice(SESSION_EXPIRED_MESSAGE);
+      localStorage.removeItem("user");
+      localStorage.removeItem(SESSION_ACTIVITY_STORAGE_KEY);
+      setSessionActivityAt(0);
+      setUser(null);
+    };
+    const syncTabSession = (event) => {
+      if (event.key === "pendingLogout" && event.newValue === "true") {
+        setUser(null);
+        return;
+      }
+      if (event.key === "sessionExpiredNotice") {
+        setSessionExpiredNotice(event.newValue || "");
+        return;
+      }
+      if (event.key === SESSION_ACTIVITY_STORAGE_KEY) {
+        setSessionActivityAt(Number(event.newValue) || 0);
+        return;
+      }
+      if (event.key !== "user") return;
+      if (!event.newValue) {
+        setUser(null);
+        return;
+      }
+      try {
+        setUser(JSON.parse(event.newValue));
+      } catch {
+        setUser(null);
+      }
+    };
+    window.addEventListener("auth-expired", expire);
+    window.addEventListener("storage", syncTabSession);
+    return () => {
+      window.removeEventListener("auth-expired", expire);
+      window.removeEventListener("storage", syncTabSession);
+    };
+  }, [setExpiredNotice]);
+  useEffect(() => {
+    clearPendingCheckins().catch((error) => {
+      console.error("Could not clear obsolete offline check-in data.", error);
+    });
+  }, []);
+  useEffect(() => {
+    let active = true;
+    let restoring = false;
+    let recoveryRequested = false;
+    let recoveryNoticeRequested = false;
+    let lastVisibilityCheck = 0;
+    const restoreSession = async (retry = false, notify = false) => {
+      if (restoring) {
+        if (retry) {
+          recoveryRequested = true;
+          recoveryNoticeRequested = recoveryNoticeRequested || notify;
+        }
+        return;
+      }
+      restoring = true;
+      const delays = retry ? [0, 500, 1500, 3500, 7500] : [0];
+      try {
+        if (localStorage.getItem("pendingLogout") === "true") {
+          try {
+            await apiCall("/auth/logout", { method: "POST" });
+            localStorage.removeItem("pendingLogout");
+            localStorage.removeItem("user");
+            if (active) setUser(null);
+          } catch (error) {
+            if (active) setConnectionStatus(error.isNetworkError ? "offline" : "unavailable");
+          }
+          return;
+        }
+        for (const delay of delays) {
+          if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+          if (!active) return;
+          if (navigator.onLine === false) {
+            setConnectionStatus("offline");
+            return;
+          }
+          try {
+            const result = await getAuthSession();
+            if (!active) return;
+            if (!result.authenticated) {
+              const localActivityAt = Number(localStorage.getItem(SESSION_ACTIVITY_STORAGE_KEY)) || 0;
+              if (localActivityAt > 0 &&
+                  Date.now() - localActivityAt >= SESSION_IDLE_MILLISECONDS) {
+                setExpiredNotice(SESSION_EXPIRED_MESSAGE);
+              }
+              localStorage.removeItem("user");
+              localStorage.removeItem(SESSION_ACTIVITY_STORAGE_KEY);
+              setSessionActivityAt(0);
+              setUser(null);
+              setConnectionStatus("online");
+              return;
+            }
+            persistSessionActivity(result.lastActivityAt);
+            setExpiredNotice("");
+            localStorage.user = JSON.stringify(result.user);
+            setUser(result.user);
+            setConnectionStatus("online");
+            if (notify) {
+              setWorkspaceRefreshKey((current) => current + 1);
+              setSessionRestoredNotice(true);
+              window.setTimeout(() => setSessionRestoredNotice(false), 3500);
+              window.dispatchEvent(new Event("session-restored"));
+            }
+            return;
+          } catch (error) {
+            if (error.status === 401) {
+              const localActivityAt = Number(localStorage.getItem(SESSION_ACTIVITY_STORAGE_KEY)) || 0;
+              if (error.code === "SESSION_INACTIVE" ||
+                  (localActivityAt > 0 && Date.now() - localActivityAt >= SESSION_IDLE_MILLISECONDS)) {
+                setExpiredNotice(SESSION_EXPIRED_MESSAGE);
+              }
+              localStorage.removeItem("user");
+              localStorage.removeItem(SESSION_ACTIVITY_STORAGE_KEY);
+              setSessionActivityAt(0);
+              setUser(null);
+              setConnectionStatus("online");
+              return;
+            }
+            const canRetry = error.isNetworkError || error.status >= 500;
+            if (!canRetry) {
+              setConnectionStatus("online");
+              return;
+            }
+          }
+        }
+        if (active) setConnectionStatus(navigator.onLine === false ? "offline" : "unavailable");
+      } finally {
+        restoring = false;
+        if (active && recoveryRequested) {
+          const shouldNotify = recoveryNoticeRequested;
+          recoveryRequested = false;
+          recoveryNoticeRequested = false;
+          window.setTimeout(() => restoreSession(true, shouldNotify), 0);
+        }
+      }
+    };
+    const handleOffline = () => setConnectionStatus("offline");
+    const handleOnline = () => {
+      setConnectionStatus("reconnecting");
+      restoreSession(true, true);
+    };
+    const handleVisibility = () => {
+      if (
+        document.visibilityState === "visible" &&
+        navigator.onLine !== false &&
+        Date.now() - lastVisibilityCheck >= 30_000
+      ) {
+        lastVisibilityCheck = Date.now();
+        restoreSession(true, false);
+      }
+    };
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
+    document.addEventListener("visibilitychange", handleVisibility);
+    if (navigator.onLine !== false) restoreSession();
+    return () => {
+      active = false;
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [persistSessionActivity, setExpiredNotice]);
   useEffect(() => {
     const syncParticipantRoute = () => {
       const route = window.location.pathname.match(/^\/participants(?:\/(\d+))?\/?$/);
@@ -8122,12 +8714,40 @@ function App() {
     clearTimeout(pageTransitionTimer.current);
     clearTimeout(authTransitionTimer.current);
   }, []);
-  const completeLogin = (authenticatedUser) => {
+  const completeLogin = (authenticatedUser, lastActivityAt) => {
     clearTimeout(authTransitionTimer.current);
+    localStorage.removeItem("pendingLogout");
+    setExpiredNotice("");
+    localStorage.removeItem(SESSION_ACTIVITY_STORAGE_KEY);
+    persistSessionActivity(lastActivityAt, true);
+    localStorage.user = JSON.stringify(authenticatedUser);
     setUser(authenticatedUser);
     setAuthTransition("Loading your workspace…");
     authTransitionTimer.current = setTimeout(() => setAuthTransition(""), 700);
   };
+  const signOut = async (dueToInactivity = false) => {
+    clearTimeout(authTransitionTimer.current);
+    if (dueToInactivity) setExpiredNotice(SESSION_EXPIRED_MESSAGE);
+    else setExpiredNotice("");
+    localStorage.setItem("pendingLogout", "true");
+    localStorage.removeItem("user");
+    localStorage.removeItem(SESSION_ACTIVITY_STORAGE_KEY);
+    setSessionActivityAt(0);
+    if (!dueToInactivity) setAuthTransition("Signing out…");
+    setUser(null);
+    try {
+      await apiCall("/auth/logout", { method: "POST" });
+      localStorage.removeItem("pendingLogout");
+    } catch (error) {
+      setConnectionStatus(error.isNetworkError ? "offline" : "unavailable");
+      console.error("Sign-out will be completed when the server is reachable.", error);
+    } finally {
+      if (!dueToInactivity) {
+        authTransitionTimer.current = setTimeout(() => setAuthTransition(""), 500);
+      }
+    }
+  };
+  const expireForInactivity = () => signOut(true);
   const navigateToPage = (nextPage) => {
     if (nextPage === page) return;
     if (page === "participantHistory") {
@@ -8155,7 +8775,12 @@ function App() {
   if (!user) {
     return (
       <>
-        <PublicHome onLogin={completeLogin} />
+        <ConnectionNotice status={connectionStatus} sessionRestored={sessionRestoredNotice} />
+        <PublicHome
+          onLogin={completeLogin}
+          sessionExpiredMessage={sessionExpiredNotice}
+          onExpiredNoticeDismiss={() => setExpiredNotice("")}
+        />
         {authTransition && <LoadingScreen message={authTransition} />}
       </>
     );
@@ -8186,7 +8811,14 @@ function App() {
     reports: <Reports user={user} />,
   };
   if (canAccessPage("account", user)) {
-    pages.account = <AccountSettings onUserUpdated={setUser} />;
+    pages.account = (
+      <AccountSettings
+        onUserUpdated={(updatedUser, lastActivityAt) => {
+          setUser(updatedUser);
+          if (lastActivityAt) persistSessionActivity(lastActivityAt, true);
+        }}
+      />
+    );
   }
   if (String(user.role).toLowerCase() === "system administrator") {
     pages.audit = <AuditHistory />;
@@ -8196,17 +8828,19 @@ function App() {
   const visiblePage = canAccessPage(page, user) ? page : availablePages[0];
   return (
     <div className="app-shell">
+      <SessionInactivityGuard
+        key={user.id}
+        user={user}
+        lastActivityAt={sessionActivityAt}
+        onExpire={expireForInactivity}
+        onServerActivity={persistSessionActivity}
+      />
+      <ConnectionNotice status={connectionStatus} sessionRestored={sessionRestoredNotice} />
       <Header
         user={user}
         page={visiblePage === "participantHistory" ? "participants" : visiblePage}
         go={navigateToPage}
-        logout={() => {
-          clearTimeout(authTransitionTimer.current);
-          setAuthTransition("Signing out…");
-          localStorage.clear();
-          setUser(null);
-          authTransitionTimer.current = setTimeout(() => setAuthTransition(""), 500);
-        }}
+        logout={() => signOut(false)}
       />
       <main className="content">
         {pageChanging && (
@@ -8219,7 +8853,7 @@ function App() {
             <span />
           </div>
         )}
-        <div key={visiblePage} className="page-view-enter">
+        <div key={`${visiblePage}-${workspaceRefreshKey}`} className="page-view-enter">
           {visiblePage ? (
             pages[visiblePage]
           ) : (

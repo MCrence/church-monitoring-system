@@ -41,6 +41,7 @@ test('accepts either child identifier for education and a resolvable event refer
 
 test('normalizes only supported statuses and parses school years and times', () => {
   assert.equal(normalizeSponsorshipStatus('Grounds for Departure'), 'GROUNDS_FOR_DEPARTURE');
+  assert.equal(normalizeSponsorshipStatus('Ground for Departure'), 'GROUNDS_FOR_DEPARTURE');
   assert.equal(normalizeSponsorshipStatus('Second Chance'), null);
   assert.equal(normalizeEventStatus('Cancelled'), 'cancelled');
   assert.equal(normalizeEventStatus('Postponed'), null);

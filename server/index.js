@@ -9,7 +9,6 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const QRCode = require('qrcode');
 const cron = require('node-cron');
@@ -25,14 +24,17 @@ const { sendEmailWithGmailApi } = require('./utils/gmail-api');
 const {
   calculateAge,
   findPotentialParticipantDuplicates,
+  normalizePhilippineDateOnly,
   normalizeParticipantName,
-  normalizePhilippineMobile,
   participantRegistrationErrors,
 } = require('./utils/participant-utils');
-const { sendSemaphoreSms } = require('./utils/semaphore-sms');
 const { buildAttendanceAnalytics, educationGroup } = require('./utils/attendance-analytics');
 const { summarizeAtRiskParticipants } = require('./utils/at-risk-summary');
 const { buildAttendanceHistory } = require('./utils/attendance-history');
+const {
+  normalizeParticipantStatuses,
+  removeRetiredSponsorshipData,
+} = require('./utils/retired-sponsorship-data');
 const {
   MAX_IMPORT_ROWS,
   inspectImportFile,
@@ -46,7 +48,6 @@ const {
   parseSchoolYear,
   validateImportHeaders,
 } = require('./utils/participant-import');
-const { validateSponsor } = require('./utils/sponsor-utils');
 const { parsePositiveAmountCents } = require('./utils/amount-utils');
 const { parsePage } = require('./utils/pagination');
 const { csvRecord } = require('./utils/report-csv');
@@ -64,6 +65,16 @@ const {
   isGoerRole,
 } = require('./utils/goer-access');
 const { getProductionSecurityErrors } = require('./utils/security-config');
+const {
+  AUTH_SESSION_ABSOLUTE_SECONDS,
+  AUTH_SESSION_IDLE_SECONDS,
+  AUTH_SESSION_COOKIE,
+  createAuthSessionToken,
+  hashAuthSessionToken,
+  readAuthSessionToken,
+  serializeAuthSessionCookie,
+  serializeClearedAuthSessionCookie,
+} = require('./utils/auth-session');
 const {
   EDUCATION_LEVELS,
   educationRecordKey,
@@ -84,6 +95,12 @@ if (productionSecurityErrors.length) {
   throw new Error(`Invalid production security configuration: ${productionSecurityErrors.join('; ')}`);
 }
 const isProduction = process.env.NODE_ENV === 'production';
+const authCookieSameSite = String(process.env.AUTH_COOKIE_SAME_SITE || 'Lax');
+if (!['Strict', 'Lax', 'None'].includes(authCookieSameSite)) {
+  throw new Error('AUTH_COOKIE_SAME_SITE must be Strict, Lax, or None');
+}
+const authCookieSecure = isProduction || authCookieSameSite === 'None';
+const clientOrigin = process.env.CLIENT_ORIGIN || 'https://localhost:5173';
 const trustProxyHops = process.env.TRUST_PROXY_HOPS === undefined
   ? 0
   : Number(process.env.TRUST_PROXY_HOPS);
@@ -111,6 +128,36 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
 });
+const authSessionsReady = (async () => {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+      token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+      user_id BIGINT UNSIGNED NOT NULL,
+      created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      last_activity_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      expires_at DATETIME(3) NOT NULL,
+      absolute_expires_at DATETIME(3) NOT NULL,
+      PRIMARY KEY (token_hash),
+      INDEX idx_auth_sessions_user_id (user_id),
+      INDEX idx_auth_sessions_expiration (expires_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  const [columns] = await pool.execute(
+    `SELECT COLUMN_NAME, DATETIME_PRECISION
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'auth_sessions'
+       AND COLUMN_NAME IN ('created_at', 'last_activity_at', 'expires_at', 'absolute_expires_at')`,
+  );
+  if (columns.some((column) => Number(column.DATETIME_PRECISION) < 3)) {
+    await pool.query(`
+      ALTER TABLE auth_sessions
+        MODIFY created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        MODIFY last_activity_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        MODIFY expires_at DATETIME(3) NOT NULL,
+        MODIFY absolute_expires_at DATETIME(3) NOT NULL
+    `);
+  }
+})();
 const eventsTableReady = (async () => {
   await pool.query(`
   CREATE TABLE IF NOT EXISTS events (
@@ -283,7 +330,7 @@ const participantProfileColumnsReady = (async () => {
        AND COLUMN_NAME IN (
          'education_level', 'grade_level', 'program_course_encrypted',
          'first_name_encrypted', 'middle_name_encrypted', 'last_name_encrypted',
-         'sponsorship_lifecycle', 'passcode_encrypted',
+         'passcode_encrypted',
          'school_name_encrypted', 'school_address_encrypted',
          'guardian_name_encrypted', 'parent_contact_encrypted',
          'sponsorship_registered_at'
@@ -297,7 +344,6 @@ const participantProfileColumnsReady = (async () => {
     ['first_name_encrypted', 'TEXT DEFAULT NULL'],
     ['middle_name_encrypted', 'TEXT DEFAULT NULL'],
     ['last_name_encrypted', 'TEXT DEFAULT NULL'],
-    ['sponsorship_lifecycle', "VARCHAR(24) NOT NULL DEFAULT 'active'"],
     ['passcode_encrypted', 'TEXT DEFAULT NULL'],
     ['school_name_encrypted', 'TEXT DEFAULT NULL'],
     ['school_address_encrypted', 'TEXT DEFAULT NULL'],
@@ -527,8 +573,14 @@ const securityRateLimitsReady = pool.query(`
     INDEX idx_security_rate_limits_window (window_started_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 `);
-const sessions = new Map();
-const revokedTokens = new Map();
+const retiredSponsorDataReady = Promise.all([participationTrackingReady, auditTableReady])
+  .then(async () => {
+    await normalizeParticipantStatuses(pool);
+    await removeRetiredSponsorshipData(pool);
+  });
+app.use((req, res, next) => {
+  retiredSponsorDataReady.then(() => next()).catch(next);
+});
 const emailChallenges = new Map();
 const uploadsDir = path.join(__dirname, 'uploads', 'qr_codes');
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -536,7 +588,14 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 app.use(helmet(isProduction
   ? { hsts: { maxAge: 31_536_000, includeSubDomains: true, preload: false } }
   : {}));
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
+app.use(cors({ origin: clientOrigin, credentials: true }));
+app.use('/api', (req, res, next) => {
+  const origin = req.get('origin');
+  if (origin && origin !== clientOrigin) {
+    return res.status(403).json({ error: 'Request origin is not allowed' });
+  }
+  next();
+});
 app.use((req, res, next) => {
   const hasReceiptUpload = req.method === 'POST' &&
     /^\/api\/sponsorship\/children\/\d+\/disbursements$/.test(req.path);
@@ -561,55 +620,119 @@ app.use(async (req, res, next) => {
   next();
 });
 
-async function authenticate(req, res, next) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
-  if (!token) return res.status(401).json({ error: 'Authentication required' });
-  let payload;
-  try {
-    payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+async function createAuthSession(userId, res, existingCookie = '') {
+  await authSessionsReady;
+  await pool.execute(
+    'DELETE FROM auth_sessions WHERE expires_at <= NOW() OR absolute_expires_at <= NOW()',
+  );
+  const previousToken = readAuthSessionToken(existingCookie);
+  if (previousToken) {
+    await pool.execute('DELETE FROM auth_sessions WHERE token_hash = ?', [
+      hashAuthSessionToken(previousToken),
+    ]);
   }
+  const token = createAuthSessionToken();
+  const lastActivityAt = await insertAuthSession(pool, userId, token);
+  res.setHeader('Set-Cookie', serializeAuthSessionCookie(token, {
+    secure: authCookieSecure,
+    sameSite: authCookieSameSite,
+    maxAgeSeconds: AUTH_SESSION_IDLE_SECONDS,
+  }));
+  return lastActivityAt;
+}
+
+async function insertAuthSession(executor, userId, token) {
+  await executor.execute(
+    `INSERT INTO auth_sessions
+       (token_hash, user_id, created_at, last_activity_at, expires_at, absolute_expires_at)
+     VALUES (?, ?, NOW(3), NOW(3),
+             DATE_ADD(NOW(3), INTERVAL ${AUTH_SESSION_IDLE_SECONDS} SECOND),
+             DATE_ADD(NOW(3), INTERVAL ${AUTH_SESSION_ABSOLUTE_SECONDS} SECOND))`,
+    [hashAuthSessionToken(token), userId],
+  );
+  const [[session]] = await executor.execute(
+    `SELECT CAST(UNIX_TIMESTAMP(last_activity_at) * 1000 AS UNSIGNED) AS last_activity_at
+     FROM auth_sessions WHERE token_hash = ? LIMIT 1`,
+    [hashAuthSessionToken(token)],
+  );
+  return Number(session.last_activity_at);
+}
+
+function clearAuthSessionCookie(res) {
+  res.setHeader('Set-Cookie', serializeClearedAuthSessionCookie({
+    secure: authCookieSecure,
+    sameSite: authCookieSameSite,
+  }));
+}
+
+async function authenticate(req, res, next) {
   try {
+    await authSessionsReady;
     await legacyRolesReady;
     await staffPermissionsReady;
-    const now = Date.now();
-    const revokedUntil = revokedTokens.get(token);
-    if (revokedUntil) {
-      if (revokedUntil > now) return res.status(401).json({ error: 'Session expired' });
-      revokedTokens.delete(token);
-    }
-    const lastActivity = sessions.get(token) || now;
-    if (now - lastActivity > 15 * 60 * 1000) {
-      sessions.delete(token);
-      return res.status(401).json({ error: 'Session expired' });
-    }
+    const token = readAuthSessionToken(req.headers.cookie);
+    if (!token) return res.status(401).json({ error: 'Authentication required' });
+    const tokenHash = hashAuthSessionToken(token);
     const [users] = await pool.execute(
-      `SELECT username, email, role, status, access_permissions, goer_education_level,
-              first_name, middle_name, last_name
-       FROM users WHERE id = ? LIMIT 1`,
-      [payload.id],
+      `SELECT s.last_activity_at,
+              CAST(UNIX_TIMESTAMP(s.last_activity_at) * 1000 AS UNSIGNED) AS last_activity_ms,
+              CEIL(TIMESTAMPDIFF(MICROSECOND, NOW(3), s.expires_at) / 1000000) AS idle_seconds,
+              CEIL(TIMESTAMPDIFF(MICROSECOND, NOW(3), s.absolute_expires_at) / 1000000) AS absolute_seconds,
+              (s.last_activity_at <= DATE_SUB(NOW(3), INTERVAL ${AUTH_SESSION_IDLE_SECONDS} SECOND)) AS inactivity_expired,
+              (s.expires_at <= NOW(3)) AS idle_expired,
+              (s.absolute_expires_at <= NOW(3)) AS absolute_expired,
+              u.id, u.username, u.email, u.role, u.status, u.access_permissions,
+              u.goer_education_level, u.first_name, u.middle_name, u.last_name
+       FROM auth_sessions s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = ?
+       LIMIT 1`,
+      [tokenHash],
     );
-    if (!users[0] || users[0].status !== 'active') {
-      sessions.delete(token);
-      return res.status(401).json({ error: 'Account is inactive or no longer exists' });
+    const user = users[0];
+    const inactivityExpired = user && (
+      Boolean(user.inactivity_expired) ||
+      Boolean(user.idle_expired)
+    );
+    if (!user || user.status !== 'active' || inactivityExpired || Boolean(user.absolute_expired)) {
+      await pool.execute('DELETE FROM auth_sessions WHERE token_hash = ?', [tokenHash]);
+      clearAuthSessionCookie(res);
+      if (inactivityExpired) {
+        return res.status(401).json({
+          error: 'Session expired due to inactivity',
+          code: 'SESSION_INACTIVE',
+        });
+      }
+      return res.status(401).json({ error: 'Session is invalid or expired', code: 'SESSION_INVALID' });
     }
-    sessions.set(token, now);
+    const maxAgeSeconds = Math.min(
+      AUTH_SESSION_IDLE_SECONDS,
+      Math.max(1, Number(user.idle_seconds) || 1),
+      Math.max(1, Number(user.absolute_seconds) || 1),
+    );
+    res.setHeader('Set-Cookie', serializeAuthSessionCookie(token, {
+      secure: authCookieSecure,
+      sameSite: authCookieSameSite,
+      maxAgeSeconds,
+    }));
     req.user = {
-      ...payload,
-      username: users[0].username,
-      role: users[0].role,
-      goerEducationLevel: users[0].goer_education_level,
-      firstName: users[0].first_name,
-      middleName: users[0].middle_name,
-      lastName: users[0].last_name,
-      permissions: permissionsForUser(users[0]),
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      goerEducationLevel: user.goer_education_level,
+      firstName: user.first_name,
+      middleName: user.middle_name,
+      lastName: user.last_name,
+      permissions: permissionsForUser(user),
     };
     req.user.username = [
-      users[0].first_name,
-      users[0].middle_name,
-      users[0].last_name,
-    ].filter(Boolean).join(' ') || users[0].username || users[0].email;
+      user.first_name,
+      user.middle_name,
+      user.last_name,
+    ].filter(Boolean).join(' ') || user.username || user.email;
+    req.authenticatedUser = accountView(user);
+    req.authSessionHash = tokenHash;
+    req.authSessionLastActivityAt = Number(user.last_activity_ms);
     next();
   } catch (error) {
     next(error);
@@ -860,14 +983,6 @@ function accountView(user) {
   };
 }
 
-function issueToken(user) {
-  return jwt.sign(
-    { id: user.id, role: user.role },
-    process.env.JWT_SECRET,
-    { expiresIn: '15m', algorithm: 'HS256' },
-  );
-}
-
 async function writeAuditLog(user, action, entityType, entityId = null, details = null, executor = pool) {
   await auditTableReady;
   await executor.execute(
@@ -888,15 +1003,7 @@ function participantView(row) {
   const result = { ...row };
   delete result.passcode_hash;
   delete result.passcode_encrypted;
-  for (const field of [
-    'letters_sent_encrypted',
-    'letters_received_encrypted',
-    'last_letter_date',
-    'monthly_allowance',
-    'available_allowance_balance',
-  ]) {
-    delete result[field];
-  }
+  delete result.sponsorship_start_date;
   const safeDecrypt = (value) => {
     if (!value) return null;
     try {
@@ -905,7 +1012,7 @@ function participantView(row) {
       return null;
     }
   };
-  for (const [field, encryptedField] of Object.entries({ fullName: 'full_name_encrypted', firstName: 'first_name_encrypted', middleName: 'middle_name_encrypted', lastName: 'last_name_encrypted', dateOfBirth: 'date_of_birth_encrypted', phone: 'phone_encrypted', address: 'address_encrypted', schoolName: 'school_name_encrypted', schoolAddress: 'school_address_encrypted', guardianName: 'guardian_name_encrypted', parentContact: 'parent_contact_encrypted', medicalNotes: 'medical_notes_encrypted', weight: 'weight_encrypted', height: 'height_encrypted', medicalConditions: 'medical_conditions_encrypted', emergencyContactName: 'emergency_contact_name_encrypted', emergencyContactPhone: 'emergency_contact_phone_encrypted', sponsorName: 'sponsor_name_encrypted', sponsorContact: 'sponsor_contact_encrypted', programAffiliation: 'program_affiliation_encrypted', programCourse: 'program_course_encrypted' })) {
+  for (const [field, encryptedField] of Object.entries({ fullName: 'full_name_encrypted', firstName: 'first_name_encrypted', middleName: 'middle_name_encrypted', lastName: 'last_name_encrypted', dateOfBirth: 'date_of_birth_encrypted', phone: 'phone_encrypted', address: 'address_encrypted', schoolName: 'school_name_encrypted', schoolAddress: 'school_address_encrypted', guardianName: 'guardian_name_encrypted', parentContact: 'parent_contact_encrypted', medicalNotes: 'medical_notes_encrypted', weight: 'weight_encrypted', height: 'height_encrypted', medicalConditions: 'medical_conditions_encrypted', emergencyContactName: 'emergency_contact_name_encrypted', emergencyContactPhone: 'emergency_contact_phone_encrypted', programCourse: 'program_course_encrypted' })) {
     result[field] = safeDecrypt(result[encryptedField]);
     delete result[encryptedField];
   }
@@ -923,6 +1030,10 @@ function participantView(row) {
   result.participantType = result.participant_type;
   result.educationLevel = result.education_level;
   result.gradeLevel = result.grade_level;
+  if (result.sponsorship_registered_at != null) {
+    result.sponsorship_registered_at = normalizePhilippineDateOnly(result.sponsorship_registered_at)
+      || result.sponsorship_registered_at;
+  }
   result.enrollmentDate = result.enrollment_date instanceof Date
     ? new Date(result.enrollment_date.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
     : result.enrollment_date;
@@ -991,27 +1102,6 @@ function educationHistoryView(row) {
     courseStrand: decrypt(row.course_strand_encrypted) || '',
     notes: decrypt(row.notes_encrypted) || '',
   };
-}
-
-function stripFinancialSponsorshipData(participant) {
-  for (const field of [
-    'sponsorName',
-    'sponsorContact',
-    'sponsor_id',
-    'sponsor_family_name_encrypted',
-    'sponsor_email_encrypted',
-    'sponsor_address_encrypted',
-    'sponsorship_type',
-    'sponsorship_start_date',
-    'sponsorship_status',
-    'sponsorship_lifecycle',
-    'communication_history_encrypted',
-    'donation_history_encrypted',
-    'sponsorship_payments_encrypted',
-  ]) {
-    delete participant[field];
-  }
-  return participant;
 }
 
 app.get('/api/health', async (req, res) => {
@@ -1098,22 +1188,20 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
     const participantFilter = isGoer
       ? `participant_type = 'sponsored_child' AND education_level = ?
          AND status = 'active'
-         AND COALESCE(participation_status, 'ACTIVE') <> 'REMOVED_FROM_SPONSORSHIP'`
+         AND COALESCE(participation_status, 'ACTIVE') <> 'INACTIVE'`
       : `participant_type = 'sponsored_child' AND status <> 'deleted'`;
     const participantParams = isGoer ? [req.user.goerEducationLevel] : [];
     const [[participantCounts]] = await pool.execute(
       `SELECT COUNT(*) AS total,
               COALESCE(SUM(
                 LOWER(TRIM(COALESCE(status, ''))) = 'active'
-                AND LOWER(TRIM(COALESCE(sponsorship_status, ''))) <> 'inactive'
                 AND NOT (participant_type = 'sponsored_child'
-                  AND UPPER(TRIM(COALESCE(participation_status, ''))) = 'REMOVED_FROM_SPONSORSHIP')
+                  AND UPPER(TRIM(COALESCE(participation_status, ''))) = 'INACTIVE')
               ), 0) AS active,
               COALESCE(SUM(
                 LOWER(TRIM(COALESCE(status, ''))) = 'inactive'
-                OR LOWER(TRIM(COALESCE(sponsorship_status, ''))) = 'inactive'
                 OR (participant_type = 'sponsored_child'
-                  AND UPPER(TRIM(COALESCE(participation_status, ''))) = 'REMOVED_FROM_SPONSORSHIP')
+                  AND UPPER(TRIM(COALESCE(participation_status, ''))) = 'INACTIVE')
               ), 0) AS inactive,
               COALESCE(SUM(LOWER(gender) IN ('male', 'm')), 0) AS male,
               COALESCE(SUM(LOWER(gender) IN ('female', 'f')), 0) AS female,
@@ -1132,7 +1220,7 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
     const groupClause = isGoer
       ? `AND p.participant_type = 'sponsored_child'
          AND p.education_level = ? AND p.status = 'active'
-         AND COALESCE(p.participation_status, 'ACTIVE') <> 'REMOVED_FROM_SPONSORSHIP'`
+         AND COALESCE(p.participation_status, 'ACTIVE') <> 'INACTIVE'`
       : `AND p.status = 'active'`;
     const attendanceParams = isGoer
       ? [req.user.goerEducationLevel, `${new Date().getFullYear()}-01-01`]
@@ -1210,7 +1298,7 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
       `SELECT c.participant_id, p.full_name_encrypted, p.participant_type,
               c.event_name, c.location, c.checked_in_at, c.status
        FROM check_in_logs c JOIN participants p ON p.id = c.participant_id
-       WHERE c.status = 'checked_in' ${isGoer ? "AND p.participant_type = 'sponsored_child' AND p.education_level = ? AND COALESCE(p.participation_status, 'ACTIVE') <> 'REMOVED_FROM_SPONSORSHIP'" : ''}
+       WHERE c.status = 'checked_in' ${isGoer ? "AND p.participant_type = 'sponsored_child' AND p.education_level = ? AND COALESCE(p.participation_status, 'ACTIVE') <> 'INACTIVE'" : ''}
        ORDER BY c.checked_in_at DESC LIMIT 8`,
       isGoer ? [req.user.goerEducationLevel] : [],
     );
@@ -1260,7 +1348,7 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
         active: children.filter((child) => child.status === 'ACTIVE').length,
         warning: children.filter((child) => child.status === 'WARNING').length,
         groundsForDeparture: children.filter((child) => child.status === 'GROUNDS_FOR_DEPARTURE').length,
-        removed: children.filter((child) => child.status === 'REMOVED_FROM_SPONSORSHIP').length,
+        removed: children.filter((child) => child.status === 'INACTIVE').length,
       };
       dashboard.followups = followups.slice(0, 8).map((child) => ({
         id: child.id,
@@ -1289,7 +1377,7 @@ app.get('/api/dashboard', authenticate, checkPermission('dashboard:view'), async
       dashboard.followupCount = groupFollowups.length;
       dashboard.groupParticipants = groupChildren
         .filter((child) => child.educationLevel === req.user.goerEducationLevel
-          && child.status !== 'REMOVED_FROM_SPONSORSHIP')
+          && child.status !== 'INACTIVE')
         .slice(0, 8)
         .map((child) => ({
           id: child.id,
@@ -1358,7 +1446,7 @@ app.get('/api/participants', authenticate, checkPermission('participants:view'),
       ? new Map((await getSponsoredParticipationSummaries()).map((child) => [Number(child.id), child]))
       : new Map();
     res.json(rows.map((row) => {
-      const participant = stripFinancialSponsorshipData(participantView(row));
+      const participant = participantView(row);
       const participation = participationById.get(Number(row.id));
       return {
         id: participant.id,
@@ -1610,7 +1698,7 @@ app.get('/api/participants/:id', authenticate, checkPermission('participants:vie
         await QRCode.toFile(qrFile, rows[0].qr_uid);
       }
     }
-    const participant = stripFinancialSponsorshipData(participantView(rows[0]));
+    const participant = participantView(rows[0]);
     delete participant.qr_uid;
     if (canViewParticipantCare(req.user) && participant.participant_type === 'sponsored_child') {
       const [monitoring] = await getSponsoredParticipationSummaries(Number(req.params.id));
@@ -1719,8 +1807,10 @@ function validImportDate(value) {
 }
 
 function importDateOnly(value) {
+  const normalized = normalizePhilippineDateOnly(value);
+  if (normalized) return normalized;
   if (value instanceof Date) {
-    return new Date(value.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    return '';
   }
   return String(value || '').slice(0, 10);
 }
@@ -1787,7 +1877,7 @@ async function validateParticipantImport(type, rows, headers, mapping) {
     `SELECT id, participant_code, participant_type, full_name_encrypted,
             first_name_encrypted, middle_name_encrypted, last_name_encrypted,
             date_of_birth_encrypted, gender, sponsorship_registered_at,
-            sponsorship_start_date, created_at, participation_status, sponsorship_status
+            sponsorship_start_date, created_at, participation_status
      FROM participants
      WHERE COALESCE(status, '') <> 'deleted'`,
   );
@@ -2011,7 +2101,7 @@ async function validateParticipantImport(type, rows, headers, mapping) {
         row.errors.push('Registration Date cannot be earlier than Date of Birth');
       }
       row.currentStatus = normalizeSponsorshipStatus(source.currentStatus);
-      if (!row.currentStatus) row.errors.push('Current Sponsorship Status must be Active, Warning, Grounds for Departure, or Inactive');
+      if (!row.currentStatus) row.errors.push('Participation Status must be Active, Warning, Ground for Departure, or Inactive');
       const suppliedAge = String(source.age || '').trim();
       if (suppliedAge && /^\d+$/.test(suppliedAge) && validImportDate(row.dateOfBirth)) {
         const calculatedAge = calculateAge(row.dateOfBirth);
@@ -2465,10 +2555,9 @@ app.post('/api/participants/import/commit', authenticate, checkImportPermission,
       if (req.body.importType === 'participants') {
         if (row.matchingParticipantId && operation === 'update') {
           const name = [row.firstName, row.middleName, row.lastName].filter(Boolean).join(' ');
-          const participationStatus = row.currentStatus === 'INACTIVE'
-            ? 'REMOVED_FROM_SPONSORSHIP' : row.currentStatus;
+          const participationStatus = row.currentStatus;
           const [[existingParticipant]] = await connection.execute(
-            `SELECT middle_name_encrypted, participation_status, sponsorship_status, status
+            `SELECT middle_name_encrypted, participation_status, status
              FROM participants WHERE id = ? LIMIT 1`,
             [row.matchingParticipantId],
           );
@@ -2482,7 +2571,6 @@ app.post('/api/participants/import/commit', authenticate, checkImportPermission,
             gender: row.gender,
             sponsorship_registered_at: row.registrationDate,
             status: row.currentStatus === 'INACTIVE' ? 'inactive' : 'active',
-            sponsorship_status: row.currentStatus === 'INACTIVE' ? 'inactive' : 'active',
             participation_status: participationStatus,
           };
           if (row.middleName) fields.middle_name_encrypted = encrypt(row.middleName);
@@ -2496,8 +2584,7 @@ app.post('/api/participants/import/commit', authenticate, checkImportPermission,
             [...Object.values(fields), row.matchingParticipantId],
           );
           const previousStatus = String(existingParticipant?.status || '').toLowerCase() === 'inactive'
-            || String(existingParticipant?.sponsorship_status || '').toLowerCase() === 'inactive'
-            || String(existingParticipant?.participation_status || '').toUpperCase() === 'REMOVED_FROM_SPONSORSHIP'
+            || String(existingParticipant?.participation_status || '').toUpperCase() === 'INACTIVE'
             ? 'INACTIVE'
             : String(existingParticipant?.participation_status || 'ACTIVE').toUpperCase();
           if (previousStatus !== row.currentStatus) {
@@ -2521,17 +2608,16 @@ app.post('/api/participants/import/commit', authenticate, checkImportPermission,
           || `FMC-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
         const credentials = participantCredentials.get(row.rowNumber);
         if (!credentials) throw new Error(`Sponsored child import credentials were not prepared for row ${row.rowNumber}`);
-        const participationStatus = row.currentStatus === 'INACTIVE'
-          ? 'REMOVED_FROM_SPONSORSHIP' : row.currentStatus;
+        const participationStatus = row.currentStatus;
         const [result] = await connection.execute(
           `INSERT INTO participants
              (id, participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted,
               last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted,
               passcode_hash, passcode_encrypted, emergency_contact_name_encrypted,
               emergency_contact_phone_encrypted, sponsorship_registered_at, status,
-              sponsorship_status, participation_status, participant_code, sponsorship_lifecycle,
+              participation_status, participant_code,
               created_at, updated_at)
-           VALUES (?, 'sponsored_child', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+           VALUES (?, 'sponsored_child', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             row.participantId || null, encrypt(name), encrypt(row.firstName), encrypt(row.middleName || null),
             encrypt(row.lastName), encrypt(row.dateOfBirth), row.gender,
@@ -2539,7 +2625,6 @@ app.post('/api/participants/import/commit', authenticate, checkImportPermission,
             credentials.passcodeHash, credentials.encryptedPasscode,
             encrypt(row.guardianName || null), encrypt(row.guardianContact || null),
             row.registrationDate, row.currentStatus === 'INACTIVE' ? 'inactive' : 'active',
-            row.currentStatus === 'INACTIVE' ? 'inactive' : 'active',
             participationStatus, generatedCode, row.registrationDate, row.registrationDate,
           ],
         );
@@ -2811,16 +2896,107 @@ app.get(
 
 app.post('/api/auth/login', loginRateLimit, async (req, res, next) => {
   try {
+    await authSessionsReady;
     await legacyRolesReady;
     await staffPermissionsReady;
     const email = String(req.body.email || '').trim().toLowerCase();
     const [rows] = await pool.execute('SELECT * FROM users WHERE email = ? LIMIT 1', [email]);
     const user = rows[0];
     if (!user || user.status !== 'active' || !(await bcrypt.compare(req.body.password || '', user.password_hash))) return res.status(401).json({ error: 'Invalid credentials' });
-    const token = issueToken(user);
-    sessions.set(token, Date.now());
+    const lastActivityAt = await createAuthSession(user.id, res, req.headers.cookie);
     await pool.execute('UPDATE users SET last_login_at = NOW() WHERE id = ?', [user.id]);
-    res.json({ token, user: accountView(user) });
+    res.json({ user: accountView(user), lastActivityAt });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/auth/session', (req, res, next) => {
+  const cookieHeader = String(req.headers.cookie || '');
+  const hasSessionCookie = cookieHeader.split(';').some(
+    (part) => part.trim().startsWith(`${AUTH_SESSION_COOKIE}=`),
+  );
+  if (!readAuthSessionToken(cookieHeader)) {
+    if (hasSessionCookie) clearAuthSessionCookie(res);
+    return res.json({ authenticated: false });
+  }
+  return authenticate(req, res, (error) => {
+    if (error) return next(error);
+    res.json({
+      authenticated: true,
+      user: req.authenticatedUser,
+      lastActivityAt: req.authSessionLastActivityAt,
+    });
+  });
+});
+
+app.post('/api/auth/refresh', authenticate, (req, res) => {
+  res.json({
+    user: req.authenticatedUser,
+    lastActivityAt: req.authSessionLastActivityAt,
+  });
+});
+
+app.post('/api/auth/activity', authenticate, async (req, res, next) => {
+  try {
+    await pool.execute(
+      `UPDATE auth_sessions
+       SET last_activity_at = NOW(3),
+           expires_at = LEAST(
+             DATE_ADD(NOW(3), INTERVAL ${AUTH_SESSION_IDLE_SECONDS} SECOND),
+             absolute_expires_at
+           )
+       WHERE token_hash = ?
+         AND last_activity_at > DATE_SUB(NOW(3), INTERVAL ${AUTH_SESSION_IDLE_SECONDS} SECOND)
+         AND expires_at > NOW(3)
+         AND absolute_expires_at > NOW(3)`,
+      [req.authSessionHash],
+    );
+    const [[session]] = await pool.execute(
+      `SELECT CAST(UNIX_TIMESTAMP(last_activity_at) * 1000 AS UNSIGNED) AS last_activity_at,
+              CEIL(TIMESTAMPDIFF(MICROSECOND, NOW(3), expires_at) / 1000000) AS idle_seconds,
+              CEIL(TIMESTAMPDIFF(MICROSECOND, NOW(3), absolute_expires_at) / 1000000) AS absolute_seconds
+       FROM auth_sessions
+       WHERE token_hash = ?
+         AND last_activity_at > DATE_SUB(NOW(3), INTERVAL ${AUTH_SESSION_IDLE_SECONDS} SECOND)
+         AND expires_at > NOW(3)
+         AND absolute_expires_at > NOW(3)
+       LIMIT 1`,
+      [req.authSessionHash],
+    );
+    if (!session) {
+      await pool.execute('DELETE FROM auth_sessions WHERE token_hash = ?', [req.authSessionHash]);
+      clearAuthSessionCookie(res);
+      return res.status(401).json({
+        error: 'Session expired due to inactivity',
+        code: 'SESSION_INACTIVE',
+      });
+    }
+    res.setHeader('Set-Cookie', serializeAuthSessionCookie(
+      readAuthSessionToken(req.headers.cookie),
+      {
+        secure: authCookieSecure,
+        sameSite: authCookieSameSite,
+        maxAgeSeconds: Math.min(
+          AUTH_SESSION_IDLE_SECONDS,
+          Math.max(1, Number(session.idle_seconds) || 1),
+          Math.max(1, Number(session.absolute_seconds) || 1),
+        ),
+      },
+    ));
+    res.json({ lastActivityAt: Number(session.last_activity_at) });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/auth/logout', async (req, res, next) => {
+  try {
+    await authSessionsReady;
+    const token = readAuthSessionToken(req.headers.cookie);
+    if (token) {
+      await pool.execute('DELETE FROM auth_sessions WHERE token_hash = ?', [
+        hashAuthSessionToken(token),
+      ]);
+    }
+    clearAuthSessionCookie(res);
+    res.status(204).end();
   } catch (error) { next(error); }
 });
 
@@ -2955,6 +3131,9 @@ app.put('/api/goers/:id/status', authenticate, checkRole(['System Administrator'
        WHERE id = ? AND LOWER(role) = 'goer'`,
       [status, req.params.id],
     );
+    if (status === 'inactive') {
+      await pool.execute('DELETE FROM auth_sessions WHERE user_id = ?', [req.params.id]);
+    }
     if (!result.affectedRows) {
       const [[account]] = await pool.execute(
         `SELECT id FROM users WHERE id = ? AND LOWER(role) = 'goer' LIMIT 1`,
@@ -3113,6 +3292,9 @@ app.put('/api/staff/:id/status', authenticate, checkRole(['System Administrator'
     } finally {
       connection.release();
     }
+    if (status === 'inactive') {
+      await pool.execute('DELETE FROM auth_sessions WHERE user_id = ?', [req.params.id]);
+    }
     await writeAuditLog(req.user, `staff.${status}`, 'user', req.params.id);
     res.json({ status });
   } catch (error) { next(error); }
@@ -3163,7 +3345,26 @@ app.put('/api/account', authenticate, checkRole(accountRoles), async (req, res, 
     }
     updates.push('updated_at = NOW()');
     values.push(account.id);
-    await pool.execute(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, values);
+    const connection = await pool.getConnection();
+    const replacementToken = createAuthSessionToken();
+    let replacementLastActivityAt;
+    try {
+      await connection.beginTransaction();
+      await connection.execute(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, values);
+      await connection.execute('DELETE FROM auth_sessions WHERE user_id = ?', [account.id]);
+      replacementLastActivityAt = await insertAuthSession(connection, account.id, replacementToken);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    res.setHeader('Set-Cookie', serializeAuthSessionCookie(replacementToken, {
+      secure: authCookieSecure,
+      sameSite: authCookieSameSite,
+      maxAgeSeconds: AUTH_SESSION_IDLE_SECONDS,
+    }));
     await writeAuditLog(
       req.user,
       'account.credentials.updated',
@@ -3178,15 +3379,7 @@ app.put('/api/account', authenticate, checkRole(accountRoles), async (req, res, 
       middle_name: names.middleName || null,
       last_name: names.lastName,
     };
-    for (const token of sessions.keys()) {
-      if (Number(jwt.decode(token)?.id) === Number(account.id)) {
-        sessions.delete(token);
-        revokedTokens.set(token, Date.now() + 15 * 60_000);
-      }
-    }
-    const token = issueToken(updatedUser);
-    sessions.set(token, Date.now());
-    res.json({ token, user: accountView(updatedUser) });
+    res.json({ user: accountView(updatedUser), lastActivityAt: replacementLastActivityAt });
   } catch (error) {
     next(error);
   }
@@ -3424,8 +3617,24 @@ app.post('/api/participants', authenticate, checkRole(['System Administrator']),
     const passcode = createParticipantPasscode();
     const participantCode = `FMC-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
     const [result] = await connection.execute(
-      'INSERT INTO participants (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted, last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted, passcode_hash, passcode_encrypted, medical_conditions_encrypted, weight_encrypted, height_encrypted, emergency_contact_name_encrypted, emergency_contact_phone_encrypted, sponsor_name_encrypted, sponsor_contact_encrypted, sponsorship_type, enrollment_date, program_affiliation_encrypted, education_level, grade_level, program_course_encrypted, school_name_encrypted, school_address_encrypted, status, participant_code, sponsorship_lifecycle, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
-      [participantType, encrypt(fullName), encrypt(firstName), encrypt(middleName || null), encrypt(lastName), encrypt(req.body.dateOfBirth), gender, encrypt(req.body.phone), encrypt(address), await bcrypt.hash(passcode, 12), encrypt(passcode), encrypt(medicalConditions || null), encrypt(weight || null), encrypt(height || null), encrypt(guardianName), encrypt(req.body.emergencyContactPhone), null, null, null, null, null, req.body.educationLevel.trim(), req.body.gradeLevel.trim(), encrypt(programCourse || null), encrypt(schoolName), encrypt(schoolAddress), 'active', participantCode, 'new'],
+      `INSERT INTO participants
+         (participant_type, full_name_encrypted, first_name_encrypted, middle_name_encrypted,
+          last_name_encrypted, date_of_birth_encrypted, gender, phone_encrypted, address_encrypted,
+          passcode_hash, passcode_encrypted, medical_conditions_encrypted, weight_encrypted,
+          height_encrypted, emergency_contact_name_encrypted, emergency_contact_phone_encrypted,
+          enrollment_date, education_level, grade_level, program_course_encrypted,
+          school_name_encrypted, school_address_encrypted, status, participant_code,
+          created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        participantType, encrypt(fullName), encrypt(firstName), encrypt(middleName || null),
+        encrypt(lastName), encrypt(req.body.dateOfBirth), gender, encrypt(req.body.phone),
+        encrypt(address), await bcrypt.hash(passcode, 12), encrypt(passcode),
+        encrypt(medicalConditions || null), encrypt(weight || null), encrypt(height || null),
+        encrypt(guardianName), encrypt(req.body.emergencyContactPhone), req.body.enrollmentDate || null,
+        req.body.educationLevel.trim(), req.body.gradeLevel.trim(), encrypt(programCourse || null),
+        encrypt(schoolName), encrypt(schoolAddress), 'active', participantCode,
+      ],
     );
     const uid = crypto.randomUUID();
     const qrPayload = encrypt(uid);
@@ -3436,34 +3645,12 @@ app.post('/api/participants', authenticate, checkRole(['System Administrator']),
     await connection.execute('SELECT RELEASE_LOCK(?)', [duplicateLockName]);
     duplicateLockName = null;
     await writeAuditLog(req.user, 'participant.created', 'participant', result.insertId);
-    let notification;
-    const guardianPhone = normalizePhilippineMobile(req.body.emergencyContactPhone);
-    if (!guardianPhone) {
-      notification = { status: 'invalid_number' };
-    } else {
-      try {
-        notification = await sendSemaphoreSms({
-          apiKey: process.env.SEMAPHORE_API_KEY,
-          senderName: process.env.SEMAPHORE_SENDER_NAME,
-          number: guardianPhone,
-          message: 'A sponsored child profile has been registered for the child in your care. Contact FMC Field Care if you have questions.',
-        });
-      } catch (error) {
-        console.error('Semaphore SMS delivery failed:', error.name || 'Unknown error');
-        notification = { status: 'failed' };
-      }
-    }
-    await writeAuditLog(req.user, 'participant.guardian_sms', 'participant', result.insertId, {
-      status: notification.status,
-      ...(notification.providerStatus ? { providerStatus: notification.providerStatus } : {}),
-    });
     res.status(201).json({
       id: result.insertId,
       participantCode,
       qrPayload,
       qrCodeImage: `/uploads/qr_codes/${filename}`,
       age: calculateAge(req.body.dateOfBirth),
-      notification,
       ...(passcode ? { passcode } : {}),
     });
   } catch (error) {
@@ -3528,11 +3715,19 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:edi
     if (schoolAddress.length > 500) {
       return res.status(400).json({ error: 'School address must be 500 characters or fewer' });
     }
-    if (
-      Object.prototype.hasOwnProperty.call(req.body, 'sponsorshipRegistrationDate') &&
-      req.body.sponsorshipRegistrationDate &&
-      !validImportDate(req.body.sponsorshipRegistrationDate)
-    ) {
+    const hasSponsorshipRegistrationDate = Object.prototype.hasOwnProperty.call(
+      req.body,
+      'sponsorshipRegistrationDate',
+    );
+    const registrationDateInput = req.body.sponsorshipRegistrationDate;
+    const sponsorshipRegistrationDate = registrationDateInput == null || registrationDateInput === ''
+      ? null
+      : normalizePhilippineDateOnly(registrationDateInput);
+    if (hasSponsorshipRegistrationDate &&
+        registrationDateInput !== null &&
+        registrationDateInput !== undefined &&
+        registrationDateInput !== '' &&
+        !sponsorshipRegistrationDate) {
       return res.status(400).json({ error: 'Enter a valid sponsorship registration date' });
     }
     if (
@@ -3571,8 +3766,8 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:edi
       school_address_encrypted: participantType === 'sponsored_child' ? encrypt(schoolAddress || null) : null,
       status: requestedStatus,
     };
-    if (Object.prototype.hasOwnProperty.call(req.body, 'sponsorshipRegistrationDate')) {
-      fields.sponsorship_registered_at = req.body.sponsorshipRegistrationDate || null;
+    if (hasSponsorshipRegistrationDate) {
+      fields.sponsorship_registered_at = sponsorshipRegistrationDate;
     }
     if (isValidParticipantPasscode(req.body.passcode)) {
       fields.passcode_hash = await bcrypt.hash(req.body.passcode, 12);
@@ -3602,7 +3797,7 @@ app.put('/api/participants/:id', authenticate, checkPermission('participants:edi
     await writeAuditLog(req.user, 'participant.updated', 'participant', req.params.id, {
       changedFields: Object.keys(req.body),
     });
-    const participant = stripFinancialSponsorshipData(participantView(rows[0]));
+    const participant = participantView(rows[0]);
     res.json({ participant });
   } catch (error) {
     if (connection && transactionActive) await connection.rollback();
@@ -3626,15 +3821,8 @@ app.delete('/api/participants/:id', authenticate, checkPermission('participants:
       transactionActive = false;
       return res.status(404).json({ error: 'Record not found' });
     }
-    await connection.execute(
-      `UPDATE sponsorship_assignment_history
-       SET ended_at = NOW(), ended_by = ?
-       WHERE participant_id = ? AND ended_at IS NULL`,
-      [req.user.id, req.params.id],
-    );
     // Revoke any active QR codes for the participant
     await connection.execute("UPDATE qr_codes SET status = 'revoked', revoked_at = NOW() WHERE participant_id = ?", [req.params.id]);
-    await connection.execute('DELETE FROM sponsorship_assignments WHERE participant_id = ?', [req.params.id]);
     await writeAuditLog(req.user, 'participant.deleted', 'participant', req.params.id, {
       deletionType: 'soft',
       historyPreserved: true,
@@ -3769,7 +3957,7 @@ app.post('/api/portal/profile', authenticate, checkPermission('portal:view'), as
       return res.status(403).json({ error: 'Sponsored Child passcode required', requiresPasscode: true });
     }
     const [attendance] = await pool.execute("SELECT event_name, location, checked_in_at, checked_out_at, status FROM check_in_logs WHERE participant_id = ? ORDER BY checked_in_at DESC LIMIT 20", [participant.id]);
-    res.json({ participant: stripFinancialSponsorshipData(participantView(participant)), attendance });
+    res.json({ participant: participantView(participant), attendance });
   } catch (error) { next(error); }
 });
 
@@ -3849,7 +4037,6 @@ async function verifyPublicSponsoredChild(qrPayload, passcode) {
   const [rows] = await pool.execute(
     `SELECT p.id, p.full_name_encrypted, p.date_of_birth_encrypted, p.gender,
             p.participant_code, p.education_level, p.grade_level, p.school_name_encrypted,
-            p.sponsorship_status, p.sponsorship_lifecycle,
             p.status, p.passcode_hash
      FROM participants p
      JOIN qr_codes q ON q.participant_id = p.id
@@ -3918,263 +4105,6 @@ app.use('/api/sponsorship/children/:id/gifts', retiredSponsorshipFeature);
 app.use('/api/sponsorship/children/:id/letters', retiredSponsorshipFeature);
 app.put('/api/sponsorship/children/:id', retiredSponsorshipFeature);
 
-app.get('/api/sponsorship/sponsors', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
-  try {
-    await sponsorshipTablesReady;
-    const [rows] = await pool.query(
-      `SELECT s.id, s.name_encrypted, s.sex, s.sponsor_type, s.created_at,
-              p.id AS participant_id, p.full_name_encrypted, p.participant_code
-       FROM sponsors s
-       LEFT JOIN sponsorship_assignments a ON a.sponsor_id = s.id
-       LEFT JOIN participants p ON p.id = a.participant_id
-       ORDER BY s.id DESC`,
-    );
-    res.json(rows.map((row) => ({
-      id: row.id,
-      familyName: row.name_encrypted ? decrypt(row.name_encrypted) : '',
-      sex: row.sex || '',
-      sponsorType: row.sponsor_type || '',
-      createdAt: row.created_at,
-      sponsoredChild: row.participant_id ? {
-        id: row.participant_id,
-        name: decrypt(row.full_name_encrypted) || 'Unnamed child',
-        participantCode: row.participant_code,
-      } : null,
-    })));
-  } catch (error) { next(error); }
-});
-
-app.post('/api/sponsorship/sponsors', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
-  try {
-    await sponsorshipTablesReady;
-    const { familyName, sex, sponsorType, errors } = validateSponsor(req.body);
-    if (Object.keys(errors).length) {
-      return res.status(400).json({ error: 'Please correct the highlighted sponsor fields.', errors });
-    }
-    const [result] = await pool.execute(
-      `INSERT INTO sponsors (name_encrypted, sex, sponsor_type, created_at, updated_at)
-       VALUES (?, ?, ?, NOW(), NOW())`,
-      [encrypt(familyName), sex, sponsorType],
-    );
-    await writeAuditLog(req.user, 'sponsor.created', 'sponsor', result.insertId, {
-      sex,
-      sponsorType,
-    });
-    res.status(201).json({
-      sponsor: {
-        id: result.insertId,
-        familyName,
-        sex,
-        sponsorType,
-      },
-    });
-  } catch (error) { next(error); }
-});
-
-async function loadChildSponsorAssignment(participantId) {
-  const [[assignedRow]] = await pool.execute(
-    `SELECT s.id, s.name_encrypted, s.sex, s.sponsor_type
-     FROM sponsorship_assignments a
-     JOIN sponsors s ON s.id = a.sponsor_id
-     WHERE a.participant_id = ?
-     LIMIT 1`,
-    [participantId],
-  );
-  const [availableRows] = await pool.execute(
-    `SELECT s.id, s.name_encrypted, s.sex, s.sponsor_type
-     FROM sponsors s
-     WHERE NOT EXISTS (
-       SELECT 1 FROM sponsorship_assignments a WHERE a.sponsor_id = s.id
-     )
-     ORDER BY s.id DESC`,
-  );
-  const formatSponsor = (row) => ({
-    id: row.id,
-    familyName: row.name_encrypted ? decrypt(row.name_encrypted) : '',
-    sex: row.sex || '',
-    sponsorType: row.sponsor_type || '',
-  });
-  return {
-    assignedSponsor: assignedRow ? formatSponsor(assignedRow) : null,
-    availableSponsors: availableRows.map(formatSponsor),
-  };
-}
-
-app.get('/api/sponsorship/children/:id/sponsor-assignment', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
-  try {
-    await Promise.all([participantProfileColumnsReady, sponsorshipTablesReady]);
-    const participantId = Number(req.params.id);
-    if (!Number.isSafeInteger(participantId) || participantId <= 0) {
-      return res.status(400).json({ error: 'Invalid sponsored child ID' });
-    }
-    const [[child]] = await pool.execute(
-      `SELECT id FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1`,
-      [participantId],
-    );
-    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
-    res.json(await loadChildSponsorAssignment(participantId));
-  } catch (error) { next(error); }
-});
-
-app.put('/api/sponsorship/children/:id/sponsor-assignment', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
-  let connection;
-  let transactionActive = false;
-  try {
-    await Promise.all([participantProfileColumnsReady, sponsorshipTablesReady]);
-    const participantId = Number(req.params.id);
-    const sponsorId = Number(req.body?.sponsorId);
-    if (!Number.isSafeInteger(participantId) || participantId <= 0) {
-      return res.status(400).json({ error: 'Invalid sponsored child ID' });
-    }
-    if (!Number.isSafeInteger(sponsorId) || sponsorId <= 0) {
-      return res.status(400).json({ error: 'Select an available sponsor' });
-    }
-    connection = await pool.getConnection();
-    await connection.beginTransaction();
-    transactionActive = true;
-    const [[child]] = await connection.execute(
-      `SELECT id FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1 FOR UPDATE`,
-      [participantId],
-    );
-    if (!child) {
-      await connection.rollback();
-      transactionActive = false;
-      return res.status(404).json({ error: 'Sponsored child not found' });
-    }
-    const [[currentAssignment]] = await connection.execute(
-      `SELECT sponsor_id FROM sponsorship_assignments WHERE participant_id = ? LIMIT 1`,
-      [participantId],
-    );
-    const sponsorIdsToLock = [...new Set([sponsorId, currentAssignment?.sponsor_id].filter(Boolean))]
-      .map(Number)
-      .sort((left, right) => left - right);
-    const [lockedSponsors] = await connection.query(
-      `SELECT id, name_encrypted FROM sponsors WHERE id IN (${sponsorIdsToLock.map(() => '?').join(',')})
-       ORDER BY id FOR UPDATE`,
-      sponsorIdsToLock,
-    );
-    if (!lockedSponsors.some((sponsor) => Number(sponsor.id) === sponsorId)) {
-      await connection.rollback();
-      transactionActive = false;
-      return res.status(404).json({ error: 'Sponsor not found' });
-    }
-    const [[existingUse]] = await connection.execute(
-      `SELECT participant_id FROM sponsorship_assignments WHERE sponsor_id = ? LIMIT 1`,
-      [sponsorId],
-    );
-    if (existingUse && Number(existingUse.participant_id) !== participantId) {
-      await connection.rollback();
-      transactionActive = false;
-      return res.status(409).json({ error: 'That sponsor is already assigned to another child' });
-    }
-    if (Number(currentAssignment?.sponsor_id) !== sponsorId) {
-      if (currentAssignment) {
-        await connection.execute(
-          `UPDATE sponsorship_assignment_history
-           SET ended_at = NOW(), ended_by = ?
-           WHERE participant_id = ? AND ended_at IS NULL`,
-          [req.user.id, participantId],
-        );
-        await connection.execute(
-          `UPDATE sponsorship_assignments
-           SET sponsor_id = ?, assigned_by = ?, assigned_at = NOW()
-           WHERE participant_id = ?`,
-          [sponsorId, req.user.id, participantId],
-        );
-      } else {
-        await connection.execute(
-          `INSERT INTO sponsorship_assignments (participant_id, sponsor_id, assigned_by, assigned_at)
-           VALUES (?, ?, ?, NOW())`,
-          [participantId, sponsorId, req.user.id],
-        );
-      }
-      const assignedSponsor = lockedSponsors.find((sponsor) => Number(sponsor.id) === sponsorId);
-      await connection.execute(
-        `INSERT INTO sponsorship_assignment_history
-           (participant_id, sponsor_id, sponsor_name_encrypted, assigned_by, started_at)
-         VALUES (?, ?, ?, ?, NOW())`,
-        [participantId, sponsorId, assignedSponsor.name_encrypted, req.user.id],
-      );
-    }
-    await connection.commit();
-    transactionActive = false;
-    if (Number(currentAssignment?.sponsor_id) !== sponsorId) {
-      await writeAuditLog(req.user, 'sponsorship.child.sponsor.assigned', 'participant', participantId, {
-        sponsorId,
-        previousSponsorId: currentAssignment?.sponsor_id || null,
-      });
-    }
-    res.json(await loadChildSponsorAssignment(participantId));
-  } catch (error) {
-    if (connection && transactionActive) await connection.rollback();
-    if (error.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ error: 'That sponsor is already assigned to another child' });
-    }
-    next(error);
-  } finally {
-    if (connection) connection.release();
-  }
-});
-
-app.delete('/api/sponsorship/children/:id/sponsor-assignment', authenticate, checkPermission('sponsorship:manage'), async (req, res, next) => {
-  let connection;
-  let transactionActive = false;
-  try {
-    await Promise.all([participantProfileColumnsReady, sponsorshipTablesReady]);
-    const participantId = Number(req.params.id);
-    if (!Number.isSafeInteger(participantId) || participantId <= 0) {
-      return res.status(400).json({ error: 'Invalid sponsored child ID' });
-    }
-    connection = await pool.getConnection();
-    await connection.beginTransaction();
-    transactionActive = true;
-    const [[child]] = await connection.execute(
-      `SELECT id FROM participants
-       WHERE id = ? AND participant_type = 'sponsored_child' AND status <> 'deleted'
-       LIMIT 1 FOR UPDATE`,
-      [participantId],
-    );
-    if (!child) {
-      await connection.rollback();
-      transactionActive = false;
-      return res.status(404).json({ error: 'Sponsored child not found' });
-    }
-    const [[assignment]] = await connection.execute(
-      `SELECT sponsor_id FROM sponsorship_assignments WHERE participant_id = ? LIMIT 1 FOR UPDATE`,
-      [participantId],
-    );
-    if (assignment) {
-      await connection.execute(
-        `UPDATE sponsorship_assignment_history
-         SET ended_at = NOW(), ended_by = ?
-         WHERE participant_id = ? AND ended_at IS NULL`,
-        [req.user.id, participantId],
-      );
-      await connection.execute(
-        `DELETE FROM sponsorship_assignments WHERE participant_id = ?`,
-        [participantId],
-      );
-    }
-    await connection.commit();
-    transactionActive = false;
-    if (assignment) {
-      await writeAuditLog(req.user, 'sponsorship.child.sponsor.unassigned', 'participant', participantId, {
-        sponsorId: assignment.sponsor_id,
-      });
-    }
-    res.json(await loadChildSponsorAssignment(participantId));
-  } catch (error) {
-    if (connection && transactionActive) await connection.rollback();
-    next(error);
-  } finally {
-    if (connection) connection.release();
-  }
-});
-
 async function getSponsoredParticipationSummaries(participantId = null, options = {}) {
   await Promise.all([
     participantProfileColumnsReady, eventsTableReady, attendanceImportColumnsReady, participationTrackingReady,
@@ -4183,8 +4113,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
   const educationFilter = options.educationLevel ? 'AND p.education_level = ?' : '';
   const activeFilter = options.activeOnly
     ? `AND p.status = 'active'
-       AND COALESCE(p.sponsorship_status, 'active') <> 'inactive'
-       AND (p.participation_status IS NULL OR p.participation_status <> 'REMOVED_FROM_SPONSORSHIP')`
+       AND p.participation_status <> 'INACTIVE'`
     : '';
   const childParams = [
     ...(participantId ? [participantId] : []),
@@ -4194,7 +4123,7 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
     `SELECT p.id, p.participant_code, p.full_name_encrypted, p.date_of_birth_encrypted,
             p.gender, p.created_at,
             COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) AS participation_start_date,
-            p.education_level, p.grade_level, p.participation_status, p.sponsorship_status,
+            p.education_level, p.grade_level, p.participation_status,
             p.status AS participant_status
      FROM participants p
      WHERE p.participant_type = 'sponsored_child'
@@ -4314,15 +4243,15 @@ async function getSponsoredParticipationSummaries(participantId = null, options 
       && secondChance.evaluationYear === tracking.currentYear.year;
     const inactiveAction = childActions.slice().reverse().find((action) => action.type === 'set_inactive') || null;
     const removed = String(row.participant_status || '').toLowerCase() === 'inactive'
-      || String(row.sponsorship_status || '').toLowerCase() === 'inactive'
-      || row.participation_status === 'REMOVED_FROM_SPONSORSHIP';
-    const currentStatus = getParticipationStatus({
-      currentYearAbsences: tracking.currentYear.absent,
-      removed,
-    });
+      || row.participation_status === 'INACTIVE';
     const postSecondChanceAbsences = secondChanceIsCurrentYear
       ? Math.max(0, tracking.currentYear.absent - secondChance.absenceCount)
       : 0;
+    const currentStatus = getParticipationStatus({
+      currentYearAbsences: tracking.currentYear.absent,
+      secondChanceAbsenceCount: secondChanceIsCurrentYear ? secondChance.absenceCount : null,
+      removed,
+    });
     return {
       id: row.id,
       name: decrypt(row.full_name_encrypted) || 'Unnamed child',
@@ -4494,7 +4423,7 @@ app.post('/api/sponsorship/children/:id/set-inactive', authenticate, checkRole(s
     if (!child || child.status !== 'GROUNDS_FOR_DEPARTURE') {
       await connection.rollback();
       transactionActive = false;
-      return res.status(409).json({ error: 'Only sponsored children at Grounds for Departure can be set to inactive' });
+      return res.status(409).json({ error: 'Only sponsored children at Ground for Departure can be set to inactive' });
     }
     await connection.execute(
       `INSERT IGNORE INTO sponsored_child_participation_history
@@ -4515,7 +4444,7 @@ app.post('/api/sponsorship/children/:id/set-inactive', authenticate, checkRole(s
       return res.status(409).json({ error: 'This sponsored child already has an inactive decision' });
     }
     const [updated] = await connection.execute(
-      `UPDATE participants SET status = 'inactive'
+      `UPDATE participants SET status = 'inactive', participation_status = 'INACTIVE'
        WHERE id = ? AND participant_type = 'sponsored_child' AND status = 'active'`,
       [participantId],
     );
@@ -4553,54 +4482,6 @@ app.post('/api/sponsorship/children/:id/set-inactive', authenticate, checkRole(s
 
 app.post('/api/sponsorship/children/:id/remove', authenticate, checkRole(['Church Administrator']), checkPermission('sponsorship:manage'), async (req, res, next) => {
   return res.status(410).json({ error: 'Use the authorized Inactive status action. Second Chance is not a separate status.' });
-  let connection;
-  try {
-    const participantId = Number(req.params.id);
-    if (!Number.isSafeInteger(participantId) || participantId < 1) {
-      return res.status(400).json({ error: 'Select a valid sponsored child' });
-    }
-    const reason = String(req.body.reason || '').trim().slice(0, 1000);
-    const [child] = await getSponsoredParticipationSummaries(participantId);
-    if (!child) return res.status(404).json({ error: 'Sponsored child not found' });
-    if (child.status !== 'SECOND_CHANCE' || !child.removalEligible) {
-      return res.status(409).json({ error: 'Removal is available after two missed monthly requirements following a second chance' });
-    }
-    connection = await pool.getConnection();
-    await connection.beginTransaction();
-    const [result] = await connection.execute(
-      `UPDATE participants SET participation_status = 'REMOVED_FROM_SPONSORSHIP'
-       WHERE id = ? AND participant_type = 'sponsored_child'
-         AND participation_status = 'SECOND_CHANCE' AND status <> 'deleted'`,
-      [participantId],
-    );
-    if (result.affectedRows !== 1) {
-      await connection.rollback();
-      return res.status(409).json({ error: 'The child status changed before removal could be completed' });
-    }
-    await connection.execute(
-      `INSERT INTO sponsored_child_participation_history
-       (participant_id, action_type, evaluation_year, previous_status, current_status, reason, absence_count, created_by)
-       VALUES (?, 'removed', ?, 'SECOND_CHANCE', 'REMOVED_FROM_SPONSORSHIP', ?, ?, ?)`,
-      [participantId, child.currentYear.year, reason || 'Failed attendance requirements after second chance', child.currentYear.absent, req.user.id],
-    );
-    await connection.commit();
-    await writeAuditLog(req.user, 'sponsorship.child.removed', 'participant', participantId, {
-      previousStatus: 'SECOND_CHANCE',
-      newStatus: 'REMOVED_FROM_SPONSORSHIP',
-      reason: reason || 'Failed attendance requirements after second chance',
-      evaluationYear: child.currentYear.year,
-      absenceCount: child.currentYear.absent,
-      secondChanceGranted: Boolean(child.secondChance),
-      postSecondChanceAbsences: child.postSecondChanceAbsences,
-    });
-    const [updatedChild] = await getSponsoredParticipationSummaries(participantId);
-    res.json(updatedChild);
-  } catch (error) {
-    if (connection) await connection.rollback();
-    next(error);
-  } finally {
-    if (connection) connection.release();
-  }
 });
 
 app.get('/api/sponsorship/children/:id/updates', authenticate, checkSponsorshipView, async (req, res, next) => {
@@ -4690,35 +4571,12 @@ app.post('/api/sponsorship/children/:id/updates', authenticate, checkSponsorship
         req.user.id,
       ],
     );
-    const guardianPhone = normalizePhilippineMobile(decrypt(child.emergency_contact_phone_encrypted));
-    let notification;
-    if (!guardianPhone) {
-      notification = { status: 'invalid_number' };
-    } else {
-      try {
-        notification = await sendSemaphoreSms({
-          apiKey: process.env.SEMAPHORE_API_KEY,
-          senderName: process.env.SEMAPHORE_SENDER_NAME,
-          number: guardianPhone,
-          message: `A new ${type === 'growth' ? 'growth measurement' : type === 'activity' ? 'activity' : 'care note'} update was recorded for your child in FMC Field Care on ${recordedOn}. Open the guardian portal to view it.`,
-        });
-      } catch (error) {
-        console.error('Guardian SMS failed for sponsored-child update', {
-          participantId: child.id,
-          updateId: result.insertId,
-          error: error.message,
-        });
-        notification = { status: 'failed' };
-      }
-    }
     await writeAuditLog(req.user, 'sponsorship.child.update.created', 'participant', child.id, {
       updateId: result.insertId,
       updateType: type,
       recordedOn,
-      guardianSmsStatus: notification.status,
-      ...(notification.providerStatus ? { guardianSmsProviderStatus: notification.providerStatus } : {}),
     });
-    res.status(201).json({ id: result.insertId, type, recordedOn, notification });
+    res.status(201).json({ id: result.insertId, type, recordedOn });
   } catch (error) { next(error); }
 });
 
@@ -4930,7 +4788,7 @@ app.post('/api/participants/:id/profile', authenticate, checkPermission('portal:
     const [qrRows] = await pool.execute('SELECT id FROM qr_codes WHERE participant_id = ? AND qr_uid = ? AND status = \'active\' LIMIT 1', [req.params.id, req.body.qrPayload]);
     const [rows] = await pool.execute('SELECT * FROM participants WHERE id = ? LIMIT 1', [req.params.id]);
     if (!qrRows[0] || !rows[0] || !rows[0].passcode_hash || !(await bcrypt.compare(req.body.passcode || '', rows[0].passcode_hash))) return res.status(403).json({ error: 'QR code and passcode verification failed' });
-    res.json({ participant: stripFinancialSponsorshipData(participantView(rows[0])) });
+    res.json({ participant: participantView(rows[0]) });
   } catch (error) { next(error); }
 });
 
@@ -4938,16 +4796,15 @@ const REPORT_EXPORT_PAGE_SIZE = 500;
 const REPORT_STATUS_LABELS = {
   ACTIVE: 'Active',
   WARNING: 'Warning',
-  GROUNDS_FOR_DEPARTURE: 'Grounds for Departure',
-  REMOVED_FROM_SPONSORSHIP: 'Inactive',
+  GROUNDS_FOR_DEPARTURE: 'Ground for Departure',
+  INACTIVE: 'Inactive',
 };
 
 function exportStatusSql(alias = 'p') {
   return `CASE
     WHEN LOWER(COALESCE(${alias}.status, '')) = 'inactive'
-      OR LOWER(COALESCE(${alias}.sponsorship_status, '')) = 'inactive'
-      OR UPPER(COALESCE(${alias}.participation_status, '')) = 'REMOVED_FROM_SPONSORSHIP'
-      THEN 'REMOVED_FROM_SPONSORSHIP'
+      OR UPPER(COALESCE(${alias}.participation_status, '')) = 'INACTIVE'
+      THEN 'INACTIVE'
     WHEN UPPER(COALESCE(${alias}.participation_status, '')) IN ('WARNING', 'GROUNDS_FOR_DEPARTURE')
       THEN UPPER(${alias}.participation_status)
     ELSE 'ACTIVE'
@@ -4967,8 +4824,8 @@ function parseExportMonth(value) {
 function parseExportStatus(value) {
   const raw = String(value || '').trim().toUpperCase();
   if (!raw || raw === 'ALL') return '';
-  return ['ACTIVE', 'WARNING', 'GROUNDS_FOR_DEPARTURE', 'INACTIVE', 'REMOVED_FROM_SPONSORSHIP'].includes(raw)
-    ? (raw === 'INACTIVE' ? 'REMOVED_FROM_SPONSORSHIP' : raw)
+  return ['ACTIVE', 'WARNING', 'GROUNDS_FOR_DEPARTURE', 'INACTIVE'].includes(raw)
+    ? raw
     : null;
 }
 
@@ -5297,7 +5154,7 @@ app.get(
           'Sponsored Child ID', 'Sponsored Child Code', 'First Name', 'Middle Name',
           'Last Name', 'Suffix', 'Gender', 'Date of Birth', 'Age',
           'Contact Information', 'Address or Location', 'Registration Date',
-          'Current Sponsorship Status', 'Guardian Name', 'Guardian Relationship',
+          'Participation Status', 'Guardian Name', 'Guardian Relationship',
           'Guardian Contact Number', 'Guardian Email',
         ],
         sql,
@@ -5722,7 +5579,7 @@ async function loadSponsoredAttendanceData({ range, educationLevel = '', status 
     pool.execute(
       `SELECT p.id, p.participant_code, p.full_name_encrypted, p.education_level, p.grade_level,
               COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) AS registration_date,
-              p.participation_status, p.sponsorship_status, p.status AS participant_status
+              p.participation_status, p.status AS participant_status
        FROM participants p
        WHERE ${participantConditions.join(' AND ')}
        ORDER BY p.id`,
@@ -5735,9 +5592,8 @@ async function loadSponsoredAttendanceData({ range, educationLevel = '', status 
     .map((row) => {
       const summary = summaryById.get(Number(row.id));
       const participationStatus = String(row.participant_status || '').toLowerCase() === 'inactive'
-        || String(row.sponsorship_status || '').toLowerCase() === 'inactive'
-        || row.participation_status === 'REMOVED_FROM_SPONSORSHIP'
-        ? 'REMOVED_FROM_SPONSORSHIP'
+        || row.participation_status === 'INACTIVE'
+        ? 'INACTIVE'
         : summary?.status || row.participation_status || 'ACTIVE';
       const removal = summary?.history?.find((action) => action.type === 'removed');
       return {
@@ -5833,7 +5689,7 @@ async function loadPredictionAttendanceData({ educationLevel = '', status = '', 
     pool.execute(
     `SELECT p.id, p.participant_code, p.full_name_encrypted, p.education_level,
             COALESCE(p.sponsorship_registered_at, p.sponsorship_start_date, p.created_at) AS registration_date,
-            p.participation_status, p.sponsorship_status, p.status AS participant_status,
+            p.participation_status, p.status AS participant_status,
             e.id AS event_id, e.name AS event_name, e.starts_at,
             CASE
               WHEN MAX(CASE WHEN c.status IN ('checked_in', 'checked_out')
@@ -5875,8 +5731,7 @@ async function loadPredictionAttendanceData({ educationLevel = '', status = '', 
     if (!childrenById.has(participantKey)) {
       const summary = summariesById.get(participantKey);
       const inactive = String(row.participant_status || '').toLowerCase() === 'inactive'
-        || String(row.sponsorship_status || '').toLowerCase() === 'inactive'
-        || row.participation_status === 'REMOVED_FROM_SPONSORSHIP';
+        || row.participation_status === 'INACTIVE';
       childrenById.set(participantKey, {
         participantId: participantKey,
         participantCode: row.participant_code || '',
@@ -5884,7 +5739,7 @@ async function loadPredictionAttendanceData({ educationLevel = '', status = '', 
         educationLevel: row.education_level || '',
         registrationDate: row.registration_date,
         participationStatus: inactive
-          ? 'REMOVED_FROM_SPONSORSHIP'
+          ? 'INACTIVE'
           : summary?.status || String(row.participation_status || 'ACTIVE').toUpperCase(),
         events: [],
       });
@@ -6350,7 +6205,7 @@ async function computeParticipantHistory(participantId) {
   const [[participant]] = await pool.execute(
     `SELECT id, participant_code, full_name_encrypted, participant_type, grade_level, education_level,
             COALESCE(sponsorship_registered_at, sponsorship_start_date, created_at) AS registration_date,
-            status AS participant_status, sponsorship_status, participation_status
+            status AS participant_status, participation_status
      FROM participants WHERE id = ? AND status <> 'deleted' LIMIT 1`,
     [participantId],
   );
@@ -6399,11 +6254,9 @@ async function computeParticipantHistory(participantId) {
     .filter((row) => row.status === 'present')
     .reduce((earliest, row) => !earliest || row.startsAt < earliest ? row.startsAt : earliest, null);
   const summaries = await getSponsoredParticipationSummaries(participantId, { recordThresholdHistory: false });
-  const currentStatus = ['INACTIVE', 'REMOVED_FROM_SPONSORSHIP']
-    .includes(String(participant.participant_status || '').toUpperCase())
-    || String(participant.sponsorship_status || '').toLowerCase() === 'inactive'
-    || participant.participation_status === 'REMOVED_FROM_SPONSORSHIP'
-    ? 'REMOVED_FROM_SPONSORSHIP'
+  const currentStatus = String(participant.participant_status || '').toUpperCase() === 'INACTIVE'
+    || participant.participation_status === 'INACTIVE'
+    ? 'INACTIVE'
     : summaries[0]?.status || participant.participation_status || 'ACTIVE';
   return {
     participant: {
@@ -6503,9 +6356,7 @@ app.get('/api/analytics/overview', authenticate, checkPermission('analytics:view
     const atRiskRecords = await computeRiskRecords('all', { range, educationLevel, status, eventId });
     const atRiskBreakdown = summarizeAtRiskParticipants(data.participants, atRiskRecords);
     const statusCounts = data.participants.reduce((counts, participant) => {
-      const key = participant.participationStatus === 'REMOVED_FROM_SPONSORSHIP'
-          ? 'INACTIVE'
-          : participant.participationStatus;
+      const key = participant.participationStatus;
       counts[key] = (counts[key] || 0) + 1;
       return counts;
     }, {});
@@ -6563,9 +6414,7 @@ app.get('/api/analytics/data', authenticate, checkPermission('analytics:view'), 
     const totalPresentRecords = data.analytics.participants
       .reduce((sum, participant) => sum + participant.present, 0);
     const statusCounts = data.participants.reduce((counts, participant) => {
-      const key = participant.participationStatus === 'REMOVED_FROM_SPONSORSHIP'
-          ? 'INACTIVE'
-          : participant.participationStatus;
+      const key = participant.participationStatus;
       counts[key] = (counts[key] || 0) + 1;
       return counts;
     }, {});
@@ -6956,6 +6805,9 @@ cron.schedule('23 * * * *', () => {
   pool.execute(
     'DELETE FROM security_rate_limits WHERE window_started_at < DATE_SUB(NOW(), INTERVAL 1 DAY)',
   ).catch((error) => console.error('Failed to clean expired security rate-limit records:', error));
+  pool.execute(
+    'DELETE FROM auth_sessions WHERE expires_at <= NOW() OR absolute_expires_at <= NOW()',
+  ).catch((error) => console.error('Failed to clean expired authentication sessions:', error));
 });
 
 const port = Number(process.env.PORT || 3000);

@@ -275,6 +275,21 @@ test("evaluates annual status thresholds at four, five, and six absences", () =>
   }), "GROUNDS_FOR_DEPARTURE");
 });
 
+test("resets participation thresholds from the second-chance absence checkpoint", () => {
+  assert.equal(getParticipationStatus({
+    currentYearAbsences: 6,
+    secondChanceAbsenceCount: 6,
+  }), "ACTIVE");
+  assert.equal(getParticipationStatus({
+    currentYearAbsences: 10,
+    secondChanceAbsenceCount: 6,
+  }), "WARNING");
+  assert.equal(getParticipationStatus({
+    currentYearAbsences: 12,
+    secondChanceAbsenceCount: 6,
+  }), "GROUNDS_FOR_DEPARTURE");
+});
+
 test("keeps inactive decisions distinct from annual attendance thresholds", () => {
-  assert.equal(getParticipationStatus({ currentYearAbsences: 8, removed: true }), "REMOVED_FROM_SPONSORSHIP");
+  assert.equal(getParticipationStatus({ currentYearAbsences: 8, removed: true }), "INACTIVE");
 });

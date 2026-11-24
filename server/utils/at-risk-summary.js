@@ -12,7 +12,7 @@ function summarizeAtRiskParticipants(participants, riskRecords) {
   for (const participant of participants) {
     const id = String(participant.id);
     const status = String(participant.participationStatus || '').toUpperCase();
-    if (['INACTIVE', 'REMOVED_FROM_SPONSORSHIP'].includes(status)) continue;
+    if (status === 'INACTIVE') continue;
     const risk = risksById.get(id);
     if (status === 'WARNING') categories.warning.add(id);
     if (status === 'GROUNDS_FOR_DEPARTURE') categories.groundsForDeparture.add(id);

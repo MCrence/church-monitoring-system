@@ -44,6 +44,7 @@ function normalizeSponsorshipStatus(value) {
   const statuses = {
     active: 'ACTIVE',
     warning: 'WARNING',
+    'ground for departure': 'GROUNDS_FOR_DEPARTURE',
     'grounds for departure': 'GROUNDS_FOR_DEPARTURE',
     inactive: 'INACTIVE',
   };
